@@ -1,0 +1,12 @@
+1) installing tools
+sudo apt install build-essential qemu-system-x86 nasm gnu-efi
+
+2) installing lwip
+1. https://savannah.nongnu.org/projects/lwip/
+2. https://download.savannah.nongnu.org/releases/lwip/
+3. https://git.savannah.gnu.org/git/lwip/lwip-contrib.git/
+4. git clone git://git.savannah.gnu.org/lwip.git
+5. git clone https://github.com/lwip-tcpip/lwip.git // the one I use
+
+3) making exectable
+chmod +x run.sh
