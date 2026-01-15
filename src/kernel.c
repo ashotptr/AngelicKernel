@@ -1,9 +1,7 @@
 #include <efi.h>
 #include <efilib.h>
 
-// ---------------------------------------------------------
 // 1. Data Structures
-// ---------------------------------------------------------
 typedef struct {
     uint16_t VendorID;
     uint16_t DeviceID;
@@ -20,60 +18,67 @@ typedef struct {
     uint32_t BAR0;      
 } __attribute__((packed)) PCI_HEADER;
 
-// ---------------------------------------------------------
-// 2. Helper Functions
-// ---------------------------------------------------------
-void print_hex(EFI_SYSTEM_TABLE *SystemTable, uint64_t n) {
+// 2. Helper: Print a single byte as Hex (e.g., "A5")
+void print_byte(EFI_SYSTEM_TABLE *SystemTable, uint8_t n) {
     CHAR16 hex[] = L"0123456789ABCDEF";
-    CHAR16 buf[19]; 
-    int i;
-    
-    buf[0] = L'0'; buf[1] = L'x';
-    for (i = 17; i >= 2; i--) {
-        buf[i] = hex[n & 0xF];
-        n >>= 4;
-    }
-    buf[18] = L'\0';
+    CHAR16 buf[3];
+    buf[0] = hex[(n >> 4) & 0xF];
+    buf[1] = hex[n & 0xF];
+    buf[2] = L'\0';
     SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
 }
 
-// ---------------------------------------------------------
-// 3. Driver Logic
-// ---------------------------------------------------------
-void init_e1000(EFI_SYSTEM_TABLE *SystemTable, uint32_t bar0) {
-    // 1. Clean the address (The last 4 bits are flags, not address)
-    //    Mask: 0xFFFFFFF0 (Keeps top bits, clears bottom 4)
-    uint64_t mem_base = bar0 & 0xFFFFFFF0;
-
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [DRIVER]  Initializing e1000 Driver...\r\n");
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [DRIVER]  Mem Base (Cleaned): ");
-    print_hex(SystemTable, mem_base);
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-    // 2. Read the STATUS Register (Offset 0x8)
-    //    We cast the address to a "volatile uint32_t pointer" so the compiler knows 
-    //    this is a hardware register, not RAM.
-    volatile uint32_t *status_reg = (volatile uint32_t *)(mem_base + 0x8);
-    uint32_t status_value = *status_reg;
-
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [HARDWARE] Status Register Value: ");
-    print_hex(SystemTable, status_value);
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-    // 3. Interpret the result
-    //    If we see 0x80080 or similar, it means "Full Duplex" + "1000mbps"
-    if (status_value == 0xFFFFFFFF) {
-         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [ERROR]   Read All-Ones. Device invalid?\r\n");
-    } else if (status_value == 0) {
-         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [ERROR]   Read Zero. Device sleeping?\r\n");
-    } else {
-         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [SUCCESS] Device is ONLINE and responding!\r\n");
+// 3. Helper: Print 32-bit Integer
+void print_hex32(EFI_SYSTEM_TABLE *SystemTable, uint32_t n) {
+    CHAR16 hex[] = L"0123456789ABCDEF";
+    CHAR16 buf[11];
+    int i;
+    buf[0] = L'0'; buf[1] = L'x';
+    for (i = 9; i >= 2; i--) {
+        buf[i] = hex[n & 0xF];
+        n >>= 4;
     }
+    buf[10] = L'\0';
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
 }
 
-// ---------------------------------------------------------
-// 4. PCI Scanner
-// ---------------------------------------------------------
+// 4. The Driver Logic
+void init_e1000(EFI_SYSTEM_TABLE *SystemTable, uint32_t bar0) {
+    uint64_t mem_base = bar0 & 0xFFFFFFF0; // Clean the flags
+    uint8_t mac[6];
+
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [DRIVER]  Initializing e1000...\r\n");
+
+    // -- READ MAC ADDRESS --
+    // The MAC is stored in two registers:
+    // RAL0 (0x5400) = Lower 4 bytes
+    // RAH0 (0x5404) = Upper 2 bytes
+    volatile uint32_t *ral = (volatile uint32_t *)(mem_base + 0x5400);
+    volatile uint32_t *rah = (volatile uint32_t *)(mem_base + 0x5404);
+
+    uint32_t mac_low = *ral;
+    uint32_t mac_high = *rah;
+
+    // Extract the bytes (Little Endian)
+    mac[0] = (uint8_t)(mac_low & 0xFF);
+    mac[1] = (uint8_t)((mac_low >> 8) & 0xFF);
+    mac[2] = (uint8_t)((mac_low >> 16) & 0xFF);
+    mac[3] = (uint8_t)((mac_low >> 24) & 0xFF);
+    mac[4] = (uint8_t)(mac_high & 0xFF);
+    mac[5] = (uint8_t)((mac_high >> 8) & 0xFF);
+
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [NETWORK] MAC Address: ");
+    
+    // Print formatted XX:XX:XX...
+    for(int i=0; i<6; i++) {
+        print_byte(SystemTable, mac[i]);
+        if(i < 5) SystemTable->ConOut->OutputString(SystemTable->ConOut, L":");
+    }
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [SUCCESS] Driver Loaded & Identified!\r\n");
+}
+
+// 5. PCI Scanner
 void scan_pci(EFI_SYSTEM_TABLE *SystemTable) {
     EFI_GUID PciIoProtocolGuid = EFI_PCI_IO_PROTOCOL_GUID;
     EFI_PCI_IO_PROTOCOL *PciIo;
@@ -99,17 +104,13 @@ void scan_pci(EFI_SYSTEM_TABLE *SystemTable) {
 
         if (PciHeader.VendorID == 0x8086 && PciHeader.DeviceID == 0x100E) {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [FOUND]   Intel e1000 Network Card!\r\n");
-            
-            // PASS THE ADDRESS TO THE DRIVER
             init_e1000(SystemTable, PciHeader.BAR0);
             return;
         }
     }
 }
 
-// ---------------------------------------------------------
-// 5. Main Entry
-// ---------------------------------------------------------
+// 6. Main Entry
 EFI_STATUS efi_main (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     (void)ImageHandle;
 
