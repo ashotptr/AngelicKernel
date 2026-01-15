@@ -44,7 +44,7 @@ uint32_t rx_tail_index = 0;
 uint8_t my_mac[6]; 
 
 // ---------------------------------------------------------
-// 2. Helpers (Swap & Print)
+// 2. Helpers
 // ---------------------------------------------------------
 uint16_t swap16(uint16_t val) { return (val << 8) | (val >> 8); }
 
@@ -57,16 +57,8 @@ void print_byte(EFI_SYSTEM_TABLE *SystemTable, uint8_t n) {
     SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
 }
 
-void print_hex(EFI_SYSTEM_TABLE *SystemTable, uint32_t n) {
-    CHAR16 hex[] = L"0123456789ABCDEF";
-    CHAR16 buf[9];
-    for(int i=7; i>=0; i--) { buf[i] = hex[n & 0xF]; n >>= 4; }
-    buf[8] = L'\0';
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
-}
-
 // ---------------------------------------------------------
-// 3. Memory Allocator (Aligned to 4KB)
+// 3. Aligned Memory Allocator (CRITICAL FIX)
 // ---------------------------------------------------------
 void * allocate_aligned_pages(EFI_SYSTEM_TABLE *ST, UINTN pages) {
     EFI_PHYSICAL_ADDRESS phys;
@@ -78,7 +70,6 @@ void * allocate_aligned_pages(EFI_SYSTEM_TABLE *ST, UINTN pages) {
 // 4. Driver Logic
 // ---------------------------------------------------------
 void init_tx(EFI_SYSTEM_TABLE *SystemTable) {
-    // Allocation Fix: Use Pages (4KB aligned)
     tx_ring_base = allocate_aligned_pages(SystemTable, 1);
     SystemTable->BootServices->SetMem(tx_ring_base, 4096, 0);
 
@@ -96,10 +87,8 @@ void init_tx(EFI_SYSTEM_TABLE *SystemTable) {
 }
 
 void init_rx(EFI_SYSTEM_TABLE *SystemTable) {
-    // Allocation Fix: Use Pages (4KB aligned)
     rx_ring_base = allocate_aligned_pages(SystemTable, 1);
     SystemTable->BootServices->SetMem(rx_ring_base, 4096, 0);
-    // Buffers: 32 * 2048 = 65536 bytes = 16 pages
     rx_buffer_pool = allocate_aligned_pages(SystemTable, 16);
 
     for(int i=0; i<32; i++) {
@@ -117,19 +106,13 @@ void init_rx(EFI_SYSTEM_TABLE *SystemTable) {
     *rdbal = (uint32_t)(uint64_t)rx_ring_base;
     *rdbah = (uint32_t)((uint64_t)rx_ring_base >> 32);
     *rdlen = 512; 
+    *rdh = 0; *rdt = 0; 
+
+    // ENABLE REAL MODE (No Loopback Bit)
+    // EN | UPE | MPE | BAM | SECRC
+    *rctl = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 15) | (1 << 26);
     
-    // SETUP SEQUENCE
-    *rdh = 0; 
-    *rdt = 0; // Keep closed initially
-    
-    // Enable (Bit 1), UPE (Bit 3), MPE (Bit 4), BAM (Bit 15), SECRC (Bit 26)
-    // PLUS: LOOPBACK MODE (Bit 6) -> 0x40
-    *rctl = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 15) | (1 << 26) | (1 << 6); // <--- LOOPBACK ENABLED
-    
-    // Tiny delay
     for(volatile int k=0; k<10000; k++) {}
-    
-    // Open gate
     *rdt = 31; 
 }
 
@@ -146,7 +129,7 @@ void send_packet(EFI_SYSTEM_TABLE *SystemTable, void *data, uint16_t len) {
 
 void send_arp_request(EFI_SYSTEM_TABLE *SystemTable) {
     static uint8_t buffer[128];
-    SystemTable->BootServices->SetMem(buffer, 128, 0); // Zero it
+    SystemTable->BootServices->SetMem(buffer, 128, 0);
 
     ethernet_frame_t *eth = (ethernet_frame_t *)buffer;
     arp_packet_t *arp = (arp_packet_t *)(buffer + sizeof(ethernet_frame_t));
@@ -165,44 +148,38 @@ void send_arp_request(EFI_SYSTEM_TABLE *SystemTable) {
     for(int i=0; i<6; i++) arp->target_mac[i] = 0x00;
     arp->target_ip = 0x0202000A; // 10.0.2.2
 
-    // Send 60 bytes
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L".");
     send_packet(SystemTable, buffer, 60);
 }
 
 void check_for_packets(EFI_SYSTEM_TABLE *SystemTable) {
     volatile struct e1000_rx_desc *desc = &rx_ring_base[rx_tail_index];
     
-    // Check Status Bit 0 (Descriptor Done)
     if ((desc->status & 0x1)) {
         uint8_t *pkt = (uint8_t *)(rx_buffer_pool + (rx_tail_index * 2048));
         ethernet_frame_t *eth = (ethernet_frame_t *)pkt;
-        
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [RX]      PACKET DETECTED! Type: ");
-        print_hex(SystemTable, swap16(eth->type));
-        
-        if (swap16(eth->type) == 0x0806) {
-             SystemTable->ConOut->OutputString(SystemTable->ConOut, L" (ARP)");
-             // We received our own Loopback Packet!
-             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [SUCCESS] LOOPBACK TEST PASSED! DRIVER IS FIXED!\r\n");
+        uint16_t type = swap16(eth->type);
+
+        if (type == 0x0806) {
+            arp_packet_t *arp = (arp_packet_t *)(pkt + sizeof(ethernet_frame_t));
+            uint16_t opcode = swap16(arp->opcode);
+            
+            // Opcode 2 = REPLY
+            if (opcode == 2) {
+                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [SUCCESS] REAL NETWORK REPLY! Gateway is at: ");
+                for(int i=0; i<6; i++) {
+                    print_byte(SystemTable, arp->sender_mac[i]);
+                    if(i<5) SystemTable->ConOut->OutputString(SystemTable->ConOut, L":");
+                }
+                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+            }
         }
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
 
         desc->status = 0;
         rx_tail_index = (rx_tail_index + 1) % 32;
         volatile uint32_t *rdt = (volatile uint32_t *)(mmio_base_global + 0x2818);
         *rdt = (rx_tail_index + 31) % 32; 
     }
-}
-
-void print_stats(EFI_SYSTEM_TABLE *SystemTable) {
-    volatile uint32_t *tdh = (volatile uint32_t *)(mmio_base_global + 0x3810);
-    volatile uint32_t *tdt = (volatile uint32_t *)(mmio_base_global + 0x3818);
-    volatile uint32_t *rdh = (volatile uint32_t *)(mmio_base_global + 0x2810);
-    volatile uint32_t *rdt = (volatile uint32_t *)(mmio_base_global + 0x2818);
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r  [DEBUG] TX Head:");
-    print_hex(SystemTable, *tdh);
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L" RX Head:");
-    print_hex(SystemTable, *rdh); // If this moves from 0, we won.
 }
 
 EFI_STATUS efi_main (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
@@ -231,7 +208,6 @@ EFI_STATUS efi_main (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
             mmio_base_global = (uint64_t)(PciHeader.BAR0 & 0xFFFFFFF0);
             
-            // Disable Interrupts, Get MAC
             volatile uint32_t *imc = (volatile uint32_t *)(mmio_base_global + 0x00D8);
             *imc = 0xFFFFFFFF;
             volatile uint32_t *ral = (volatile uint32_t *)(mmio_base_global + 0x5400);
@@ -240,20 +216,19 @@ EFI_STATUS efi_main (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
             my_mac[0] = low & 0xFF; my_mac[1] = (low >> 8) & 0xFF;
             my_mac[2] = (low >> 16) & 0xFF; my_mac[3] = (low >> 24) & 0xFF;
             my_mac[4] = high & 0xFF; my_mac[5] = (high >> 8) & 0xFF;
-
             *rah |= 0x80000000;
+
             init_tx(SystemTable);
-            init_rx(SystemTable); // Now enables LOOPBACK
+            init_rx(SystemTable);
         }
     }
 
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [KERNEL]  Polling... (Loopback Mode) \r\n");
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [KERNEL]  Polling for Router Response... \r\n");
 
     uint64_t timer = 0;
     while(1) { 
         check_for_packets(SystemTable);
         timer++;
-        if (timer % 50000 == 0) print_stats(SystemTable);
         if (timer % 5000000 == 0) send_arp_request(SystemTable);
         __asm__ __volatile__("pause");
     }
