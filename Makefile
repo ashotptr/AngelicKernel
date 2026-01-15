@@ -9,14 +9,12 @@ EFIINC = /usr/include/efi
 EFILIB = /usr/lib
 LIB = /usr/lib
 
-# Compiler Flags (Critical for Bare Metal)
-# -fpic: Position Independent Code (UEFI moves us around in RAM)
-# -fno-stack-protector: We don't have a standard library to handle stack crashes
-# -mno-red-zone: Disable the "Red Zone" optimization which breaks interrupts
+# Compiler Flags
+# Added -DGNU_EFI_USE_MS_ABI to fix the calling convention crash
 CFLAGS = -I. -I./include -I./lwip/src/include \
          -I$(EFIINC) -I$(EFIINC)/x86_64 -I$(EFIINC)/protocol \
          -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
-         -Wall -Wextra -DEFI_FUNCTION_WRAPPER
+         -Wall -Wextra -DEFI_FUNCTION_WRAPPER -DGNU_EFI_USE_MS_ABI
 
 # Linker Flags
 LDFLAGS = -nostdlib -znocombreloc -shared -Bsymbolic -L $(EFILIB) -L $(LIB) \
