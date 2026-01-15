@@ -17,13 +17,12 @@ typedef struct {
     uint8_t  LatencyTimer;
     uint8_t  HeaderType;
     uint8_t  BIST;
-    uint32_t BAR0;      // Base Address Register 0 (The Memory Address)
+    uint32_t BAR0;      
 } __attribute__((packed)) PCI_HEADER;
 
 // ---------------------------------------------------------
 // 2. Helper Functions
 // ---------------------------------------------------------
-// Simple helper to print 64-bit Hex values (since we don't have printf)
 void print_hex(EFI_SYSTEM_TABLE *SystemTable, uint64_t n) {
     CHAR16 hex[] = L"0123456789ABCDEF";
     CHAR16 buf[19]; 
@@ -39,7 +38,41 @@ void print_hex(EFI_SYSTEM_TABLE *SystemTable, uint64_t n) {
 }
 
 // ---------------------------------------------------------
-// 3. The PCI Scanner
+// 3. Driver Logic
+// ---------------------------------------------------------
+void init_e1000(EFI_SYSTEM_TABLE *SystemTable, uint32_t bar0) {
+    // 1. Clean the address (The last 4 bits are flags, not address)
+    //    Mask: 0xFFFFFFF0 (Keeps top bits, clears bottom 4)
+    uint64_t mem_base = bar0 & 0xFFFFFFF0;
+
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [DRIVER]  Initializing e1000 Driver...\r\n");
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [DRIVER]  Mem Base (Cleaned): ");
+    print_hex(SystemTable, mem_base);
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+    // 2. Read the STATUS Register (Offset 0x8)
+    //    We cast the address to a "volatile uint32_t pointer" so the compiler knows 
+    //    this is a hardware register, not RAM.
+    volatile uint32_t *status_reg = (volatile uint32_t *)(mem_base + 0x8);
+    uint32_t status_value = *status_reg;
+
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [HARDWARE] Status Register Value: ");
+    print_hex(SystemTable, status_value);
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+    // 3. Interpret the result
+    //    If we see 0x80080 or similar, it means "Full Duplex" + "1000mbps"
+    if (status_value == 0xFFFFFFFF) {
+         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [ERROR]   Read All-Ones. Device invalid?\r\n");
+    } else if (status_value == 0) {
+         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [ERROR]   Read Zero. Device sleeping?\r\n");
+    } else {
+         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [SUCCESS] Device is ONLINE and responding!\r\n");
+    }
+}
+
+// ---------------------------------------------------------
+// 4. PCI Scanner
 // ---------------------------------------------------------
 void scan_pci(EFI_SYSTEM_TABLE *SystemTable) {
     EFI_GUID PciIoProtocolGuid = EFI_PCI_IO_PROTOCOL_GUID;
@@ -52,52 +85,38 @@ void scan_pci(EFI_SYSTEM_TABLE *SystemTable) {
 
     SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [SCAN]    Scanning PCI Bus...\r\n");
 
-    // Ask UEFI for the list of PCI devices
     Status = SystemTable->BootServices->LocateHandleBuffer(
         ByProtocol, &PciIoProtocolGuid, NULL, &HandleCount, &HandleBuffer
     );
 
-    if (EFI_ERROR(Status)) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [ERROR]   PCI Bus Not Found!\r\n");
-        return;
-    }
+    if (EFI_ERROR(Status)) return;
 
     for (i = 0; i < HandleCount; i++) {
         Status = SystemTable->BootServices->HandleProtocol(
             HandleBuffer[i], &PciIoProtocolGuid, (void **)&PciIo
         );
-
-        // Read the config space
         PciIo->Pci.Read(PciIo, EfiPciIoWidthUint32, 0, sizeof(PCI_HEADER)/4, &PciHeader);
 
-        // Check for Intel (0x8086) and e1000 (0x100E)
         if (PciHeader.VendorID == 0x8086 && PciHeader.DeviceID == 0x100E) {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [FOUND]   Intel e1000 Network Card!\r\n");
             
-            // Print the physical memory address where the card lives
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [INFO]    MMIO Base Address: ");
-            print_hex(SystemTable, PciHeader.BAR0); 
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-            
-            // Save this address! We will need it to make the card do things.
+            // PASS THE ADDRESS TO THE DRIVER
+            init_e1000(SystemTable, PciHeader.BAR0);
             return;
         }
     }
-
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [WARNING] No Network Card Found.\r\n");
 }
 
 // ---------------------------------------------------------
-// 4. Main Entry Point
+// 5. Main Entry
 // ---------------------------------------------------------
 EFI_STATUS efi_main (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     (void)ImageHandle;
 
     SystemTable->ConOut->Reset(SystemTable->ConOut, 1);
     SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [SUCCESS] Kernel Booted Successfully! \r\n");
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [KERNEL]  XMPP Unikernel Booting... \r\n");
 
-    // CRITICAL: Actually call the function this time!
     scan_pci(SystemTable); 
 
     while(1) { __asm__ __volatile__("hlt"); }
