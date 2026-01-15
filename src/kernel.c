@@ -17,25 +17,30 @@ typedef struct {
 } __attribute__((packed)) arp_packet_t;
 
 typedef struct {
-    uint8_t  version_ihl;
-    uint8_t  tos;
-    uint16_t total_length;
-    uint16_t id;
-    uint16_t flags_frag;
-    uint8_t  ttl;
-    uint8_t  protocol;    
-    uint16_t checksum;
-    uint32_t src_ip;
-    uint32_t dest_ip;
+    uint8_t  version_ihl; uint8_t  tos; uint16_t total_length;
+    uint16_t id; uint16_t flags_frag; uint8_t  ttl;
+    uint8_t  protocol; uint16_t checksum;
+    uint32_t src_ip; uint32_t dest_ip;
 } __attribute__((packed)) ipv4_header_t;
 
 typedef struct {
-    uint16_t src_port;
-    uint16_t dest_port;
-    uint16_t length;
+    uint16_t src_port; uint16_t dest_port;
+    uint32_t seq_num;  uint32_t ack_num;
+    uint8_t  data_offset; // Also reserved/NS
+    uint8_t  flags;       // FIN, SYN, RST, PSH, ACK, URG
+    uint16_t window;
     uint16_t checksum;
-} __attribute__((packed)) udp_header_t;
+    uint16_t urgent_pointer;
+} __attribute__((packed)) tcp_header_t;
 
+// Pseudo Header for TCP Checksum Calculation
+typedef struct {
+    uint32_t src_ip; uint32_t dest_ip;
+    uint8_t  reserved; uint8_t  protocol;
+    uint16_t tcp_length;
+} __attribute__((packed)) pseudo_header_t;
+
+// Hardware Descriptors
 struct e1000_tx_desc {
     uint64_t addr; uint16_t length; uint8_t cso; uint8_t cmd;
     uint8_t status; uint8_t css; uint16_t special;
@@ -54,22 +59,35 @@ typedef struct {
     uint32_t BAR0;      
 } __attribute__((packed)) PCI_HEADER;
 
-// GLOBALS
+// ---------------------------------------------------------
+// 2. Globals & State
+// ---------------------------------------------------------
 uint64_t mmio_base_global = 0; 
 struct e1000_tx_desc *tx_ring_base;
 struct e1000_rx_desc *rx_ring_base;
 uint8_t *rx_buffer_pool; 
 uint32_t tx_tail_index = 0;
 uint32_t rx_tail_index = 0;
-
 uint8_t my_mac[6]; 
 uint8_t gateway_mac[6] = {0}; 
-int gateway_found = 0;
+
+// TCP State
+#define STATE_NONE 0
+#define STATE_ARP_OK 1
+#define STATE_SYN_SENT 2
+#define STATE_ESTABLISHED 3
+
+int tcp_state = STATE_NONE;
+uint32_t my_seq_num = 1000;
+uint32_t server_seq_num = 0;
+uint16_t local_port = 45678;
+uint16_t dest_port = 5222; // XMPP Client Port
 
 // ---------------------------------------------------------
-// 2. Helpers
+// 3. Helpers
 // ---------------------------------------------------------
 uint16_t swap16(uint16_t val) { return (val << 8) | (val >> 8); }
+uint32_t swap32(uint32_t val) { return ((val>>24)&0xff) | ((val<<8)&0xff0000) | ((val>>8)&0xff00) | ((val<<24)&0xff000000); }
 
 uint16_t calculate_checksum(void *data, int len) {
     uint32_t sum = 0;
@@ -82,10 +100,7 @@ uint16_t calculate_checksum(void *data, int len) {
 
 void print_byte(EFI_SYSTEM_TABLE *SystemTable, uint8_t n) {
     CHAR16 hex[] = L"0123456789ABCDEF";
-    CHAR16 buf[3];
-    buf[0] = hex[(n >> 4) & 0xF];
-    buf[1] = hex[n & 0xF];
-    buf[2] = L'\0';
+    CHAR16 buf[3]; buf[0] = hex[(n >> 4) & 0xF]; buf[1] = hex[n & 0xF]; buf[2] = L'\0';
     SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
 }
 
@@ -96,7 +111,7 @@ void * allocate_aligned_pages(EFI_SYSTEM_TABLE *ST, UINTN pages) {
 }
 
 // ---------------------------------------------------------
-// 3. Driver Logic
+// 4. Driver Logic (e1000)
 // ---------------------------------------------------------
 void init_tx(EFI_SYSTEM_TABLE *SystemTable) {
     tx_ring_base = allocate_aligned_pages(SystemTable, 1);
@@ -107,8 +122,7 @@ void init_tx(EFI_SYSTEM_TABLE *SystemTable) {
     volatile uint32_t *tdh   = (volatile uint32_t *)(mmio_base_global + 0x3810); 
     volatile uint32_t *tdt   = (volatile uint32_t *)(mmio_base_global + 0x3818); 
     volatile uint32_t *tctl  = (volatile uint32_t *)(mmio_base_global + 0x0400); 
-    *tdbal = (uint32_t)(uint64_t)tx_ring_base;
-    *tdbah = (uint32_t)((uint64_t)tx_ring_base >> 32);
+    *tdbal = (uint32_t)(uint64_t)tx_ring_base; *tdbah = (uint32_t)((uint64_t)tx_ring_base >> 32);
     *tdlen = 512; *tdh = 0; *tdt = 0; 
     *tctl = (1 << 1) | (1 << 3) | (15 << 4) | (64 << 12);
 }
@@ -127,8 +141,7 @@ void init_rx(EFI_SYSTEM_TABLE *SystemTable) {
     volatile uint32_t *rdh   = (volatile uint32_t *)(mmio_base_global + 0x2810);
     volatile uint32_t *rdt   = (volatile uint32_t *)(mmio_base_global + 0x2818);
     volatile uint32_t *rctl  = (volatile uint32_t *)(mmio_base_global + 0x0100);
-    *rdbal = (uint32_t)(uint64_t)rx_ring_base;
-    *rdbah = (uint32_t)((uint64_t)rx_ring_base >> 32);
+    *rdbal = (uint32_t)(uint64_t)rx_ring_base; *rdbah = (uint32_t)((uint64_t)rx_ring_base >> 32);
     *rdlen = 512; *rdh = 0; *rdt = 0; 
     *rctl = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 15) | (1 << 26);
     for(volatile int k=0; k<10000; k++) {}
@@ -138,8 +151,7 @@ void init_rx(EFI_SYSTEM_TABLE *SystemTable) {
 void send_packet(EFI_SYSTEM_TABLE *SystemTable, void *data, uint16_t len) {
     (void)SystemTable;
     struct e1000_tx_desc *desc = &tx_ring_base[tx_tail_index];
-    desc->addr = (uint64_t)data;
-    desc->length = len;
+    desc->addr = (uint64_t)data; desc->length = len;
     desc->cmd = 0x0B; desc->status = 0;
     tx_tail_index = (tx_tail_index + 1) % 32;
     volatile uint32_t *tdt = (volatile uint32_t *)(mmio_base_global + 0x3818);
@@ -147,9 +159,8 @@ void send_packet(EFI_SYSTEM_TABLE *SystemTable, void *data, uint16_t len) {
 }
 
 // ---------------------------------------------------------
-// 4. Protocols
+// 5. Networking Logic
 // ---------------------------------------------------------
-
 void send_arp_request(EFI_SYSTEM_TABLE *SystemTable) {
     static uint8_t buffer[128];
     SystemTable->BootServices->SetMem(buffer, 128, 0);
@@ -159,35 +170,26 @@ void send_arp_request(EFI_SYSTEM_TABLE *SystemTable) {
     for(int i=0; i<6; i++) eth->dest[i] = 0xFF;
     for(int i=0; i<6; i++) eth->src[i] = my_mac[i];
     eth->type = swap16(0x0806);
-
-    arp->hw_type = swap16(1);
-    arp->proto_type = swap16(0x0800);
-    arp->hw_len = 6; arp->proto_len = 4;
-    arp->opcode = swap16(1);
-
+    arp->hw_type = swap16(1); arp->proto_type = swap16(0x0800);
+    arp->hw_len = 6; arp->proto_len = 4; arp->opcode = swap16(1);
     for(int i=0; i<6; i++) arp->sender_mac[i] = my_mac[i];
     arp->sender_ip = 0x0F02000A; // 10.0.2.15
     for(int i=0; i<6; i++) arp->target_mac[i] = 0x00;
     arp->target_ip = 0x0202000A; // 10.0.2.2
-
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L".");
     send_packet(SystemTable, buffer, 60);
 }
 
-void send_udp(EFI_SYSTEM_TABLE *SystemTable, char *payload) {
-    static uint8_t buffer[256];
-    SystemTable->BootServices->SetMem(buffer, 256, 0);
+void send_tcp_packet(EFI_SYSTEM_TABLE *SystemTable, uint8_t flags, char *payload, int payload_len) {
+    static uint8_t buffer[512];
+    SystemTable->BootServices->SetMem(buffer, 512, 0);
 
     ethernet_frame_t *eth = (ethernet_frame_t *)buffer;
     ipv4_header_t *ip = (ipv4_header_t *)(buffer + sizeof(ethernet_frame_t));
-    udp_header_t *udp = (udp_header_t *)(buffer + sizeof(ethernet_frame_t) + sizeof(ipv4_header_t));
-    char *data = (char *)(buffer + sizeof(ethernet_frame_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t));
+    tcp_header_t *tcp = (tcp_header_t *)(buffer + sizeof(ethernet_frame_t) + sizeof(ipv4_header_t));
+    char *data = (char *)(buffer + sizeof(ethernet_frame_t) + sizeof(ipv4_header_t) + sizeof(tcp_header_t));
 
-    int payload_len = 0;
-    while(payload[payload_len] != 0) {
-        data[payload_len] = payload[payload_len];
-        payload_len++;
-    }
+    // Copy Payload
+    for(int i=0; i<payload_len; i++) data[i] = payload[i];
 
     // Ethernet
     for(int i=0; i<6; i++) eth->dest[i] = gateway_mac[i];
@@ -195,23 +197,41 @@ void send_udp(EFI_SYSTEM_TABLE *SystemTable, char *payload) {
     eth->type = swap16(0x0800);
 
     // IP
+    uint16_t tcp_total_len = sizeof(tcp_header_t) + payload_len;
     ip->version_ihl = 0x45;
-    ip->total_length = swap16(sizeof(ipv4_header_t) + sizeof(udp_header_t) + payload_len);
-    ip->id = swap16(0x1234);
-    ip->ttl = 64;
-    ip->protocol = 17; // UDP
-    ip->src_ip = 0x0F02000A; // 10.0.2.15
-    ip->dest_ip = 0x0202000A; // 10.0.2.2 (Linux Host)
+    ip->total_length = swap16(sizeof(ipv4_header_t) + tcp_total_len);
+    ip->id = swap16(0); ip->ttl = 64;
+    ip->protocol = 6; // TCP
+    ip->src_ip = 0x0F02000A; ip->dest_ip = 0x0202000A;
     ip->checksum = calculate_checksum(ip, sizeof(ipv4_header_t));
 
-    // UDP
-    udp->src_port = swap16(5555); // From Port
-    udp->dest_port = swap16(12345); // To Linux Port
-    udp->length = swap16(sizeof(udp_header_t) + payload_len);
-    udp->checksum = 0; // Optional in IPv4
+    // TCP
+    tcp->src_port = swap16(local_port);
+    tcp->dest_port = swap16(dest_port);
+    tcp->seq_num = swap32(my_seq_num);
+    tcp->ack_num = swap32(server_seq_num);
+    tcp->data_offset = 0x50; // 5 words = 20 bytes header
+    tcp->flags = flags;
+    tcp->window = swap16(1024);
+    tcp->checksum = 0;
 
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L" [UDP-SEND] ");
-    send_packet(SystemTable, buffer, sizeof(ethernet_frame_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + payload_len);
+    // TCP Checksum Calculation (Virtual Header)
+    uint8_t pseudo_buf[512];
+    pseudo_header_t *ph = (pseudo_header_t *)pseudo_buf;
+    ph->src_ip = ip->src_ip;
+    ph->dest_ip = ip->dest_ip;
+    ph->reserved = 0;
+    ph->protocol = 6;
+    ph->tcp_length = swap16(tcp_total_len);
+    
+    // Copy TCP header and data to pseudo buffer for checksum
+    void *dest_ptr = (void *)(pseudo_buf + sizeof(pseudo_header_t));
+    void *src_ptr = (void *)tcp;
+    SystemTable->BootServices->CopyMem(dest_ptr, src_ptr, tcp_total_len);
+
+    tcp->checksum = calculate_checksum(pseudo_buf, sizeof(pseudo_header_t) + tcp_total_len);
+
+    send_packet(SystemTable, buffer, sizeof(ethernet_frame_t) + sizeof(ipv4_header_t) + tcp_total_len);
 }
 
 void check_for_packets(EFI_SYSTEM_TABLE *SystemTable) {
@@ -220,15 +240,40 @@ void check_for_packets(EFI_SYSTEM_TABLE *SystemTable) {
         uint8_t *pkt = (uint8_t *)(rx_buffer_pool + (rx_tail_index * 2048));
         ethernet_frame_t *eth = (ethernet_frame_t *)pkt;
 
+        // ARP Handler
         if (swap16(eth->type) == 0x0806) {
             arp_packet_t *arp = (arp_packet_t *)(pkt + sizeof(ethernet_frame_t));
-            if (swap16(arp->opcode) == 2 && !gateway_found) {
-                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [ARP]     Gateway Found!\r\n");
+            if (swap16(arp->opcode) == 2 && tcp_state == STATE_NONE) {
+                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [ARP]     Gateway MAC Found.");
                 for(int i=0; i<6; i++) gateway_mac[i] = arp->sender_mac[i];
-                gateway_found = 1; 
+                tcp_state = STATE_ARP_OK;
             }
         }
         
+        // IP Handler
+        if (swap16(eth->type) == 0x0800) {
+            ipv4_header_t *ip = (ipv4_header_t *)(pkt + sizeof(ethernet_frame_t));
+            if (ip->protocol == 6) { // TCP
+                tcp_header_t *tcp = (tcp_header_t *)(pkt + sizeof(ethernet_frame_t) + sizeof(ipv4_header_t));
+                
+                // Only listen for packets on our port
+                if (swap16(tcp->dest_port) == local_port) {
+                    // Check for SYN-ACK (Flags: SYN=0x02, ACK=0x10 -> 0x12)
+                    if ((tcp->flags & 0x12) == 0x12 && tcp_state == STATE_SYN_SENT) {
+                        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [TCP]     SYN-ACK Received!");
+                        
+                        // ACK the SYN-ACK
+                        server_seq_num = swap32(tcp->seq_num) + 1;
+                        my_seq_num++; 
+                        
+                        send_tcp_packet(SystemTable, 0x10, "", 0); // Send ACK
+                        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [TCP]     Connection ESTABLISHED!");
+                        tcp_state = STATE_ESTABLISHED;
+                    }
+                }
+            }
+        }
+
         desc->status = 0;
         rx_tail_index = (rx_tail_index + 1) % 32;
         volatile uint32_t *rdt = (volatile uint32_t *)(mmio_base_global + 0x2818);
@@ -241,13 +286,11 @@ EFI_STATUS efi_main (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     SystemTable->ConOut->Reset(SystemTable->ConOut, 1);
     SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [KERNEL]  XMPP Unikernel Booting... \r\n");
 
+    // Init Driver (Same as before)
     EFI_GUID PciIoProtocolGuid = EFI_PCI_IO_PROTOCOL_GUID;
     EFI_PCI_IO_PROTOCOL *PciIo;
-    UINTN HandleCount;
-    EFI_HANDLE *HandleBuffer;
-    PCI_HEADER PciHeader;
+    UINTN HandleCount; EFI_HANDLE *HandleBuffer; PCI_HEADER PciHeader;
     SystemTable->BootServices->LocateHandleBuffer(ByProtocol, &PciIoProtocolGuid, NULL, &HandleCount, &HandleBuffer);
-
     for (UINTN i = 0; i < HandleCount; i++) {
         SystemTable->BootServices->HandleProtocol(HandleBuffer[i], &PciIoProtocolGuid, (void **)&PciIo);
         PciIo->Pci.Read(PciIo, EfiPciIoWidthUint32, 0, sizeof(PCI_HEADER)/4, &PciHeader);
@@ -267,19 +310,32 @@ EFI_STATUS efi_main (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
         }
     }
 
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [KERNEL]  Resolving Gateway... \r\n");
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [KERNEL]  Waiting for Gateway ARP... \r\n");
 
     uint64_t timer = 0;
+    int sent_xmpp_hello = 0;
+
     while(1) { 
         check_for_packets(SystemTable);
         timer++;
         
+        // Simple Retry Logic
         if (timer % 5000000 == 0) {
-            if (gateway_found == 0) {
+            if (tcp_state == STATE_NONE) {
                 send_arp_request(SystemTable);
-            } else {
-                // SEND UDP MESSAGE!
-                send_udp(SystemTable, "Hello World from Unikernel!");
+            } else if (tcp_state == STATE_ARP_OK) {
+                // Gateway found, start TCP handshake
+                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [TCP]     Sending SYN...");
+                send_tcp_packet(SystemTable, 0x02, "", 0); // 0x02 = SYN
+                tcp_state = STATE_SYN_SENT;
+            } else if (tcp_state == STATE_ESTABLISHED && sent_xmpp_hello == 0) {
+                // SEND XMPP HELLO
+                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [XMPP]    Sending Stream Header...");
+                char *xmpp = "<?xml version='1.0'?><stream:stream to='example.com' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>";
+                
+                // 0x18 = PSH + ACK
+                send_tcp_packet(SystemTable, 0x18, xmpp, 142); 
+                sent_xmpp_hello = 1;
             }
         }
         __asm__ __volatile__("pause");
