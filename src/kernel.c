@@ -4,17 +4,14 @@
 // ---------------------------------------------------------
 // 1. Data Structures
 // ---------------------------------------------------------
-
-// The Hardware Descriptor (What the card reads)
-// The card expects exactly 16 bytes per entry.
 struct e1000_tx_desc {
-    uint64_t addr;      // Address of the packet data
-    uint16_t length;    // Length of the packet
-    uint8_t  cso;       // Checksum Offset
-    uint8_t  cmd;       // Command Field
-    uint8_t  status;    // Status Field
-    uint8_t  css;       // Checksum Start
-    uint16_t special;   // VLAN / Special
+    uint64_t addr;      
+    uint16_t length;    
+    uint8_t  cso;       
+    uint8_t  cmd;       
+    uint8_t  status;    
+    uint8_t  css;       
+    uint16_t special;   
 } __attribute__((packed));
 
 typedef struct {
@@ -33,8 +30,10 @@ typedef struct {
     uint32_t BAR0;      
 } __attribute__((packed)) PCI_HEADER;
 
-// Global Pointer to the Ring (so we can use it later)
+// GLOBALS
 struct e1000_tx_desc *tx_ring_base;
+uint32_t mmio_base_global = 0;
+uint32_t tx_tail_index = 0;
 
 // ---------------------------------------------------------
 // 2. Helper Functions
@@ -65,64 +64,75 @@ void print_hex(EFI_SYSTEM_TABLE *SystemTable, uint64_t n) {
 // 3. Driver Logic
 // ---------------------------------------------------------
 void init_e1000(EFI_SYSTEM_TABLE *SystemTable, uint32_t bar0) {
-    uint64_t mem_base = bar0 & 0xFFFFFFF0;
-    EFI_STATUS Status;
-
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [DRIVER]  Initializing e1000...\r\n");
-
-    // 1. Allocate Memory for the TX Ring (32 Descriptors * 16 bytes = 512 bytes)
-    //    We align it to 4KB (Page) just to be safe and clean.
-    Status = SystemTable->BootServices->AllocatePool(
-        EfiLoaderData, 
-        4096, 
-        (void **)&tx_ring_base
-    );
-
-    if (EFI_ERROR(Status)) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [ERROR]   Memory Allocation Failed!\r\n");
-        return;
-    }
-
-    // Zero out the memory
+    mmio_base_global = bar0 & 0xFFFFFFF0;
+    
+    SystemTable->BootServices->AllocatePool(EfiLoaderData, 4096, (void **)&tx_ring_base);
     SystemTable->BootServices->SetMem(tx_ring_base, 4096, 0);
 
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [DRIVER]  TX Ring Allocated at: ");
-    print_hex(SystemTable, (uint64_t)tx_ring_base);
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    volatile uint32_t *tdbal = (volatile uint32_t *)(mmio_base_global + 0x3800); 
+    volatile uint32_t *tdbah = (volatile uint32_t *)(mmio_base_global + 0x3804); 
+    volatile uint32_t *tdlen = (volatile uint32_t *)(mmio_base_global + 0x3808); 
+    volatile uint32_t *tdh   = (volatile uint32_t *)(mmio_base_global + 0x3810); 
+    volatile uint32_t *tdt   = (volatile uint32_t *)(mmio_base_global + 0x3818); 
+    volatile uint32_t *tctl  = (volatile uint32_t *)(mmio_base_global + 0x0400); 
 
-    // 2. Configure the Transmit Registers
-    volatile uint32_t *tdbal = (volatile uint32_t *)(mem_base + 0x3800); // Low Address
-    volatile uint32_t *tdbah = (volatile uint32_t *)(mem_base + 0x3804); // High Address
-    volatile uint32_t *tdlen = (volatile uint32_t *)(mem_base + 0x3808); // Length
-    volatile uint32_t *tdh   = (volatile uint32_t *)(mem_base + 0x3810); // Head
-    volatile uint32_t *tdt   = (volatile uint32_t *)(mem_base + 0x3818); // Tail
-    volatile uint32_t *tctl  = (volatile uint32_t *)(mem_base + 0x0400); // Control
-
-    // A. Tell hardware WHERE the ring is
-    //    Note: In UEFI identity mapping, Virtual Pointer == Physical Address.
     *tdbal = (uint32_t)(uint64_t)tx_ring_base;
-    *tdbah = 0; // We are in 32-bit address space usually for QEMU RAM, but safe to 0.
-    
-    // B. Tell hardware HOW BIG the ring is (Length in Bytes)
-    //    32 descriptors * 16 bytes = 512 bytes
+    *tdbah = 0; 
     *tdlen = 512; 
-
-    // C. Reset Head and Tail to 0
     *tdh = 0;
     *tdt = 0;
+    *tctl = 0xA; // Enable + Pad Short Packets
 
-    // D. Enable the Transmitter (TCTL)
-    //    Bit 1 (EN) = 1 (Enable)
-    //    Bit 3 (PSP) = 1 (Pad Short Packets)
-    //    Val = 0b1010 = 0xA (plus some collision threshold defaults usually)
-    //    A safe standard value is (1 << 1) | (1 << 3) = 0xA.
-    *tctl = 0xA;
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [SUCCESS] TX Engine Ready.\r\n");
+}
 
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [SUCCESS] TX Engine Configured & Enabled!\r\n");
+void send_raw_packet(EFI_SYSTEM_TABLE *SystemTable, void *data, uint16_t len) {
+    // 1. Get the current descriptor (where Tail points)
+    struct e1000_tx_desc *desc = &tx_ring_base[tx_tail_index];
+
+    // 2. Fill it
+    desc->addr = (uint64_t)data;
+    desc->length = len;
+    // CMD: EOP (End of Packet) | IFCS (Insert Frame Checksum/CRC)
+    // EOP = Bit 0, IFCS = Bit 1 -> 0x3
+    // RS (Report Status) = Bit 3 -> 0x8 (Optional, helps debug)
+    desc->cmd = 0x0B; 
+    desc->status = 0;
+
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [NET]     Sending Packet (Size: ");
+    print_hex(SystemTable, len);
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L")...\r\n");
+
+    // 3. Increment Tail (Wrap at 32)
+    tx_tail_index = (tx_tail_index + 1) % 32;
+
+    // 4. Write new Tail to Hardware
+    volatile uint32_t *tdt = (volatile uint32_t *)(mmio_base_global + 0x3818);
+    *tdt = tx_tail_index;
+
+    // 5. Verification: Check Head Pointer
+    // If Head catches up to Tail, the card has sent the data.
+    // We do a simple busy wait check for demo purposes.
+    volatile uint32_t *tdh = (volatile uint32_t *)(mmio_base_global + 0x3810);
+    
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [DEBUG]   Tail: ");
+    print_hex(SystemTable, tx_tail_index);
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L" Head: ");
+    print_hex(SystemTable, *tdh); // Should be old value
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+    // Simple delay to let QEMU process
+    for(volatile int k=0; k<1000000; k++);
+
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [DEBUG]   Tail: ");
+    print_hex(SystemTable, tx_tail_index);
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L" Head: ");
+    print_hex(SystemTable, *tdh); // Should be NEW value
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
 }
 
 // ---------------------------------------------------------
-// 4. PCI Scanner (Same as before)
+// 4. PCI Scanner
 // ---------------------------------------------------------
 void scan_pci(EFI_SYSTEM_TABLE *SystemTable) {
     EFI_GUID PciIoProtocolGuid = EFI_PCI_IO_PROTOCOL_GUID;
@@ -132,8 +142,6 @@ void scan_pci(EFI_SYSTEM_TABLE *SystemTable) {
     UINTN i;
     PCI_HEADER PciHeader;
     EFI_STATUS Status;
-
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [SCAN]    Scanning PCI Bus...\r\n");
 
     Status = SystemTable->BootServices->LocateHandleBuffer(
         ByProtocol, &PciIoProtocolGuid, NULL, &HandleCount, &HandleBuffer
@@ -166,6 +174,25 @@ EFI_STATUS efi_main (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [KERNEL]  XMPP Unikernel Booting... \r\n");
 
     scan_pci(SystemTable); 
+
+    // -- CONSTRUCT A RAW PACKET --
+    // Destination: Broadcast (FF:FF:FF:FF:FF:FF)
+    // Source:      52:54:00:12:34:56
+    // Type:        0x0800 (IP) or just bogus data
+    // Payload:     "Hello Unikernel"
+    uint8_t packet[64];
+    
+    // Dest
+    for(int i=0; i<6; i++) packet[i] = 0xFF;
+    // Source
+    packet[6] = 0x52; packet[7] = 0x54; packet[8] = 0x00;
+    packet[9] = 0x12; packet[10]= 0x34; packet[11]= 0x56;
+    // Type
+    packet[12] = 0xDE; packet[13] = 0xAD;
+    // Data
+    packet[14] = 'H'; packet[15] = 'e'; packet[16] = 'l'; packet[17] = 'l'; packet[18] = 'o';
+
+    send_raw_packet(SystemTable, packet, 64);
 
     while(1) { __asm__ __volatile__("hlt"); }
     return EFI_SUCCESS;
