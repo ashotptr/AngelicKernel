@@ -1,28 +1,39 @@
-#ifndef LWIP_HDR_LWIPOPTS_H
-#define LWIP_HDR_LWIPOPTS_H
+#ifndef LWIP_CUSTOM_LWIPOPTS_H
+#define LWIP_CUSTOM_LWIPOPTS_H
 
-// 1. CRITICAL: Tell lwIP we are a Unikernel (No OS threads)
-#define NO_SYS                      1
-#define SYS_LIGHTWEIGHT_PROT        0 
-#define LWIP_NETCONN                0 
-#define LWIP_SOCKET                 0 
+// --- 1. System Settings ---
+#define NO_SYS                  1  // Bare metal (no OS threads)
+#define SYS_LIGHTWEIGHT_PROT    0  // No mutexes needed for single core
+#define MEM_ALIGNMENT           4
 
-// 2. Memory Settings (Allocate 128KB for network buffer)
-#define MEM_ALIGNMENT               4
-#define MEM_SIZE                    (128 * 1024) 
-#define PBUF_POOL_SIZE              16
-#define MEMP_NUM_PBUF               16
-#define MEMP_NUM_TCP_SEG            16
+// --- 2. Memory Settings ---
+#define MEM_SIZE                (128 * 1024) // 128KB Heap
+#define MEMP_NUM_PBUF           16
+#define MEMP_NUM_TCP_PCB        16
+#define PBUF_POOL_SIZE          32
 
-// 3. Protocol Settings
-#define LWIP_IPV4                   1
-#define LWIP_TCP                    1
-#define LWIP_UDP                    1
-#define TCP_MSS                     1460
-#define TCP_WND                     (4 * TCP_MSS)
+// --- 3. Protocol Settings ---
+#define LWIP_ARP                1
+#define LWIP_ETHERNET           1
+#define LWIP_IP                 1
+#define LWIP_TCP                1
+#define LWIP_UDP                1
+#define LWIP_ICMP               1
+#define LWIP_DHCP               0  // We use static IP
 
-// 4. Debugging (Enable this to see why it hangs if it fails again)
-#define LWIP_DEBUG                  1
-#define LWIP_PLATFORM_DIAG(x)       do { Print(L"%a", x); } while(0)
+// --- 4. Tuning ---
+#define TCP_MSS                 1460
+#define TCP_WND                 (4 * TCP_MSS)
+
+// --- 5. Debugging (Disabled for Bare Metal stability) ---
+#define LWIP_DEBUG              0 
+#define LWIP_PLATFORM_DIAG(x)   do { } while(0)
+#define LWIP_PLATFORM_ASSERT(x) do { } while(0)
+
+// --- 6. CRITICAL FIX: Disable OS-dependent APIs ---
+// These require threads/mutexes, which we don't have.
+#define LWIP_NETCONN            0
+#define LWIP_SOCKET             0
+#define LWIP_DNS                0  // DNS often relies on sockets, safer to disable for now
 
 #endif
