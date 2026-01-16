@@ -1,44 +1,29 @@
-# Compiler Settings
 CC = gcc
-LD = ld
-OBJCOPY = objcopy
-
-# GNU-EFI Paths (Standard for Ubuntu/Debian)
-# If compilation fails, check if these exist on your machine
-EFIINC = /usr/include/efi
-EFILIB = /usr/lib
-LIB = /usr/lib
-
-# Compiler Flags
-# Added -DGNU_EFI_USE_MS_ABI to fix the calling convention crash
-CFLAGS = -I. -I./include -I./lwip/src/include \
-         -I$(EFIINC) -I$(EFIINC)/x86_64 -I$(EFIINC)/protocol \
+# ADDED: -mno-mmx -mno-sse (Prevents #UD crash)
+# ADDED: -Iinclude/libc (We will create a fake libc header to satisfy lwIP)
+CFLAGS = -I. -Iinclude -Isrc/lwip/src/include \
+         -I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol \
          -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
+         -mno-mmx -mno-sse \
          -Wall -Wextra -DEFI_FUNCTION_WRAPPER -DGNU_EFI_USE_MS_ABI
 
-# Linker Flags
-LDFLAGS = -nostdlib -znocombreloc -shared -Bsymbolic -L $(EFILIB) -L $(LIB) \
-          -T $(EFILIB)/elf_x86_64_efi.lds
+LWIP_SRCS = $(wildcard src/lwip/src/core/*.c) \
+            $(wildcard src/lwip/src/core/ipv4/*.c) \
+            $(wildcard src/lwip/src/netif/*.c)
 
-# Source Files
-# We start with just the kernel. We will add lwip/*.c files here later.
-SRCS = src/kernel.c
-OBJS = $(SRCS:.c=.o)
+# ADDED: src/drivers/pci.o
+OBJS = src/kernel.o src/drivers/e1000.o src/drivers/pci.o src/net/lwip_glue.o $(LWIP_SRCS:.c=.o)
 
-# Output Target
-TARGET = unikernel.efi
+all: unikernel.efi
 
-all: $(TARGET)
+unikernel.efi: unikernel.so
+	objcopy -j .text -j .sdata -j .data -j .dynamic -j .dynsym -j .rel \
+	    -j .rela -j .reloc --target=efi-app-x86_64 $< $@
 
-# Link Step
-$(TARGET): $(OBJS)
-	$(LD) $(LDFLAGS) $(EFILIB)/crt0-efi-x86_64.o $(OBJS) -o unikernel.so -lgnuefi -lefi
-	$(OBJCOPY) -j .text -j .sdata -j .data -j .dynamic -j .dynsym  -j .rel \
-	            -j .rela -j .rel.* -j .rela.* -j .reloc \
-	            --target efi-app-x86_64 --subsystem=10 unikernel.so $(TARGET)
-	@echo "SUCCESS: $(TARGET) created."
+unikernel.so: $(OBJS)
+	ld -shared -Bsymbolic -L/usr/lib -L/usr/lib64 -T/usr/lib/elf_x86_64_efi.lds \
+	    $(OBJS) /usr/lib/crt0-efi-x86_64.o -o $@ -lefi -lgnuefi
 
-# Compile Step
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 

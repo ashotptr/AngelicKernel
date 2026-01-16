@@ -27,7 +27,7 @@ typedef uintptr_t   mem_ptr_t;
 #define PACK_STRUCT_END
 
 // 4. Debugging Macros (Map these to your UEFI Print function later)
-#define LWIP_PLATFORM_DIAG(x) do { /* TODO: Add UEFI Print here */ } while(0)
+// #define LWIP_PLATFORM_DIAG(x) do { /* TODO: Add UEFI Print here */ } while(0)
 #define LWIP_PLATFORM_ASSERT(x) do { /* TODO: Add Panic loop */ } while(0)
 
 #endif /* LWIP_ARCH_CC_H */

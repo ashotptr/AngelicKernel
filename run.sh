@@ -21,4 +21,5 @@ qemu-system-x86_64 \
     -nographic \
     -bios /usr/share/ovmf/OVMF.fd \
     -drive file=fat:rw:internal-fs,format=raw \
-    -device e1000,netdev=n0 -netdev user,id=n0  # <--- CHANGED THIS LINE
+    -device e1000,netdev=n0 \
+    -netdev user,id=n0,hostfwd=tcp::8080-:80  # <--- CRITICAL FIX HERE

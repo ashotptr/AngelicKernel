@@ -1,276 +1,122 @@
 #include <efi.h>
 #include <efilib.h>
+#include "drivers/e1000.h"
+#include "drivers/pci.h"
+#include "net/lwip_glue.h"
+#include "lwip/init.h"
+#include "lwip/tcp.h"
+#include "lwip/timeouts.h"
+
+// Calculate length automatically to avoid buffer errors
+const char RESPONSE[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                        "<html><body><h1>Hello from AngelicKernel!</h1>"
+                        "<p>Phase 1 Complete: Networking is Live.</p></body></html>";
 
 // ---------------------------------------------------------
-// 1. Headers & Descriptors
+// CALLBACK: Called when data has been successfully sent (ACKed)
 // ---------------------------------------------------------
-typedef struct { uint8_t dest[6]; uint8_t src[6]; uint16_t type; } __attribute__((packed)) ethernet_frame_t;
-typedef struct { uint16_t hw_type; uint16_t proto_type; uint8_t hw_len; uint8_t proto_len; uint16_t opcode; uint8_t sender_mac[6]; uint32_t sender_ip; uint8_t target_mac[6]; uint32_t target_ip; } __attribute__((packed)) arp_packet_t;
-typedef struct { uint8_t version_ihl; uint8_t tos; uint16_t total_length; uint16_t id; uint16_t flags_frag; uint8_t ttl; uint8_t protocol; uint16_t checksum; uint32_t src_ip; uint32_t dest_ip; } __attribute__((packed)) ipv4_header_t;
-typedef struct { uint16_t src_port; uint16_t dest_port; uint32_t seq_num; uint32_t ack_num; uint8_t data_offset; uint8_t flags; uint16_t window; uint16_t checksum; uint16_t urgent_pointer; } __attribute__((packed)) tcp_header_t;
-typedef struct { uint32_t src_ip; uint32_t dest_ip; uint8_t reserved; uint8_t protocol; uint16_t tcp_length; } __attribute__((packed)) pseudo_header_t;
-
-struct e1000_tx_desc { uint64_t addr; uint16_t length; uint8_t cso; uint8_t cmd; uint8_t status; uint8_t css; uint16_t special; } __attribute__((packed));
-struct e1000_rx_desc { uint64_t addr; uint16_t length; uint16_t checksum; uint8_t status; uint8_t errors; uint16_t special; } __attribute__((packed));
-typedef struct { uint16_t VendorID; uint16_t DeviceID; uint16_t Command; uint16_t Status; uint8_t RevisionID; uint8_t ProgIF; uint8_t SubClass; uint8_t ClassCode; uint8_t CacheLineSize; uint8_t LatencyTimer; uint8_t HeaderType; uint8_t BIST; uint32_t BAR0; } __attribute__((packed)) PCI_HEADER;
-
-// ---------------------------------------------------------
-// 2. Globals
-// ---------------------------------------------------------
-uint64_t mmio_base_global = 0; 
-struct e1000_tx_desc *tx_ring_base; struct e1000_rx_desc *rx_ring_base;
-uint8_t *rx_buffer_pool; 
-uint32_t tx_tail_index = 0; uint32_t rx_tail_index = 0;
-uint8_t my_mac[6]; uint8_t gateway_mac[6] = {0}; 
-
-// TCP State
-#define STATE_NONE 0
-#define STATE_ARP_OK 1
-#define STATE_SYN_SENT 2
-#define STATE_ESTABLISHED 3
-
-int tcp_state = STATE_NONE;
-uint32_t my_seq_num = 1000;
-uint32_t server_seq_num = 0;
-uint16_t local_port = 45678;
-uint16_t dest_port = 5222; 
-
-// ---------------------------------------------------------
-// 3. Helpers
-// ---------------------------------------------------------
-uint16_t swap16(uint16_t val) { return (val << 8) | (val >> 8); }
-uint32_t swap32(uint32_t val) { return ((val>>24)&0xff) | ((val<<8)&0xff0000) | ((val>>8)&0xff00) | ((val<<24)&0xff000000); }
-
-uint16_t calculate_checksum(void *data, int len) {
-    uint32_t sum = 0;
-    uint16_t *p = (uint16_t *)data;
-    while (len > 1) { sum += *p++; len -= 2; }
-    if (len) sum += *(uint8_t *)p;
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    return (uint16_t)~sum;
-}
-
-void * allocate_aligned_pages(EFI_SYSTEM_TABLE *ST, UINTN pages) {
-    EFI_PHYSICAL_ADDRESS phys;
-    ST->BootServices->AllocatePages(AllocateAnyPages, EfiLoaderData, pages, &phys);
-    return (void *)(uintptr_t)phys;
+err_t http_sent_callback(void *arg, struct tcp_pcb *pcb, u16_t len) {
+    (void)arg; (void)len;
+    // The client got the data. NOW we can close.
+    tcp_close(pcb);
+    return ERR_OK;
 }
 
 // ---------------------------------------------------------
-// 4. Driver Logic
+// CALLBACK: Called when data arrives
 // ---------------------------------------------------------
-void init_tx(EFI_SYSTEM_TABLE *SystemTable) {
-    tx_ring_base = allocate_aligned_pages(SystemTable, 1);
-    SystemTable->BootServices->SetMem(tx_ring_base, 4096, 0);
-    volatile uint32_t *tdbal = (volatile uint32_t *)(mmio_base_global + 0x3800); 
-    volatile uint32_t *tdbah = (volatile uint32_t *)(mmio_base_global + 0x3804); 
-    volatile uint32_t *tdlen = (volatile uint32_t *)(mmio_base_global + 0x3808); 
-    volatile uint32_t *tdh   = (volatile uint32_t *)(mmio_base_global + 0x3810); 
-    volatile uint32_t *tdt   = (volatile uint32_t *)(mmio_base_global + 0x3818); 
-    volatile uint32_t *tctl  = (volatile uint32_t *)(mmio_base_global + 0x0400); 
-    *tdbal = (uint32_t)(uint64_t)tx_ring_base; *tdbah = (uint32_t)((uint64_t)tx_ring_base >> 32);
-    *tdlen = 512; *tdh = 0; *tdt = 0; 
-    *tctl = (1 << 1) | (1 << 3) | (15 << 4) | (64 << 12);
-}
+err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
+    (void)arg; (void)err; // Silence unused parameter warnings
 
-void init_rx(EFI_SYSTEM_TABLE *SystemTable) {
-    rx_ring_base = allocate_aligned_pages(SystemTable, 1);
-    SystemTable->BootServices->SetMem(rx_ring_base, 4096, 0);
-    rx_buffer_pool = allocate_aligned_pages(SystemTable, 16);
-    for(int i=0; i<32; i++) {
-        rx_ring_base[i].addr = (uint64_t)(rx_buffer_pool + (i * 2048));
-        rx_ring_base[i].status = 0; 
+    if (!p) {
+        // Client closed connection
+        tcp_close(pcb);
+        return ERR_OK;
     }
-    volatile uint32_t *rdbal = (volatile uint32_t *)(mmio_base_global + 0x2800);
-    volatile uint32_t *rdbah = (volatile uint32_t *)(mmio_base_global + 0x2804);
-    volatile uint32_t *rdlen = (volatile uint32_t *)(mmio_base_global + 0x2808);
-    volatile uint32_t *rdh   = (volatile uint32_t *)(mmio_base_global + 0x2810);
-    volatile uint32_t *rdt   = (volatile uint32_t *)(mmio_base_global + 0x2818);
-    volatile uint32_t *rctl  = (volatile uint32_t *)(mmio_base_global + 0x0100);
-    *rdbal = (uint32_t)(uint64_t)rx_ring_base; *rdbah = (uint32_t)((uint64_t)rx_ring_base >> 32);
-    *rdlen = 512; *rdh = 0; *rdt = 0; 
-    *rctl = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 15) | (1 << 26);
-    for(volatile int k=0; k<10000; k++) {}
-    *rdt = 31; 
-}
 
-void send_packet(EFI_SYSTEM_TABLE *SystemTable, void *data, uint16_t len) {
-    (void)SystemTable;
-    struct e1000_tx_desc *desc = &tx_ring_base[tx_tail_index];
-    desc->addr = (uint64_t)data; desc->length = len;
-    desc->cmd = 0x0B; desc->status = 0;
-    tx_tail_index = (tx_tail_index + 1) % 32;
-    volatile uint32_t *tdt = (volatile uint32_t *)(mmio_base_global + 0x3818);
-    *tdt = tx_tail_index;
-}
-
-// ---------------------------------------------------------
-// 5. TCP/IP Implementation
-// ---------------------------------------------------------
-void send_arp_request(EFI_SYSTEM_TABLE *SystemTable) {
-    static uint8_t buffer[128];
-    SystemTable->BootServices->SetMem(buffer, 128, 0);
-    ethernet_frame_t *eth = (ethernet_frame_t *)buffer;
-    arp_packet_t *arp = (arp_packet_t *)(buffer + sizeof(ethernet_frame_t));
-    for(int i=0; i<6; i++) eth->dest[i] = 0xFF;
-    for(int i=0; i<6; i++) eth->src[i] = my_mac[i];
-    eth->type = swap16(0x0806);
-    arp->hw_type = swap16(1); arp->proto_type = swap16(0x0800);
-    arp->hw_len = 6; arp->proto_len = 4; arp->opcode = swap16(1);
-    for(int i=0; i<6; i++) arp->sender_mac[i] = my_mac[i];
-    arp->sender_ip = 0x0F02000A; 
-    for(int i=0; i<6; i++) arp->target_mac[i] = 0x00;
-    arp->target_ip = 0x0202000A; 
-    send_packet(SystemTable, buffer, 60);
-}
-
-void send_tcp_packet(EFI_SYSTEM_TABLE *SystemTable, uint8_t flags, char *payload, int payload_len) {
-    static uint8_t buffer[512];
-    SystemTable->BootServices->SetMem(buffer, 512, 0);
-    ethernet_frame_t *eth = (ethernet_frame_t *)buffer;
-    ipv4_header_t *ip = (ipv4_header_t *)(buffer + sizeof(ethernet_frame_t));
-    tcp_header_t *tcp = (tcp_header_t *)(buffer + sizeof(ethernet_frame_t) + sizeof(ipv4_header_t));
-    char *data = (char *)(buffer + sizeof(ethernet_frame_t) + sizeof(ipv4_header_t) + sizeof(tcp_header_t));
-
-    for(int i=0; i<payload_len; i++) data[i] = payload[i];
-
-    for(int i=0; i<6; i++) eth->dest[i] = gateway_mac[i];
-    for(int i=0; i<6; i++) eth->src[i] = my_mac[i];
-    eth->type = swap16(0x0800);
-
-    uint16_t tcp_total_len = sizeof(tcp_header_t) + payload_len;
-    ip->version_ihl = 0x45;
-    ip->total_length = swap16(sizeof(ipv4_header_t) + tcp_total_len);
-    ip->id = swap16(0); ip->ttl = 64; ip->protocol = 6; 
-    ip->src_ip = 0x0F02000A; ip->dest_ip = 0x0202000A;
-    ip->checksum = calculate_checksum(ip, sizeof(ipv4_header_t));
-
-    tcp->src_port = swap16(local_port); tcp->dest_port = swap16(dest_port);
-    tcp->seq_num = swap32(my_seq_num); tcp->ack_num = swap32(server_seq_num);
-    tcp->data_offset = 0x50; tcp->flags = flags; tcp->window = swap16(1024); tcp->checksum = 0;
-
-    uint8_t pseudo_buf[512];
-    pseudo_header_t *ph = (pseudo_header_t *)pseudo_buf;
-    ph->src_ip = ip->src_ip; ph->dest_ip = ip->dest_ip; ph->reserved = 0; ph->protocol = 6;
-    ph->tcp_length = swap16(tcp_total_len);
+    // 1. Notify lwIP we received the bytes
+    tcp_recved(pcb, p->tot_len);
     
-    void *dest_ptr = (void *)(pseudo_buf + sizeof(pseudo_header_t));
-    void *src_ptr = (void *)tcp;
-    SystemTable->BootServices->CopyMem(dest_ptr, src_ptr, tcp_total_len);
-    tcp->checksum = calculate_checksum(pseudo_buf, sizeof(pseudo_header_t) + tcp_total_len);
-
-    send_packet(SystemTable, buffer, sizeof(ethernet_frame_t) + sizeof(ipv4_header_t) + tcp_total_len);
+    // 2. Queue the response
+    // Use sizeof(RESPONSE)-1 to exclude the null terminator
+    tcp_write(pcb, RESPONSE, sizeof(RESPONSE) - 1, TCP_WRITE_FLAG_COPY);
+    
+    // 3. Register the close callback (The Fix)
+    tcp_sent(pcb, http_sent_callback);
+    
+    // 4. Flush output
+    tcp_output(pcb);
+    
+    pbuf_free(p);
+    return ERR_OK;
 }
 
-void check_for_packets(EFI_SYSTEM_TABLE *SystemTable) {
-    volatile struct e1000_rx_desc *desc = &rx_ring_base[rx_tail_index];
-    if ((desc->status & 0x1)) {
-        uint8_t *pkt = (uint8_t *)(rx_buffer_pool + (rx_tail_index * 2048));
-        ethernet_frame_t *eth = (ethernet_frame_t *)pkt;
-
-        if (swap16(eth->type) == 0x0806) {
-            arp_packet_t *arp = (arp_packet_t *)(pkt + sizeof(ethernet_frame_t));
-            if (swap16(arp->opcode) == 2 && tcp_state == STATE_NONE) {
-                for(int i=0; i<6; i++) gateway_mac[i] = arp->sender_mac[i];
-                tcp_state = STATE_ARP_OK;
-            }
-        }
-        
-        if (swap16(eth->type) == 0x0800) {
-            ipv4_header_t *ip = (ipv4_header_t *)(pkt + sizeof(ethernet_frame_t));
-            if (ip->protocol == 6) { 
-                tcp_header_t *tcp = (tcp_header_t *)(pkt + sizeof(ethernet_frame_t) + sizeof(ipv4_header_t));
-                int header_len = (tcp->data_offset >> 4) * 4;
-                int payload_len = swap16(ip->total_length) - sizeof(ipv4_header_t) - header_len;
-
-                if (swap16(tcp->dest_port) == local_port) {
-                    
-                    // 1. SYN-ACK (Handshake)
-                    if ((tcp->flags & 0x12) == 0x12 && tcp_state == STATE_SYN_SENT) {
-                        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [TCP]     SYN-ACK Received!");
-                        server_seq_num = swap32(tcp->seq_num) + 1;
-                        my_seq_num++; 
-                        send_tcp_packet(SystemTable, 0x10, "", 0); // ACK
-                        tcp_state = STATE_ESTABLISHED;
-                    } 
-                    
-                    // 2. DATA (PSH or Len > 0)
-                    else if (payload_len > 0 && tcp_state == STATE_ESTABLISHED) {
-                        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [RECV]    ");
-                        char *msg = (char *)((uint8_t*)tcp + header_len);
-                        
-                        // Print the Incoming Message!
-                        CHAR16 buf[2]; buf[1] = L'\0';
-                        for(int i=0; i<payload_len; i++) {
-                            buf[0] = (CHAR16)msg[i];
-                            SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
-                        }
-
-                        // UPDATE SEQ/ACK and Reply to Server
-                        server_seq_num = swap32(tcp->seq_num) + payload_len;
-                        send_tcp_packet(SystemTable, 0x10, "", 0); // SEND ACK
-                    }
-                }
-            }
-        }
-        desc->status = 0;
-        rx_tail_index = (rx_tail_index + 1) % 32;
-        volatile uint32_t *rdt = (volatile uint32_t *)(mmio_base_global + 0x2818);
-        *rdt = (rx_tail_index + 31) % 32; 
-    }
+static err_t http_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
+    (void)arg; (void)err;
+    // Set up the receive callback for this new connection
+    tcp_recv(newpcb, http_recv);
+    return ERR_OK;
 }
 
-EFI_STATUS efi_main (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
-    (void)ImageHandle;
-    SystemTable->ConOut->Reset(SystemTable->ConOut, 1);
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [KERNEL]  XMPP Unikernel Booting... \r\n");
+// ---------------------------------------------------------
+// UTILS
+// ---------------------------------------------------------
+void print_memory_map(EFI_SYSTEM_TABLE *SystemTable) {
+    EFI_STATUS Status;
+    UINTN MemoryMapSize = 0;
+    EFI_MEMORY_DESCRIPTOR *MemoryMap = NULL;
+    UINTN MapKey;
+    UINTN DescriptorSize;
+    UINT32 DescriptorVersion;
 
-    EFI_GUID PciIoProtocolGuid = EFI_PCI_IO_PROTOCOL_GUID;
-    EFI_PCI_IO_PROTOCOL *PciIo;
-    UINTN HandleCount; EFI_HANDLE *HandleBuffer; PCI_HEADER PciHeader;
-    SystemTable->BootServices->LocateHandleBuffer(ByProtocol, &PciIoProtocolGuid, NULL, &HandleCount, &HandleBuffer);
-    for (UINTN i = 0; i < HandleCount; i++) {
-        SystemTable->BootServices->HandleProtocol(HandleBuffer[i], &PciIoProtocolGuid, (void **)&PciIo);
-        PciIo->Pci.Read(PciIo, EfiPciIoWidthUint32, 0, sizeof(PCI_HEADER)/4, &PciHeader);
-        if (PciHeader.VendorID == 0x8086 && PciHeader.DeviceID == 0x100E) {
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [FOUND]   Intel e1000 Network Card!\r\n");
-            uint16_t cmd; PciIo->Pci.Read(PciIo, EfiPciIoWidthUint16, 0x04, 1, &cmd);
-            cmd |= 0x4; PciIo->Pci.Write(PciIo, EfiPciIoWidthUint16, 0x04, 1, &cmd);
-            mmio_base_global = (uint64_t)(PciHeader.BAR0 & 0xFFFFFFF0);
-            volatile uint32_t *imc = (volatile uint32_t *)(mmio_base_global + 0x00D8); *imc = 0xFFFFFFFF;
-            volatile uint32_t *ral = (volatile uint32_t *)(mmio_base_global + 0x5400);
-            volatile uint32_t *rah = (volatile uint32_t *)(mmio_base_global + 0x5404);
-            uint32_t low = *ral; uint32_t high = *rah;
-            my_mac[0] = low & 0xFF; my_mac[1] = (low >> 8) & 0xFF; my_mac[2] = (low >> 16) & 0xFF;
-            my_mac[3] = (low >> 24) & 0xFF; my_mac[4] = high & 0xFF; my_mac[5] = (high >> 8) & 0xFF;
-            *rah |= 0x80000000;
-            init_tx(SystemTable); init_rx(SystemTable);
+    SystemTable->BootServices->GetMemoryMap(&MemoryMapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
+    MemoryMapSize += 2 * DescriptorSize;
+    SystemTable->BootServices->AllocatePool(EfiLoaderData, MemoryMapSize, (void**)&MemoryMap);
+    Status = SystemTable->BootServices->GetMemoryMap(&MemoryMapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
+    
+    if (EFI_ERROR(Status)) return;
+
+    Print(L"\n--- UEFI MEMORY MAP ---\n");
+    EFI_MEMORY_DESCRIPTOR *Desc = MemoryMap;
+    int count = 0;
+    while ((UINT8*)Desc < (UINT8*)MemoryMap + MemoryMapSize) {
+        if (Desc->Type == EfiConventionalMemory) {
+             Print(L"FREE RAM    %016lx - %016lx  (%ld pages)\n", 
+                  Desc->PhysicalStart, 
+                  Desc->PhysicalStart + (Desc->NumberOfPages * 4096),
+                  Desc->NumberOfPages);
+            count++;
         }
+        Desc = (EFI_MEMORY_DESCRIPTOR*)((UINT8*)Desc + DescriptorSize);
     }
+    Print(L"Total Free Regions: %d\n-----------------------\n\n", count);
+}
 
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"  [KERNEL]  Waiting for Gateway... \r\n");
-    uint64_t timer = 0;
-    int sent_xmpp_hello = 0;
+EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
+    InitializeLib(ImageHandle, SystemTable);
+    
+    Print(L"AngelicKernel Starting...\n");
+    
+    // Initialize Hardware
+    uint64_t mmio_base = pci_get_bar(0x8086, 0x100E);
+    uint8_t mac[6];
+    e1000_init(mmio_base, mac);
+    init_network_stack(mmio_base, mac);
 
-    while(1) { 
-        check_for_packets(SystemTable);
-        timer++;
-        if (timer % 5000000 == 0) {
-            if (tcp_state == STATE_NONE) {
-                send_arp_request(SystemTable);
-            } else if (tcp_state == STATE_ARP_OK) {
-                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [TCP]     Sending SYN...");
-                send_tcp_packet(SystemTable, 0x02, "", 0); 
-                tcp_state = STATE_SYN_SENT;
-            } else if (tcp_state == STATE_ESTABLISHED && sent_xmpp_hello == 0) {
-                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n  [XMPP]    Sending Stream Header...");
-                char *xmpp = "<?xml version='1.0'?><stream:stream to='example.com' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>";
-                send_tcp_packet(SystemTable, 0x18, xmpp, 142); 
-                my_seq_num += 142; // Advance OUR sequence!
-                sent_xmpp_hello = 1;
-            }
-        }
-        __asm__ __volatile__("pause");
+    // Setup HTTP Server
+    struct tcp_pcb *pcb = tcp_new();
+    tcp_bind(pcb, IP_ADDR_ANY, 80);
+    pcb = tcp_listen(pcb);
+    tcp_accept(pcb, http_accept_callback);
+
+    // Show Memory for Phase 2 Planning
+    print_memory_map(SystemTable);
+
+    Print(L"System Ready. Try: curl http://localhost:8080\n");
+
+    while (1) {
+        angelic_netif_poll();
+        sys_check_timeouts();
     }
     return EFI_SUCCESS;
 }
