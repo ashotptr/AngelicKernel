@@ -12,7 +12,7 @@ LWIP_SRCS = $(wildcard src/lwip/src/core/*.c) \
             $(wildcard src/lwip/src/netif/*.c)
 
 # ADDED: src/drivers/pci.o
-OBJS = src/kernel.o src/drivers/e1000.o src/drivers/pci.o src/net/lwip_glue.o $(LWIP_SRCS:.c=.o)
+OBJS = src/kernel.o src/drivers/e1000.o src/drivers/pci.o src/net/lwip_glue.o $(LWIP_SRCS:.c=.o) src/mm/pmm.o src/mm/vmm.o
 
 all: unikernel.efi
 
