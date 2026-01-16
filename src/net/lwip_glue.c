@@ -6,20 +6,26 @@
 #include "netif/ethernet.h"
 #include "drivers/e1000.h"
 
+// --- FIX 1: Add Prototypes so the compiler is happy ---
+#include <stddef.h> // for size_t
+
+// Defined in libefi (gnu-efi)
+void *memcpy(void *dest, const void *src, size_t n);
+
+// Defined in kernel.c
+void serial_print(const char* str);
+// -----------------------------------------------------
+
 // ---------------------------------------------------------
 // RUNTIME IMPLEMENTATION
 // ---------------------------------------------------------
-
-// NOTE: memset and memcpy are provided by libefi (gnu-efi).
-// We only need to provide sys_now.
 
 // lwIP needs a time source (in milliseconds)
 uint32_t sys_now(void) {
     uint32_t a, d;
     // Read Time-Stamp Counter
     __asm__ volatile("rdtsc" : "=a" (a), "=d" (d));
-    // Approximate conversion to ms (assuming ~2GHz CPU freq for QEMU TCG)
-    // Phase 2 Optimization: Use UEFI GetTime service
+    // Approximate conversion to ms (assuming ~2GHz CPU freq for QEMU)
     return a / 2000;
 }
 
@@ -37,8 +43,8 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p) {
     int len = 0;
 
     for(q = p; q != NULL; q = q->next) {
-        // CopyMem is available from <efilib.h>
-        CopyMem(buffer + len, q->payload, q->len);
+        // memcpy is now properly declared above
+        memcpy(buffer + len, q->payload, q->len);
         len += q->len;
     }
 
@@ -63,7 +69,7 @@ void angelic_netif_poll() {
     if (len > 0) {
         struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
-            CopyMem(p->payload, buffer, len);
+            memcpy(p->payload, buffer, len);
             if (angelic_netif.input(p, &angelic_netif) != ERR_OK) {
                 pbuf_free(p);
             }
@@ -74,9 +80,10 @@ void angelic_netif_poll() {
 void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
     global_mmio_base = mmio_base;
     
-    Print(L"[DEBUG] Calling lwip_init()...\n");
+    // --- FIX 2: Removed 'L' prefix. Use standard ASCII strings for bare metal. ---
+    serial_print("[DEBUG] Calling lwip_init()...\n");
     lwip_init();
-    Print(L"[DEBUG] lwip_init() done.\n");
+    serial_print("[DEBUG] lwip_init() done.\n");
     
     ip4_addr_t ip, netmask, gw;
     
@@ -85,17 +92,17 @@ void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
     IP4_ADDR(&netmask, 255, 255, 255, 0);
     IP4_ADDR(&gw, 10, 0, 2, 2);         // Standard Gateway
 
-    Print(L"[DEBUG] Adding netif...\n");
+    serial_print("[DEBUG] Adding netif...\n");
     netif_add(&angelic_netif, &ip, &netmask, &gw, NULL, angelic_netif_init, ethernet_input);
     
-    Print(L"[DEBUG] Setting default...\n");
+    serial_print("[DEBUG] Setting default...\n");
     netif_set_default(&angelic_netif);
     
-    Print(L"[DEBUG] Bringing interface up...\n");
+    serial_print("[DEBUG] Bringing interface up...\n");
     netif_set_up(&angelic_netif);
     
     for(int i=0; i<6; i++) angelic_netif.hwaddr[i] = mac[i];
     angelic_netif.hwaddr_len = 6;
     
-    Print(L"[DEBUG] Network Stack Initialized.\n");
+    serial_print("[DEBUG] Network Stack Initialized.\n");
 }

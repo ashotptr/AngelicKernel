@@ -141,6 +141,7 @@ void serial_init() {
     outb(0x3F8 + 2, 0xC7);    // Enable FIFO, clear them, with 14-byte threshold
     outb(0x3F8 + 4, 0x0B);    // IRQs enabled, RTS/DSR set
 }
+
 // --- MAIN KERNEL ---
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     InitializeLib(ImageHandle, SystemTable);
@@ -196,9 +197,21 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     // 4. Initialize Virtual Memory Manager (Phase 2 Part 2)
     // Uncomment this only AFTER you have created src/mm/vmm.c
     vmm_init(); 
+    // 5. Initialize Network Stack (Bare Metal Mode)
+    // We use the mmio_base we found earlier [cite: 167]
+    // We pass a dummy MAC or read it from the e1000 EEPROM in e1000_init
+    uint8_t mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56}; // QEMU default
+    init_network_stack(mmio_base, mac);
 
+    serial_print("[KERNEL] Network Stack Online. Listening on Port 80...\n");
+
+    // 6. The Event Loop
     while (1) {
-        // Spin forever
+        // Poll the NIC for packets
+        angelic_netif_poll();
+        
+        // LWIP internal timers (TCP retransmission, etc.)
+        sys_check_timeouts();
     }
 
     return EFI_SUCCESS;
