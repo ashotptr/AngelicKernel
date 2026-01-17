@@ -16,6 +16,7 @@
 
 // Initialize VMM and switch to our new Page Tables
 void vmm_init();
+void vmm_protect_driver(void);
 
 // Map a virtual address to a physical address
 // virt: Virtual Address

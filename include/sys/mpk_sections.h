@@ -1,12 +1,10 @@
-// include/sys/mpk_sections.h
 #ifndef MPK_SECTIONS_H
 #define MPK_SECTIONS_H
 
-// In Phase 1: These define nothing.
-// In Phase 2: You will change this to __attribute__((section(".secure_driver")))
-// This forces the linker to group these functions on their own 4KB pages.
+// Place code in a section we will mark as 'Execute Only' or 'Read Only' for the rest of the kernel
+#define SECURE_DRIVER_CODE __attribute__((section(".secure_driver_code")))
 
-#define SECURE_DRIVER_CODE 
-#define SECURE_DRIVER_DATA 
+// Place rings and buffers in a section protected by MPK Key 1
+#define SECURE_DRIVER_DATA __attribute__((section(".secure_driver_data")))
 
 #endif

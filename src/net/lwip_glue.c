@@ -28,7 +28,7 @@ uint32_t sys_now(void) {
     // Approximate conversion to ms (assuming ~2GHz CPU freq for QEMU)
     return a / 2000;
 }
-
+int mpk_trampoline_3(void* func, uint64_t arg1, uint64_t arg2, uint64_t arg3);
 // ---------------------------------------------------------
 // NETWORK GLUE
 // ---------------------------------------------------------
@@ -48,7 +48,10 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p) {
         len += q->len;
     }
 
-    e1000_send_raw(global_mmio_base, buffer, len);
+    //e1000_send_raw(global_mmio_base, buffer, len);
+    
+    mpk_trampoline_3(e1000_send_raw, global_mmio_base, (uint64_t)buffer, len);
+
     return ERR_OK;
 }
 
@@ -64,8 +67,10 @@ err_t angelic_netif_init(struct netif *netif) {
 
 void angelic_netif_poll() {
     char buffer[1514];
-    int len = e1000_poll_receive(global_mmio_base, buffer, 1514);
+    //int len = e1000_poll_receive(global_mmio_base, buffer, 1514);
     
+    int len = mpk_trampoline_3(e1000_poll_receive, global_mmio_base, (uint64_t)buffer, 1514);
+
     if (len > 0) {
         struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {

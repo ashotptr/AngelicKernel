@@ -1,6 +1,8 @@
 #include "mm/vmm.h"
 #include "mm/pmm.h"
-
+// OR just add these lines near the top if you don't have a header yet:
+void serial_print(char* s);
+void serial_print_hex(uint64_t n);
 // Helper to access PMM (from your previous step)
 // We assume pmm_alloc_page returns a zeroed 4KB page.
 
@@ -66,4 +68,43 @@ void vmm_init() {
     __asm__ volatile("mov %0, %%cr3" : : "r"(kernel_pml4));
 
     serial_print("[VMM] CR3 Switched. We now own the memory!\n");
+}
+
+extern uint64_t __secure_driver_data_start;
+extern uint64_t __secure_driver_data_end;
+
+// Helper to set PKEY bits on an existing page
+void vmm_set_pkey(uint64_t virt, int pkey) {
+    uint64_t* pml4 = kernel_pml4;
+    uint64_t idx = PML4_INDEX(virt);
+    uint64_t* pdp = (uint64_t*)(pml4[idx] & ~0xFFF);
+    
+    idx = PDP_INDEX(virt);
+    uint64_t* pd = (uint64_t*)(pdp[idx] & ~0xFFF);
+    
+    idx = PD_INDEX(virt);
+    uint64_t* pt = (uint64_t*)(pd[idx] & ~0xFFF);
+    
+    // Set bits 59-62
+    pt[PT_INDEX(virt)] &= ~(0xFULL << 59); // Clear old key
+    pt[PT_INDEX(virt)] |= PTE_PKEY(pkey);  // Set new key
+    
+    // Invalidate TLB for this address
+    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+}
+
+void vmm_protect_driver() {
+    serial_print("[VMM] Locking down e1000 Driver...\n");
+    
+    uint64_t start = (uint64_t)&__secure_driver_data_start;
+    uint64_t end   = (uint64_t)&__secure_driver_data_end;
+    
+    serial_print("      Target Range: 0x"); serial_print_hex(start);
+    serial_print(" - 0x"); serial_print_hex(end); serial_print("\n");
+
+    for (uint64_t addr = start; addr < end; addr += PAGE_SIZE) {
+        vmm_set_pkey(addr, 1); // Key 1 = Secure Driver
+    }
+    
+    serial_print("[VMM] Driver Locked. Key 1 required for access.\n");
 }

@@ -113,3 +113,6 @@ isr_stub_table:
         dq isr%+i
         %assign i i+1
     %endrep
+
+; Mark the stack as non-executable (silences linker warning)
+section .note.GNU-stack noalloc noexec nowrite progbits

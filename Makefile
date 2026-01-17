@@ -23,7 +23,8 @@ OBJS = src/kernel.o \
        src/mm/pmm.o \
        src/mm/vmm.o \
        src/arch/interrupts.o \
-       src/arch/idt.o
+       src/arch/idt.o \
+       src/arch/mpk.o
 
 all: unikernel.efi
 
@@ -32,7 +33,7 @@ unikernel.efi: unikernel.so
 	    -j .rela -j .reloc --target=efi-app-x86_64 $< $@
 
 unikernel.so: $(OBJS)
-	ld -shared -Bsymbolic -L/usr/lib -L/usr/lib64 -T/usr/lib/elf_x86_64_efi.lds \
+	ld -shared -Bsymbolic -L/usr/lib -L/usr/lib64 -T linker.ld \
 	    $(OBJS) /usr/lib/crt0-efi-x86_64.o -o $@ -lefi -lgnuefi
 
 %.o: %.c

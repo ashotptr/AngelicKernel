@@ -10,6 +10,9 @@
 #include "mm/pmm.h" 
 #include "mm/vmm.h"
 
+// Add externs
+extern void mpk_enable();
+extern void vmm_protect_driver();
 // --- NEW PROTOTYPE ---
 void init_idt(); 
 
@@ -161,6 +164,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     // Phase 3 Part 1: Network
     uint8_t mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56}; 
     init_network_stack(mmio_base, mac);
+    mpk_enable();           // Turn on the hardware feature
+    vmm_protect_driver();   // Tag the pages
     // <--- ADD THIS LINE --->
     start_http_server();
 
