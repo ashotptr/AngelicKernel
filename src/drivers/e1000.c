@@ -47,7 +47,14 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
     
     // Set TCTL: EN | PSP | CT=15 | COLD=64
     e1000_write_reg(mmio_base, 0x0400, (1 << 1) | (1 << 3) | (0x0F << 4) | (0x40 << 12));
+// 4. Enable Interrupts
+    // IMS (Interrupt Mask Set) - Offset 0xD0
+    // Bit 7: RXT0 (Receiver Timer Interrupt) - Fires when a packet is received
+    // Bit 2: LSC  (Link Status Change)
+    e1000_write_reg(mmio_base, 0x00D0, (1 << 7) | (1 << 2));
 
+    // Clear any pending interrupts by reading ICR
+    e1000_read_reg(mmio_base, 0x00C0);
     return 0; // Success
 }
 

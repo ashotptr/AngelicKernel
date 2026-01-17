@@ -1,8 +1,8 @@
 CC = gcc
-NASM = nasm  # <--- NEW: Define Assembler
+NASM = nasm
 
-# ADDED: -mno-mmx -mno-sse (Prevents #UD crash)
-# ADDED: -Iinclude/libc (We will create a fake libc header to satisfy lwIP)
+# Compiler Flags
+# Added -mno-mmx -mno-sse to prevent interrupt crashes
 CFLAGS = -I. -Iinclude -Isrc/lwip/src/include \
          -I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol \
          -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
@@ -13,8 +13,6 @@ LWIP_SRCS = $(wildcard src/lwip/src/core/*.c) \
             $(wildcard src/lwip/src/core/ipv4/*.c) \
             $(wildcard src/lwip/src/netif/*.c)
 
-# ADDED: src/drivers/pci.o
-# NEW: Added src/arch/interrupts.o and src/arch/idt.o
 OBJS = src/kernel.o \
        src/drivers/e1000.o \
        src/drivers/pci.o \
@@ -29,7 +27,8 @@ OBJS = src/kernel.o \
 all: unikernel.efi
 
 unikernel.efi: unikernel.so
-	objcopy -j .text -j .sdata -j .data -j .dynamic -j .dynsym -j .rel \
+	# FIXED: Added '-j .rodata' to keep strings and read-only constants
+	objcopy -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym -j .rel \
 	    -j .rela -j .reloc --target=efi-app-x86_64 $< $@
 
 unikernel.so: $(OBJS)
@@ -39,7 +38,6 @@ unikernel.so: $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# <--- NEW RULE for Assembly files
 %.o: %.asm
 	$(NASM) -f elf64 $< -o $@
 

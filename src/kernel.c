@@ -10,12 +10,12 @@
 #include "mm/pmm.h" 
 #include "mm/vmm.h"
 
+uint64_t global_mmio_base = 0;
 // Add externs
 extern void mpk_enable();
 extern void vmm_protect_driver();
 // --- NEW PROTOTYPE ---
-void init_idt(); 
-
+void init_idt();
 // --- SERIAL PORT DRIVER ---
 static inline void outb(UINT16 port, UINT8 val) {
     __asm__ volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
@@ -121,16 +121,22 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     
     Print(L"AngelicKernel Phase 1: Preparing for Exodus...\n");
     
-    uint64_t mmio_base = pci_get_bar(0x8086, 0x100E);
-    if (mmio_base == 0) {
+    // 1. Find MMIO Base
+    global_mmio_base = pci_get_bar(0x8086, 0x100E);
+    
+    if (global_mmio_base == 0) {
         Print(L"[WARNING] e1000 Card not found (Check QEMU flags)\n");
     } else {
-        Print(L"[SUCCESS] e1000 MMIO found at 0x%lx\n", mmio_base);
+        Print(L"[SUCCESS] e1000 MMIO found at 0x%lx\n", global_mmio_base);
     }
+
+    // 2. Define MAC Buffer (Must be done BEFORE usage)
+    uint8_t mac[6] = {0,0,0,0,0,0};
 
     Print(L"Exiting Firmware in 1s...\n");
     SystemTable->BootServices->Stall(1000000); 
 
+    // Memory Map Stuff
     UINTN MapSize = 0, MapKey, DescriptorSize;
     UINT32 DescriptorVersion;
     EFI_MEMORY_DESCRIPTOR *MemoryMap = NULL;
@@ -153,27 +159,44 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     pmm_init(MemoryMap, MapSize, DescriptorSize);
     vmm_init(); 
 
-    // Phase 3 Part 2: Interrupts (NEW)
+    // Phase 3: Driver & Interrupts
     init_idt();
+    
+    // Initialize Hardware (This fills the 'mac' variable)
+    e1000_init(global_mmio_base, mac);
+    
+    // Print MAC for debug
+    serial_print("MAC: "); 
+    serial_print_hex(mac[0]); serial_print(":");
+    serial_print_hex(mac[1]); serial_print(":");
+    serial_print_hex(mac[2]); serial_print("\n");
 
-    /* TEST CRASH (Uncomment to verify IDT works)
-       int* bad = (int*)0xDEADBEEF;
-       *bad = 10;
-    */
+    // Phase 3 Part 1: Network Stack
+    // Note: We pass the same MAC we just read from hardware
+    init_network_stack(global_mmio_base, mac);
+    
+    // Phase 4 Preparation (MPK)
+    // Only enable these if you are 100% sure the VMM setup is perfect
+    // mpk_enable();           
+    // vmm_protect_driver();   
+    
+    // Enable Interrupts globally
+    __asm__ volatile("sti");
+    serial_print("[KERNEL] Interrupts Enabled.\n");
 
-    // Phase 3 Part 1: Network
-    uint8_t mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56}; 
-    init_network_stack(mmio_base, mac);
-    mpk_enable();           // Turn on the hardware feature
-    vmm_protect_driver();   // Tag the pages
-    // <--- ADD THIS LINE --->
     start_http_server();
 
     serial_print("[KERNEL] Network Online. Listening on Port 80...\n");
 
     while (1) {
+        // HYBRID MODE:
+        // We are catching the interrupt in IDT (printing "Packet Arrived"), 
+        // but we rely on lwIP polling here to actually process the data.
+        // For Phase 4, you will move this poll logic into the ISR.
         angelic_netif_poll();
+        
         sys_check_timeouts();
+        __asm__ volatile("hlt"); // CPU sleeps until Interrupt fires
     }
 
     return EFI_SUCCESS;

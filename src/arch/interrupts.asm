@@ -1,6 +1,6 @@
 [bits 64]
 
-extern exception_handler
+extern interrupt_handler  ; Changed name from exception_handler to be generic
 global load_idt
 global isr_stub_table
 
@@ -32,7 +32,7 @@ isr_common:
 
     ; 2. Call C handler (Pass stack pointer as arg)
     mov rdi, rsp
-    call exception_handler
+    call interrupt_handler  ; Call the C function
 
     ; 3. Restore registers
     pop rax
@@ -71,7 +71,7 @@ isr_common:
         jmp isr_common
 %endmacro
 
-; Define handlers for first 32 exceptions
+; --- EXCEPTION HANDLERS (0-31) ---
 ISR_NOERR 0
 ISR_NOERR 1
 ISR_NOERR 2
@@ -85,8 +85,8 @@ ISR_NOERR 9
 ISR_ERR   10
 ISR_ERR   11
 ISR_ERR   12
-ISR_ERR   13  ; GP Fault
-ISR_ERR   14  ; Page Fault (Critical for MPK)
+ISR_ERR   13
+ISR_ERR   14
 ISR_NOERR 15
 ISR_NOERR 16
 ISR_ERR   17
@@ -105,14 +105,32 @@ ISR_NOERR 29
 ISR_ERR   30
 ISR_NOERR 31
 
+; --- IRQ HANDLERS (32-47) ---
+; These correspond to hardware interrupts (Timer, Keyboard, E1000, etc.)
+ISR_NOERR 32
+ISR_NOERR 33
+ISR_NOERR 34
+ISR_NOERR 35
+ISR_NOERR 36
+ISR_NOERR 37
+ISR_NOERR 38
+ISR_NOERR 39
+ISR_NOERR 40
+ISR_NOERR 41
+ISR_NOERR 42
+ISR_NOERR 43
+ISR_NOERR 44
+ISR_NOERR 45
+ISR_NOERR 46
+ISR_NOERR 47
+
 section .data
 global isr_stub_table
 isr_stub_table:
     %assign i 0
-    %rep 32
+    %rep 48          ; INCREASED from 32 to 48
         dq isr%+i
         %assign i i+1
     %endrep
 
-; Mark the stack as non-executable (silences linker warning)
 section .note.GNU-stack noalloc noexec nowrite progbits
