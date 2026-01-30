@@ -26,7 +26,9 @@ all: unikernel.efi
 
 unikernel.efi: unikernel.so
 	objcopy -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym -j .rel \
-	     -j .rela -j .reloc --target=efi-app-x86_64 --subsystem=10 $< $@
+	    -j .rela -j .reloc --target=efi-app-x86_64 --subsystem=10 $< $@
+	mkdir -p internal-fs/EFI/BOOT
+	cp $@ internal-fs/EFI/BOOT/BOOTX64.EFI
 
 # /usr/lib/elf_x86_64_efi.lds
 unikernel.so: $(OBJS)

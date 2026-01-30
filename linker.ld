@@ -4,10 +4,20 @@ SECTIONS
 {
     . = 0;
     ImageBase = .;
+    
+    .hash : { *(.hash) }
+    .gnu.hash : { *(.gnu.hash) }
 
+    . = ALIGN(4096);
+    .eh_frame : { 
+        *(.eh_frame)
+    }
+
+    . = ALIGN(4096);
     .text : {
         *(.text)
         *(.text.*)
+        *(.gnu.linkonce.t.*)
         
         . = ALIGN(4096);
         __secure_driver_code_start = .;
@@ -17,14 +27,24 @@ SECTIONS
     }
 
     . = ALIGN(4096);
-    
-    .data : {
-        *(.data)
-        *(.data.*)
-        *(.sdata)
-        *(.rodata)
-        *(.rodata.*)
+    .reloc : {
+        *(.reloc)
+    }
 
+    . = ALIGN(4096);
+    .data : {
+        *(.rodata*)
+        *(.got.plt)
+        *(.got)
+        *(.data*)
+        *(.sdata)
+        *(.sbss)
+        *(.scommon)
+        *(.dynbss)
+        *(.bss)
+        *(COMMON)
+        *(.rel.local)
+        
         . = ALIGN(4096);
         __secure_driver_data_start = .;
         *(.secure_driver_data)
@@ -32,12 +52,32 @@ SECTIONS
         __secure_driver_data_end = .;
     }
 
-    .rel : { *(.rel .rel.*) }
-    .rela : { *(.rela .rela.*) }
-    .reloc : { *(.reloc) }
+    . = ALIGN(4096);
+    .dynamic : {
+        *(.dynamic)
+    }
+
+    . = ALIGN(4096);
+    .rela : {
+        *(.rela*)
+    }
+
+    . = ALIGN(4096);
+    .rel : {
+        *(.rel*)
+    }
+
+    . = ALIGN(4096);
+    .dynsym : {
+        *(.dynsym)
+    }
+
+    . = ALIGN(4096);
+    .dynstr : {
+        *(.dynstr)
+    }
     
     /DISCARD/ : {
         *(.note.GNU-stack)
-        *(.eh_frame)
     }
 }

@@ -1,14 +1,11 @@
-// src/drivers/e1000.c
 #include <efi.h>
 #include <efilib.h>
 #include "drivers/e1000.h"
 #include "sys/mpk_sections.h"
 
-// Define the rings in Secure Data section (for MPK later)
 SECURE_DRIVER_DATA volatile struct e1000_rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
 SECURE_DRIVER_DATA volatile struct e1000_tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
 
-// Helper to interact with MMIO
 SECURE_DRIVER_CODE void e1000_write_reg(uint64_t base, uint32_t offset, uint32_t val) {
     *(volatile uint32_t *)(base + offset) = val;
 }
@@ -17,13 +14,11 @@ SECURE_DRIVER_CODE uint32_t e1000_read_reg(uint64_t base, uint32_t offset) {
     return *(volatile uint32_t *)(base + offset);
 }
 
-// Initialize the card (simplified for brevity, keeps your original logic logic)
 SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
-    // 1. Detect MAC Address from EEPROM or RAL
-    uint32_t ral = e1000_read_reg(mmio_base, 0x5400); // E1000_RAL
-    uint32_t rah = e1000_read_reg(mmio_base, 0x5404); // E1000_RAH
+    uint32_t ral = e1000_read_reg(mmio_base, 0x5400); // E1000_RAL, RAL (Receive Address Low)
+    uint32_t rah = e1000_read_reg(mmio_base, 0x5404); // E1000_RAH, RAH (Receive Address High).
     
-    if (mac_out) {
+    if (mac_out) { 
         mac_out[0] = ral & 0xFF;
         mac_out[1] = (ral >> 8) & 0xFF;
         mac_out[2] = (ral >> 16) & 0xFF;
@@ -32,25 +27,27 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
         mac_out[5] = (rah >> 8) & 0xFF;
     }
 
-    // 2. Initialize RX/TX Rings (Link addresses to hardware)
-    e1000_write_reg(mmio_base, 0x2800, (uint64_t)rx_ring & 0xFFFFFFFF); // RDBAL
-    e1000_write_reg(mmio_base, 0x2804, (uint64_t)rx_ring >> 32);         // RDBAH
-    e1000_write_reg(mmio_base, 0x2808, RX_RING_SIZE * 16);               // RDLEN
+    e1000_write_reg(mmio_base, 0x2800, (uint64_t)rx_ring & 0xFFFFFFFF); // RDBAL (Receive Descriptor Base Address Low)
+    e1000_write_reg(mmio_base, 0x2804, (uint64_t)rx_ring >> 32); // RDBAH (Receive Descriptor Base Address High)
+    e1000_write_reg(mmio_base, 0x2808, RX_RING_SIZE * 16); // RDLEN (Receive Descriptor Length)
     
     e1000_write_reg(mmio_base, 0x3800, (uint64_t)tx_ring & 0xFFFFFFFF); // TDBAL
-    e1000_write_reg(mmio_base, 0x3804, (uint64_t)tx_ring >> 32);         // TDBAH
-    e1000_write_reg(mmio_base, 0x3808, TX_RING_SIZE * 16);               // TDLEN
+    e1000_write_reg(mmio_base, 0x3804, (uint64_t)tx_ring >> 32); // TDBAH
+    e1000_write_reg(mmio_base, 0x3808, TX_RING_SIZE * 16); // TDLEN
 
-    // 3. Enable RX (RCTL) and TX (TCTL)
     // Set RCTL: EN | SBP | UPE | MPE | LBM_NONE | RDMTS_HALF | BAM | SECRC | BSIZE_2048
+    // 1 << 1 (EN): Enable Receiver. Turns the radio on.
+    // 1 << 4 (MPE): Multicast Promiscuous Enabled. Accepts multicast packets.
+    // 1 << 15 (BAM): Broadcast Accept Mode. Accepts broadcast packets.
+    // 1 << 26 (SECRC): Strip Ethernet CRC. The hardware removes the last 4 bytes (checksum) so there is no need to process them in software.
     e1000_write_reg(mmio_base, 0x0100, (1 << 1) | (1 << 4) | (1 << 15) | (1 << 26)); 
     
     // Set TCTL: EN | PSP | CT=15 | COLD=64
     e1000_write_reg(mmio_base, 0x0400, (1 << 1) | (1 << 3) | (0x0F << 4) | (0x40 << 12));
-// 4. Enable Interrupts
+
     // IMS (Interrupt Mask Set) - Offset 0xD0
-    // Bit 7: RXT0 (Receiver Timer Interrupt) - Fires when a packet is received
-    // Bit 2: LSC  (Link Status Change)
+    // 1 << 7 (RXT0) (Receiver Timer Interrupt) - Interrupt the CPU whenever a packet arrives
+    // 1 << 2 (LSC) (Link Status Change) - Interrupt the CPU if the cable is unplugged
     e1000_write_reg(mmio_base, 0x00D0, (1 << 7) | (1 << 2));
 
     // Clear any pending interrupts by reading ICR
