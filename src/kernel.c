@@ -11,12 +11,12 @@
 #include "mm/vmm.h"
 
 uint64_t global_mmio_base = 0;
-// Add externs
+
 extern void mpk_enable();
 extern void vmm_protect_driver();
-// --- NEW PROTOTYPE ---
+
 void init_idt();
-// --- SERIAL PORT DRIVER ---
+
 static inline void outb(UINT16 port, UINT8 val) {
     __asm__ volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
 }
@@ -92,7 +92,6 @@ void start_http_server() {
     serial_print("[INFO] HTTP Server started on Port 80\n");
 }
 
-// --- UTILS ---
 void serial_print_hex(uint64_t n) {
     char hex[] = "0123456789ABCDEF";
     char buf[19];
@@ -106,56 +105,73 @@ void serial_print_hex(uint64_t n) {
 }
 
 void serial_init() {
-    outb(0x3F8 + 1, 0x00);    
-    outb(0x3F8 + 3, 0x80);    
-    outb(0x3F8 + 0, 0x03);    
-    outb(0x3F8 + 1, 0x00);    
-    outb(0x3F8 + 3, 0x03);    
-    outb(0x3F8 + 2, 0xC7);    
-    outb(0x3F8 + 4, 0x0B);    
+    outb(0x3F8 + 1, 0x00);    //0x3F8 for COM1, might need to check if correct address
+    outb(0x3F8 + 3, 0x80);
+    outb(0x3F8 + 0, 0x03);
+    outb(0x3F8 + 1, 0x00);
+    outb(0x3F8 + 3, 0x03);
+    outb(0x3F8 + 2, 0xC7);
+    outb(0x3F8 + 4, 0x0B);
 }
 
-// --- MAIN KERNEL ---
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     InitializeLib(ImageHandle, SystemTable);
     
     Print(L"AngelicKernel Phase 1: Preparing for Exodus...\n");
     
-    // 1. Find MMIO Base
     global_mmio_base = pci_get_bar(0x8086, 0x100E);
     
     if (global_mmio_base == 0) {
-        Print(L"[WARNING] e1000 Card not found (Check QEMU flags)\n");
-    } else {
+        Print(L"[WARNING] e1000 Card not found\n");
+    }
+    else {
         Print(L"[SUCCESS] e1000 MMIO found at 0x%lx\n", global_mmio_base);
     }
 
-    // 2. Define MAC Buffer (Must be done BEFORE usage)
-    uint8_t mac[6] = {0,0,0,0,0,0};
+    uint8_t mac[6] = {0, 0, 0, 0, 0, 0};
 
     Print(L"Exiting Firmware in 1s...\n");
+
     SystemTable->BootServices->Stall(1000000); 
 
-    // Memory Map Stuff
+    EFI_STATUS Status;
     UINTN MapSize = 0, MapKey, DescriptorSize;
     UINT32 DescriptorVersion;
     EFI_MEMORY_DESCRIPTOR *MemoryMap = NULL;
+
+    Status = SystemTable->BootServices->GetMemoryMap(&MapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
     
-    SystemTable->BootServices->GetMemoryMap(&MapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
     MapSize += 2 * DescriptorSize;
-    SystemTable->BootServices->AllocatePool(EfiLoaderData, MapSize, (void**)&MemoryMap);
-    SystemTable->BootServices->GetMemoryMap(&MapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
+    
+    Status = SystemTable->BootServices->AllocatePool(EfiLoaderData, MapSize, (void**)&MemoryMap);
+    
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
 
-    SystemTable->BootServices->ExitBootServices(ImageHandle, MapKey);
+    Status = SystemTable->BootServices->GetMemoryMap(&MapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
+    
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
 
-    // =========================================================
-    //   BARE METAL ZONE
-    // =========================================================
+    Status = SystemTable->BootServices->ExitBootServices(ImageHandle, MapKey);
+    
+    if (EFI_ERROR(Status)) {
+        Status = SystemTable->BootServices->GetMemoryMap(&MapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
+        
+        if (!EFI_ERROR(Status)) {
+            Status = SystemTable->BootServices->ExitBootServices(ImageHandle, MapKey);
+        }
+    }
+
+    if (EFI_ERROR(Status)) {
+        while(1); 
+    }
 
     serial_init();
     serial_print("\n\n=== ANGELIC KERNEL (BARE METAL) ===\n");
 
-    // Phase 2: Memory
     pmm_init(MemoryMap, MapSize, DescriptorSize);
     vmm_init(); 
 
@@ -167,9 +183,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     
     // Print MAC for debug
     serial_print("MAC: "); 
-    serial_print_hex(mac[0]); serial_print(":");
-    serial_print_hex(mac[1]); serial_print(":");
-    serial_print_hex(mac[2]); serial_print("\n");
+    serial_print_hex(mac[0]); 
+    serial_print(":");
+    serial_print_hex(mac[1]); 
+    serial_print(":");
+    serial_print_hex(mac[2]); 
+    serial_print("\n");
 
     // Phase 3 Part 1: Network Stack
     // Note: We pass the same MAC we just read from hardware

@@ -2,21 +2,26 @@
 
 // Matches the registers saved in assembly
 typedef struct {
-    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
-    uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
+    // General Purpose Registers (Last pushed = First here)
+    uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp;
+    uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+
+    // Interrupt info (Pushed by our macros)
     uint64_t int_no;
     uint64_t err_code;
+
+    // Return Stack (Pushed by CPU)
     uint64_t rip, cs, rflags, rsp, ss;
 } __attribute__((packed)) registers_t;
 
 typedef struct {
-    uint16_t isr_low;
-    uint16_t kernel_cs;
-    uint8_t  ist;
-    uint8_t  attributes;
-    uint16_t isr_mid;
-    uint32_t isr_high;
-    uint32_t reserved;
+    uint16_t isr_low;    // The lower 16 bits of the handler's memory address
+    uint16_t kernel_cs;  // The Code Segment Selector (Where is the code?)
+    uint8_t  ist;        // Interrupt Stack Table (Stack switching mechanism)
+    uint8_t  attributes; // Type (Interrupt vs Trap), DPL (Permissions), Present bit
+    uint16_t isr_mid;    // The middle 16 bits of the handler's address
+    uint32_t isr_high;   // The upper 32 bits of the handler's address
+    uint32_t reserved;   // Must be ZERO.
 } __attribute__((packed)) idt_entry_t;
 
 typedef struct {
@@ -35,7 +40,6 @@ extern void load_idt(void* idtr_ptr);
 extern void serial_print(const char* str);
 extern void serial_print_hex(uint64_t n);
 
-// --- IO PORT HELPERS ---
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
 }
@@ -45,45 +49,51 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
-// --- PIC REMAPPING ---
-#define PIC1		0x20		/* IO base for master PIC */
-#define PIC2		0xA0		/* IO base for slave PIC */
-#define PIC1_COMMAND	PIC1
-#define PIC1_DATA	(PIC1+1)
-#define PIC2_COMMAND	PIC2
-#define PIC2_DATA	(PIC2+1)
+#define PIC1 0x20 // IO base for master PIC
+#define PIC2 0xA0 // IO base for slave PIC
+#define PIC1_COMMAND PIC1
+#define PIC1_DATA (PIC1 + 1)
+#define PIC2_COMMAND PIC2
+#define PIC2_DATA (PIC2 + 1)
 
 void pic_remap(int offset1, int offset2) {
 	unsigned char a1, a2;
-	a1 = inb(PIC1_DATA);                        // save masks
+	a1 = inb(PIC1_DATA); // save masks, read the current "Interrupt Mask Register" (IMR)
 	a2 = inb(PIC2_DATA);
-	outb(PIC1_COMMAND, 0x11);  // starts the initialization sequence (in cascade mode)
+
+	outb(PIC1_COMMAND, 0x11); // ICW1: Initialization Command, starts the initialization sequence (in cascade mode)
 	outb(PIC2_COMMAND, 0x11);
-	outb(PIC1_DATA, offset1);                 // ICW2: Master PIC vector offset
-	outb(PIC2_DATA, offset2);                 // ICW2: Slave PIC vector offset
-	outb(PIC1_DATA, 4);                       // ICW3: tell Master PIC that there is a slave PIC at IRQ2 (0000 0100)
-	outb(PIC2_DATA, 2);                       // ICW3: tell Slave PIC its cascade identity (0000 0010)
-	outb(PIC1_DATA, 0x01);                    // ICW4: 8086 mode
+
+	outb(PIC1_DATA, offset1); // ICW2: Master PIC vector offset
+	outb(PIC2_DATA, offset2); // ICW2: Slave PIC vector offset
+
+	outb(PIC1_DATA, 4); // ICW3: tell Master PIC that there is a slave PIC at IRQ2 (0000 0100)
+	outb(PIC2_DATA, 2); // ICW3: tell Slave PIC its cascade identity (0000 0010)
+
+	outb(PIC1_DATA, 0x01); // ICW4: 8086 mode
 	outb(PIC2_DATA, 0x01);
-	outb(PIC1_DATA, a1);   // restore saved masks.
+
+	outb(PIC1_DATA, a1); // restore saved masks.
 	outb(PIC2_DATA, a2);
 }
 
 void pic_send_eoi(unsigned char irq) {
-	if(irq >= 8) outb(PIC2_COMMAND, 0x20);
+	if (irq >= 8) {
+        outb(PIC2_COMMAND, 0x20); // The Value 0x20 is the specific command byte for "Non-Specific EOI."
+    }
+
 	outb(PIC1_COMMAND, 0x20);
 }
 
-// --- IDT SETUP ---
 void idt_set_gate(uint8_t vector, void* isr) {
     uint64_t addr = (uint64_t)isr;
     idt[vector].isr_low = addr & 0xFFFF;
-    idt[vector].kernel_cs = 0x38; // Check your specific UEFI CS. Typically 0x38 or 0x08.
-    idt[vector].ist = 0;
-    idt[vector].attributes = 0x8E; // Present, Ring 0, Interrupt Gate
+    idt[vector].kernel_cs = 0x38; // tells the CPU which GDT segment the Interrupt Handler code lives in. 64-bit Kernel Code Segment is located at offset 0x38.
+    idt[vector].ist = 0; // do not use the IST(Interrupt Stack Table), use the standard legacy stack switching mechanism.
+    idt[vector].attributes = 0x8E; // value is 1000 1110, bit 7 (Present = 1), bits 6-5 (DPL = 00) only the Kernel (Ring 0) can access this, bit 4 (S = 0) Interrupt/Trap Gates, Bits 3-0 (Type = 1110): 64-bit Interrupt Gate
     idt[vector].isr_mid = (addr >> 16) & 0xFFFF;
     idt[vector].isr_high = (addr >> 32) & 0xFFFFFFFF;
-    idt[vector].reserved = 0;
+    idt[vector].reserved = 0; // must be zero
 }
 
 void init_idt() {
@@ -106,17 +116,15 @@ void init_idt() {
     serial_print("[KERNEL] IDT Initialized (PIC Remapped).\n");
 }
 
-// --- MAIN HANDLER ---
-// Renamed from exception_handler to reflect it handles everything
 void interrupt_handler(registers_t* regs) {
     // Case 1: Hardware Interrupts (IRQs)
     if (regs->int_no >= 32 && regs->int_no < 48) {
-        // serial_print("IRQ Received\n"); // Comment out to avoid spamming serial
+        // serial_print("IRQ Received\n");
         
-        // CHECK PCI INTERRUPT (Usually IRQ 10 or 11 for QEMU e1000)
-        // We blindly check e1000 status for ANY IRQ > 32 just to be safe for this phase
+        // check pci interrupt (IRQ 10 or 11 for QEMU e1000), check e1000 status for IRQ > 32 to be safe for this phase
         if (global_mmio_base != 0) {
-             uint32_t cause = e1000_read_reg(global_mmio_base, 0xC0); // 0xC0 = ICR
+             uint32_t cause = e1000_read_reg(global_mmio_base, 0xC0); // 0xC0 = ICR (Interrupt Cause Register)
+
              if (cause & 0x80) { // Bit 7 = RXT0 (Timer Interrupt / Packet Received)
                  // A packet is waiting!
                  // Ideally, you set a flag here, but for now, we just clear it.
@@ -125,6 +133,7 @@ void interrupt_handler(registers_t* regs) {
         }
 
         pic_send_eoi(regs->int_no - 32);
+
         return;
     }
 

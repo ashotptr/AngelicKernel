@@ -1,5 +1,5 @@
 1) installing tools
-sudo apt install build-essential qemu-system-x86 nasm gnu-efi
+sudo apt install build-essential qemu-system-x86 nasm gnu-efi ovmf
 
 2) installing lwip
 1. https://savannah.nongnu.org/projects/lwip/

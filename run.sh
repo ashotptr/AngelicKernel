@@ -20,3 +20,22 @@ qemu-system-x86_64 \
     -drive file=fat:rw:internal-fs,format=raw,media=disk \
     -device e1000,netdev=n0 \
     -netdev user,id=n0,hostfwd=tcp::8080-:80
+
+# qemu-system-x86_64 \
+#   -cpu qemu64 \
+#   -drive if=pflash,format=raw,unit=0,file=path_to_OVMF_CODE.fd,readonly=on \
+#   -drive if=pflash,format=raw,unit=1,file=path_to_OVMF_VARS.fd \
+#   -net none
+
+# qemu-system-x86_64 \
+# -cpu qemu64 \
+# -drive if=pflash,format=raw,unit=0,file=/usr/share/ovmf/OVMF.fd,readonly=on \
+# -drive if=pflash,format=raw,unit=1,file=OVMF_VARS.fd \
+# -net none \
+# -serial stdio \
+# -cdrom your_image.iso
+
+# qemu-system-x86_64 \
+# -bios /usr/share/ovmf/OVMF.fd \
+# -cdrom your_image.iso \
+# -serial stdio

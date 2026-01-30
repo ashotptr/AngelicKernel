@@ -6,9 +6,8 @@ global isr_stub_table
 
 section .text
 
-; Function to load the IDT pointer
 load_idt:
-    lidt [rdi]
+    lidt [rdi] ; loads the 10-byte struct (Limit + Base) from the address in rdi into the idtr register.
     ret
 
 ; Common handler code
@@ -32,7 +31,7 @@ isr_common:
 
     ; 2. Call C handler (Pass stack pointer as arg)
     mov rdi, rsp
-    call interrupt_handler  ; Call the C function
+    call interrupt_handler
 
     ; 3. Restore registers
     pop rax
@@ -52,8 +51,8 @@ isr_common:
     pop r15
 
     ; 4. Clean up error code and ISR number
-    add rsp, 16 
-    iretq
+    add rsp, 16 ; skips the Interrupt Number and Error Code pushed in the stub
+    iretq ; pops RIP, CS, RFLAGS, RSP, and SS atomically, returning the CPU to exactly where it was before the interrupt
 
 ; Macros to generate ISR stubs
 %macro ISR_NOERR 1

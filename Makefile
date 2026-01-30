@@ -1,8 +1,6 @@
 CC = gcc
 NASM = nasm
 
-# Compiler Flags
-# Added -mno-mmx -mno-sse to prevent interrupt crashes
 CFLAGS = -I. -Iinclude -Isrc/lwip/src/include \
          -I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol \
          -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
@@ -27,13 +25,13 @@ OBJS = src/kernel.o \
 all: unikernel.efi
 
 unikernel.efi: unikernel.so
-	# FIXED: Added '-j .rodata' to keep strings and read-only constants
 	objcopy -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym -j .rel \
-	    -j .rela -j .reloc --target=efi-app-x86_64 $< $@
+	     -j .rela -j .reloc --target=efi-app-x86_64 --subsystem=10 $< $@
 
+# /usr/lib/elf_x86_64_efi.lds
 unikernel.so: $(OBJS)
-	ld -shared -Bsymbolic -L/usr/lib -L/usr/lib64 -T linker.ld \
-	    $(OBJS) /usr/lib/crt0-efi-x86_64.o -o $@ -lefi -lgnuefi
+	ld -shared -Bsymbolic -nostdlib -znocombreloc -L/usr/lib -L/usr/lib64 -T linker.ld \
+	    /usr/lib/crt0-efi-x86_64.o $(OBJS) -o $@ -lefi -lgnuefi
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
