@@ -15,10 +15,28 @@ SECURE_DRIVER_CODE uint32_t e1000_read_reg(uint64_t base, uint32_t offset) {
 }
 
 SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
+    // In .secure_driver_data, we must zero them manually, because the NIC will read garbage descriptors and overwrite random memory (like your Kernel Code!) via DMA.
+    // for (int i = 0; i < RX_RING_SIZE; i++) {
+    //     rx_ring[i].addr = 0; 
+    //     rx_ring[i].status = 0;
+    //     rx_ring[i].errors = 0;
+    //     rx_ring[i].length = 0;
+    //     rx_ring[i].checksum = 0;
+    //     rx_ring[i].special = 0;
+    // }
+
+    // for (int i = 0; i < TX_RING_SIZE; i++) {
+    //     tx_ring[i].addr = 0; 
+    //     tx_ring[i].cmd = 0;
+    //     tx_ring[i].status = 0;
+    //     tx_ring[i].css = 0;
+    //     tx_ring[i].special = 0;
+    // }
+
     uint32_t ral = e1000_read_reg(mmio_base, 0x5400); // E1000_RAL, RAL (Receive Address Low)
     uint32_t rah = e1000_read_reg(mmio_base, 0x5404); // E1000_RAH, RAH (Receive Address High).
     
-    if (mac_out) { 
+    if (mac_out) {
         mac_out[0] = ral & 0xFF;
         mac_out[1] = (ral >> 8) & 0xFF;
         mac_out[2] = (ral >> 16) & 0xFF;
@@ -27,12 +45,15 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
         mac_out[5] = (rah >> 8) & 0xFF;
     }
 
-    e1000_write_reg(mmio_base, 0x2800, (uint64_t)rx_ring & 0xFFFFFFFF); // RDBAL (Receive Descriptor Base Address Low)
-    e1000_write_reg(mmio_base, 0x2804, (uint64_t)rx_ring >> 32); // RDBAH (Receive Descriptor Base Address High)
+    uint64_t rx_addr = (uint64_t)rx_ring;
+    uint64_t tx_addr = (uint64_t)tx_ring;
+
+    e1000_write_reg(mmio_base, 0x2800, rx_addr & 0xFFFFFFFF); // RDBAL (Receive Descriptor Base Address Low)
+    e1000_write_reg(mmio_base, 0x2804, rx_addr >> 32); // RDBAH (Receive Descriptor Base Address High)
     e1000_write_reg(mmio_base, 0x2808, RX_RING_SIZE * 16); // RDLEN (Receive Descriptor Length)
     
-    e1000_write_reg(mmio_base, 0x3800, (uint64_t)tx_ring & 0xFFFFFFFF); // TDBAL
-    e1000_write_reg(mmio_base, 0x3804, (uint64_t)tx_ring >> 32); // TDBAH
+    e1000_write_reg(mmio_base, 0x3800, tx_addr & 0xFFFFFFFF); // TDBAL
+    e1000_write_reg(mmio_base, 0x3804, tx_addr >> 32); // TDBAH
     e1000_write_reg(mmio_base, 0x3808, TX_RING_SIZE * 16); // TDLEN
 
     // Set RCTL: EN | SBP | UPE | MPE | LBM_NONE | RDMTS_HALF | BAM | SECRC | BSIZE_2048
@@ -48,10 +69,11 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
     // IMS (Interrupt Mask Set) - Offset 0xD0
     // 1 << 7 (RXT0) (Receiver Timer Interrupt) - Interrupt the CPU whenever a packet arrives
     // 1 << 2 (LSC) (Link Status Change) - Interrupt the CPU if the cable is unplugged
+    //e1000_write_reg(mmio_base, 0x00D8, 0xFFFFFFFF); // Mask all interrupts
     e1000_write_reg(mmio_base, 0x00D0, (1 << 7) | (1 << 2));
 
     // Clear any pending interrupts by reading ICR
-    e1000_read_reg(mmio_base, 0x00C0);
+    e1000_read_reg(mmio_base, 0x00C0);    
     return 0; // Success
 }
 

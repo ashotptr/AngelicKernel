@@ -38,6 +38,23 @@ void serial_print(const char* str) {
     }
 }
 
+// Put this helper function at the top of src/kernel.c
+void enable_sse(void) {
+    uint64_t cr0, cr4;
+    
+    // 1. Read CR0, clear EM (Emulation) and set MP (Monitor Co-processor)
+    asm volatile ("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1 << 2); // Clear EM (bit 2)
+    cr0 |= (1 << 1);  // Set MP (bit 1)
+    asm volatile ("mov %0, %%cr0" :: "r"(cr0));
+
+    // 2. Read CR4, set OSFXSR (bit 9) and OSXMMEXCPT (bit 10)
+    asm volatile ("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1 << 9);  // OSFXSR: Enable SSE
+    cr4 |= (1 << 10); // OSXMMEXCPT: Enable Unmasked SSE Exceptions
+    asm volatile ("mov %0, %%cr4" :: "r"(cr4));
+}
+
 // --- NETWORK CALLBACKS ---
 const char RESPONSE[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
                         "<html><body><h1>Hello from AngelicKernel!</h1>"
@@ -116,7 +133,10 @@ void serial_init() {
 
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     InitializeLib(ImageHandle, SystemTable);
-    
+
+    // 2. ENABLE SSE IMMEDIATELY (Before PMM, VMM, or LwIP)
+    // enable_sse();
+
     Print(L"AngelicKernel Phase 1: Preparing for Exodus...\n");
     
     global_mmio_base = pci_get_bar(0x8086, 0x100E);
