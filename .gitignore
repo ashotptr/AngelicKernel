@@ -8,8 +8,8 @@ src/net/*.o
 *.so
 *.efi
 *.debug
-
-OVMF_VARS.fd
-uefi_debug.log
+*.fd
+*.log
 
 internal-fs/EFI/BOOT/BOOTX64.EFI
+internal-fs/NvVars
