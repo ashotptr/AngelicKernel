@@ -1,41 +1,35 @@
 #!/bin/bash
 set -e
 
-# 1. Compile
+# compile
 make
 
-# 2. Filesystem
+# filesystem
 mkdir -p internal-fs/EFI/BOOT
 cp unikernel.efi internal-fs/EFI/BOOT/BOOTX64.EFI
 
-# 3. Launch with Monolithic Firmware + SMM OFF
-# We use the file we found in your previous 'find' command: /usr/share/ovmf/OVMF.fd
-# We force 'smm=off' and 'accel=tcg' to ensure the firmware cannot lock itself.
+if [ ! -f OVMF_VARS.fd ]; then
+    cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS_4M.fd
+fi
+
+# 3. launch Firmware
 echo "Launching Unikernel (Monolithic + SMM OFF)..."
+#echo "DEBUG MODE: Waiting for GDB on localhost:1234..."
 qemu-system-x86_64 \
+    -cpu qemu64 \
     -nographic \
     -machine q35,smm=off,accel=tcg \
     -m 512M \
-    -bios /usr/share/ovmf/OVMF.fd \
+    -drive if=pflash,format=raw,unit=0,file=/usr/share/OVMF/OVMF_CODE_4M.fd,readonly=on \
+    -drive if=pflash,format=raw,unit=1,file=./OVMF_VARS_4M.fd \
     -drive file=fat:rw:internal-fs,format=raw,media=disk \
     -device e1000,netdev=n0 \
-    -netdev user,id=n0,hostfwd=tcp::8080-:80
+    -netdev user,id=n0,hostfwd=tcp::8080-:80 \
+    -debugcon file:uefi_debug.log \
+    -global isa-debugcon.iobase=0x402
 
-# qemu-system-x86_64 \
-#   -cpu qemu64 \
-#   -drive if=pflash,format=raw,unit=0,file=path_to_OVMF_CODE.fd,readonly=on \
-#   -drive if=pflash,format=raw,unit=1,file=path_to_OVMF_VARS.fd \
-#   -net none
+#   -serial stdio \
+#   -s -S for debugging with gdb
+#  -bios /usr/share/ovmf/OVMF.fd \
 
-# qemu-system-x86_64 \
-# -cpu qemu64 \
-# -drive if=pflash,format=raw,unit=0,file=/usr/share/ovmf/OVMF.fd,readonly=on \
-# -drive if=pflash,format=raw,unit=1,file=OVMF_VARS.fd \
-# -net none \
-# -serial stdio \
-# -cdrom your_image.iso
-
-# qemu-system-x86_64 \
-# -bios /usr/share/ovmf/OVMF.fd \
-# -cdrom your_image.iso \
-# -serial stdio
+# for the future create disk images: https://wiki.osdev.org/UEFI

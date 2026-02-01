@@ -5,22 +5,14 @@
 #include "lwip/etharp.h"
 #include "netif/ethernet.h"
 #include "drivers/e1000.h"
-
-// --- FIX 1: Add Prototypes so the compiler is happy ---
-#include <stddef.h> // for size_t
+#include <stddef.h>
 
 // Defined in libefi (gnu-efi)
 void *memcpy(void *dest, const void *src, size_t n);
 
 // Defined in kernel.c
 void serial_print(const char* str);
-// -----------------------------------------------------
 
-// ---------------------------------------------------------
-// RUNTIME IMPLEMENTATION
-// ---------------------------------------------------------
-
-// lwIP needs a time source (in milliseconds)
 uint32_t sys_now(void) {
     uint32_t a, d;
     // Read Time-Stamp Counter
@@ -85,7 +77,6 @@ void angelic_netif_poll() {
 void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
     global_mmio_base = mmio_base;
     
-    // --- FIX 2: Removed 'L' prefix. Use standard ASCII strings for bare metal. ---
     serial_print("[DEBUG] Calling lwip_init()...\n");
     lwip_init();
     serial_print("[DEBUG] lwip_init() done.\n");

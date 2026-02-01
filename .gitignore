@@ -1,0 +1,15 @@
+*.o
+src/*.o
+src/arch/*.o
+src/drivers/*.o
+src/mm/*.o
+src/net/*.o
+
+*.so
+*.efi
+*.debug
+
+OVMF_VARS.fd
+uefi_debug.log
+
+internal-fs/EFI/BOOT/BOOTX64.EFI

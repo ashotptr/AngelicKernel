@@ -10,6 +10,11 @@
 #include "mm/pmm.h" 
 #include "mm/vmm.h"
 
+// address is arbitrary, but safe in QEMU
+// #define GDB_MAGIC_ADDR  0x10000 
+// #define GDB_INFO_ADDR   0x10008
+// #define MAGIC_SIGNATURE 0xDEADBEEF
+
 uint64_t global_mmio_base = 0;
 
 extern void mpk_enable();
@@ -131,9 +136,26 @@ void serial_init() {
     outb(0x3F8 + 4, 0x0B);
 }
 
+//EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) { //Microsoft ABI
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
-    InitializeLib(ImageHandle, SystemTable);
+    //SystemTable->BootServices->SetWatchdogTimer(0, 0, 0, NULL);
 
+    InitializeLib(ImageHandle, SystemTable);
+    
+    // gdb marker for debugging
+    // EFI_LOADED_IMAGE *loaded_image = NULL;
+    // EFI_GUID loaded_image_protocol = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    
+    // SystemTable->BootServices->HandleProtocol(ImageHandle, &loaded_image_protocol, (void**)&loaded_image);
+
+    // volatile uint64_t *marker = (uint64_t*)GDB_MAGIC_ADDR;
+    // volatile uint64_t *base   = (uint64_t*)GDB_INFO_ADDR;
+    
+    // *base = (uint64_t)loaded_image->ImageBase; 
+    // *marker = MAGIC_SIGNATURE; 
+
+    // Print(L"[DEBUG] GDB Marker Set. Base: 0x%lx\n", (uint64_t)loaded_image->ImageBase);
+    
     // 2. ENABLE SSE IMMEDIATELY (Before PMM, VMM, or LwIP)
     // enable_sse();
 
@@ -152,7 +174,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     Print(L"Exiting Firmware in 1s...\n");
 
-    SystemTable->BootServices->Stall(1000000); 
+    SystemTable->BootServices->Stall(1000000); //uefi_call_wrapper not needed
 
     EFI_STATUS Status;
     UINTN MapSize = 0, MapKey, DescriptorSize;
@@ -202,12 +224,16 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     e1000_init(global_mmio_base, mac);
     
     // Print MAC for debug
-    serial_print("MAC: "); 
-    serial_print_hex(mac[0]); 
-    serial_print(":");
-    serial_print_hex(mac[1]); 
-    serial_print(":");
-    serial_print_hex(mac[2]); 
+    serial_print("MAC Address: ");
+
+    for (int i = 0; i < 6; i++) {
+        serial_print_hex(mac[i]);
+
+        if (i < 5) {
+            serial_print(":");
+        }
+    }
+    
     serial_print("\n");
 
     // Phase 3 Part 1: Network Stack

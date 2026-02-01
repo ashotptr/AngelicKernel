@@ -70,3 +70,7 @@ mpk_trampoline_3:
 
 ; Mark the stack as non-executable (silences linker warning)
 section .note.GNU-stack noalloc noexec nowrite progbits
+
+; WARNING: This trampoline uses System V ABI. 
+; DO NOT use this to call UEFI functions (gBS, gST, etc). 
+; Only use this for internal kernel functions.

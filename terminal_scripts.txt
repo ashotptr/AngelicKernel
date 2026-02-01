@@ -10,3 +10,6 @@ sudo apt install build-essential qemu-system-x86 nasm gnu-efi ovmf
 
 3) making exectable
 chmod +x run.sh
+
+4) checking abi
+objdump -d src/drivers/e1000.o | grep -A 20 "<e1000_send_raw>:"
