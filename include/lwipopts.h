@@ -37,3 +37,9 @@
 #define LWIP_DNS                0  // DNS often relies on sockets, safer to disable for now
 
 #endif
+
+// consider for some options
+// https://lwip.fandom.com/wiki/LwIP_code_size 
+// https://lwip.fandom.com/wiki/Maximizing_throughput
+// https://lwip.fandom.com/wiki/Tuning_TCP
+// https://lwip.fandom.com/wiki/LwIP_Application_Developers_Manual

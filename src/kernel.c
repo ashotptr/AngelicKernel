@@ -237,7 +237,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     serial_print("\n");
 
     // Phase 3 Part 1: Network Stack
-    // Note: We pass the same MAC we just read from hardware
     init_network_stack(global_mmio_base, mac);
     
     // Phase 4 Preparation (MPK)

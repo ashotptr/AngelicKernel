@@ -13,30 +13,32 @@ void *memcpy(void *dest, const void *src, size_t n);
 // Defined in kernel.c
 void serial_print(const char* str);
 
+// this function must be defined for lwIP
 uint32_t sys_now(void) {
     uint32_t a, d;
     // Read Time-Stamp Counter
     __asm__ volatile("rdtsc" : "=a" (a), "=d" (d));
     // Approximate conversion to ms (assuming ~2GHz CPU freq for QEMU)
-    return a / 2000;
+    return a / 2000; //ensure the correct division number
 }
-int mpk_trampoline_3(void* func, uint64_t arg1, uint64_t arg2, uint64_t arg3);
-// ---------------------------------------------------------
-// NETWORK GLUE
-// ---------------------------------------------------------
 
+int mpk_trampoline_3(void* func, uint64_t arg1, uint64_t arg2, uint64_t arg3);
 static struct netif angelic_netif;
 static uint64_t global_mmio_base;
 
 static err_t low_level_output(struct netif *netif, struct pbuf *p) {
     (void)netif;
     struct pbuf *q;
-    char buffer[1514];
+    char buffer[1514]; // Ethernet Frame = 14 bytes (Header) + 1500 bytes (MTU/Data) = 1514 bytes
     int len = 0;
-
+    
+    //Critique: This is slightly dangerous in kernel development. 
+    //If your kernel stack is small (e.g., 4KB), putting a 1.5KB array on it consumes ~40% of your stack instantly. 
+    //For now, it is fine, but in the future, you might want to use a global buffer or heap allocation.
+    
     for(q = p; q != NULL; q = q->next) {
-        // memcpy is now properly declared above
         memcpy(buffer + len, q->payload, q->len);
+
         len += q->len;
     }
 
@@ -54,6 +56,7 @@ err_t angelic_netif_init(struct netif *netif) {
     netif->linkoutput = low_level_output;
     netif->mtu = 1500;
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP;
+
     return ERR_OK;
 }
 
@@ -77,16 +80,17 @@ void angelic_netif_poll() {
 void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
     global_mmio_base = mmio_base;
     
+    ip4_addr_t ip, netmask, gw;
+    
+    IP4_ADDR(&ip, 10, 0, 2, 15);
+    IP4_ADDR(&netmask, 255, 255, 255, 0);
+    IP4_ADDR(&gw, 10, 0, 2, 2);
+    
     serial_print("[DEBUG] Calling lwip_init()...\n");
     lwip_init();
     serial_print("[DEBUG] lwip_init() done.\n");
-    
-    ip4_addr_t ip, netmask, gw;
-    
-    // QEMU Default User Network Settings
-    IP4_ADDR(&ip, 10, 0, 2, 15);        // Standard Guest IP
-    IP4_ADDR(&netmask, 255, 255, 255, 0);
-    IP4_ADDR(&gw, 10, 0, 2, 2);         // Standard Gateway
+
+    //tcpip_init(tcpip_init_done, tcpip_init_done_param); 
 
     serial_print("[DEBUG] Adding netif...\n");
     netif_add(&angelic_netif, &ip, &netmask, &gw, NULL, angelic_netif_init, ethernet_input);
@@ -97,7 +101,10 @@ void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
     serial_print("[DEBUG] Bringing interface up...\n");
     netif_set_up(&angelic_netif);
     
-    for(int i=0; i<6; i++) angelic_netif.hwaddr[i] = mac[i];
+    for(int i = 0; i < 6; i++) {
+        angelic_netif.hwaddr[i] = mac[i];
+    }
+
     angelic_netif.hwaddr_len = 6;
     
     serial_print("[DEBUG] Network Stack Initialized.\n");
