@@ -429,3 +429,5 @@ Enable APIC and setup using information in ACPI tables - in the future
 Setup GDT and TSS
 
 113) https://wiki.osdev.org/Debugging_UEFI_applications_with_GDB - for debugging
+
+114) https://lwip.fandom.com/wiki/Porting_For_Bare_Metal - for lwip, tells about makefile, cc.h, lwipopts.h, sys_arch.h

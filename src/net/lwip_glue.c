@@ -8,8 +8,26 @@
 #include <stddef.h>
 
 // Defined in libefi (gnu-efi)
-void *memcpy(void *dest, const void *src, size_t n);
+//void *memcpy(void *dest, const void *src, size_t n);
+// --- CUSTOM MEMORY FUNCTIONS ---
+// We rename these to avoid conflicts with libefi/compiler builtins
+void *memcpy(void *dest, const void *src, size_t n) {
+    char *d = (char *)dest;
+    const char *s = (const char *)src;
+    while (n--) {
+        *d++ = *s++;
+    }
+    return dest;
+}
 
+void *memset(void *s, int c, size_t n) {
+    unsigned char *p = (unsigned char *)s;
+    while (n--) {
+        *p++ = (unsigned char)c;
+    }
+    return s;
+}
+// -------------------------------
 // Defined in kernel.c
 void serial_print(const char* str);
 
@@ -26,25 +44,28 @@ int mpk_trampoline_3(void* func, uint64_t arg1, uint64_t arg2, uint64_t arg3);
 static struct netif angelic_netif;
 static uint64_t global_mmio_base;
 
+static char rx_buffer[1514]; 
+static char tx_buffer[1514];
+
 static err_t low_level_output(struct netif *netif, struct pbuf *p) {
     (void)netif;
     struct pbuf *q;
-    char buffer[1514]; // Ethernet Frame = 14 bytes (Header) + 1500 bytes (MTU/Data) = 1514 bytes
     int len = 0;
-    
-    //Critique: This is slightly dangerous in kernel development. 
-    //If your kernel stack is small (e.g., 4KB), putting a 1.5KB array on it consumes ~40% of your stack instantly. 
-    //For now, it is fine, but in the future, you might want to use a global buffer or heap allocation.
-    
+
+    // Flatten pbuf chain into contiguous memory for the driver
     for(q = p; q != NULL; q = q->next) {
-        memcpy(buffer + len, q->payload, q->len);
+        if (len + q->len > 1514) {
+            break; // Safety check
+        }
+
+        memcpy(tx_buffer + len, q->payload, q->len);
 
         len += q->len;
     }
 
     //e1000_send_raw(global_mmio_base, buffer, len);
-    
-    mpk_trampoline_3(e1000_send_raw, global_mmio_base, (uint64_t)buffer, len);
+
+    mpk_trampoline_3((void*)e1000_send_raw, global_mmio_base, (uint64_t)tx_buffer, (uint64_t)len);
 
     return ERR_OK;
 }
@@ -61,15 +82,15 @@ err_t angelic_netif_init(struct netif *netif) {
 }
 
 void angelic_netif_poll() {
-    char buffer[1514];
     //int len = e1000_poll_receive(global_mmio_base, buffer, 1514);
-    
-    int len = mpk_trampoline_3(e1000_poll_receive, global_mmio_base, (uint64_t)buffer, 1514);
+
+    int len = mpk_trampoline_3((void*)e1000_poll_receive, global_mmio_base, (uint64_t)rx_buffer, 1514);
 
     if (len > 0) {
         struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
-            memcpy(p->payload, buffer, len);
+            memcpy(p->payload, rx_buffer, len);
+            
             if (angelic_netif.input(p, &angelic_netif) != ERR_OK) {
                 pbuf_free(p);
             }
@@ -91,6 +112,11 @@ void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
     serial_print("[DEBUG] lwip_init() done.\n");
 
     //tcpip_init(tcpip_init_done, tcpip_init_done_param); 
+    
+    angelic_netif.hwaddr_len = 6;
+    for(int i = 0; i < 6; i++) {
+        angelic_netif.hwaddr[i] = mac[i];
+    }
 
     serial_print("[DEBUG] Adding netif...\n");
     netif_add(&angelic_netif, &ip, &netmask, &gw, NULL, angelic_netif_init, ethernet_input);
@@ -100,12 +126,16 @@ void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
     
     serial_print("[DEBUG] Bringing interface up...\n");
     netif_set_up(&angelic_netif);
-    
-    for(int i = 0; i < 6; i++) {
-        angelic_netif.hwaddr[i] = mac[i];
-    }
 
-    angelic_netif.hwaddr_len = 6;
+    // for(int i = 0; i < 6; i++) {
+    //     angelic_netif.hwaddr[i] = mac[i];
+    // }
+
+    // angelic_netif.hwaddr_len = 6;
     
     serial_print("[DEBUG] Network Stack Initialized.\n");
 }
+
+// https://lwip.fandom.com/wiki/Writing_a_device_driver
+// https://lwip.fandom.com/wiki/Guide:_integrating_baremetal_lwip_2.2_on_a_Cortex_M
+// https://lwip.fandom.com/wiki/LwIP_Wiki

@@ -44,22 +44,31 @@ void serial_print(const char* str) {
 }
 
 // Put this helper function at the top of src/kernel.c
-void enable_sse(void) {
+static void enable_sse(void) {
     uint64_t cr0, cr4;
+
+    // 1. Read CR0
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
     
-    // 1. Read CR0, clear EM (Emulation) and set MP (Monitor Co-processor)
-    asm volatile ("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~(1 << 2); // Clear EM (bit 2)
-    cr0 |= (1 << 1);  // Set MP (bit 1)
-    asm volatile ("mov %0, %%cr0" :: "r"(cr0));
+    // 2. Clear EM (Bit 2) - Emulation
+    cr0 &= ~(1UL << 2); 
+    // 3. Set MP (Bit 1) - Monitor Coprocessor
+    cr0 |= (1UL << 1);  
+    
+    // 4. Write back CR0
+    __asm__ volatile("mov %0, %%cr0" :: "r"(cr0));
 
-    // 2. Read CR4, set OSFXSR (bit 9) and OSXMMEXCPT (bit 10)
-    asm volatile ("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1 << 9);  // OSFXSR: Enable SSE
-    cr4 |= (1 << 10); // OSXMMEXCPT: Enable Unmasked SSE Exceptions
-    asm volatile ("mov %0, %%cr4" :: "r"(cr4));
+    // 5. Read CR4
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    
+    // 6. Set OSFXSR (Bit 9) - OS Support for FXSAVE/FXRSTOR
+    cr4 |= (1UL << 9);  
+    // 7. Set OSXMMEXCPT (Bit 10) - OS Support for Unmasked SIMD Float Exceptions
+    cr4 |= (1UL << 10); 
+    
+    // 8. Write back CR4
+    __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
 }
-
 // --- NETWORK CALLBACKS ---
 const char RESPONSE[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
                         "<html><body><h1>Hello from AngelicKernel!</h1>"
@@ -157,7 +166,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     // Print(L"[DEBUG] GDB Marker Set. Base: 0x%lx\n", (uint64_t)loaded_image->ImageBase);
     
     // 2. ENABLE SSE IMMEDIATELY (Before PMM, VMM, or LwIP)
-    // enable_sse();
+    enable_sse();
 
     Print(L"AngelicKernel Phase 1: Preparing for Exodus...\n");
     
@@ -252,15 +261,24 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     serial_print("[KERNEL] Network Online. Listening on Port 80...\n");
 
+    // Flag to track if we should sleep
+    // Set this to 0 if you don't have a PIT/LAPIC timer yet!
+    int use_interrupt_sleeping = 0; 
+
     while (1) {
-        // HYBRID MODE:
-        // We are catching the interrupt in IDT (printing "Packet Arrived"), 
-        // but we rely on lwIP polling here to actually process the data.
-        // For Phase 4, you will move this poll logic into the ISR.
         angelic_netif_poll();
         
         sys_check_timeouts();
-        __asm__ volatile("hlt"); // CPU sleeps until Interrupt fires
+        
+        if (use_interrupt_sleeping) {
+             // ONLY enable this if you have a PIT/LAPIC timer firing every ~10ms.
+             // Otherwise, TCP timers will freeze until a packet arrives.
+             __asm__ volatile("hlt");
+        }
+        else {
+             // Busy wait (High CPU usage, but guarantees TCP timers work)
+             __asm__ volatile("pause"); 
+        }
     }
 
     return EFI_SUCCESS;

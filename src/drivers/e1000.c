@@ -2,6 +2,9 @@
 #include <efilib.h>
 #include "drivers/e1000.h"
 #include "sys/mpk_sections.h"
+#include "mm/pmm.h"
+
+uint64_t e1000_mmio_base_phys = 0;
 
 SECURE_DRIVER_DATA volatile struct e1000_rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
 SECURE_DRIVER_DATA volatile struct e1000_tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
@@ -15,23 +18,33 @@ SECURE_DRIVER_CODE uint32_t e1000_read_reg(uint64_t base, uint32_t offset) {
 }
 
 SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
+    e1000_mmio_base_phys = mmio_base;
+    
     // In .secure_driver_data, we must zero them manually, because the NIC will read garbage descriptors and overwrite random memory (like your Kernel Code!) via DMA.
-    // for (int i = 0; i < RX_RING_SIZE; i++) {
-    //     rx_ring[i].addr = 0; 
-    //     rx_ring[i].status = 0;
-    //     rx_ring[i].errors = 0;
-    //     rx_ring[i].length = 0;
-    //     rx_ring[i].checksum = 0;
-    //     rx_ring[i].special = 0;
-    // }
+    for (int i = 0; i < RX_RING_SIZE; i++) {
+        void* buffer = pmm_alloc_page(); 
+        
+        if (!buffer) {
+            return -1;
+        }
 
-    // for (int i = 0; i < TX_RING_SIZE; i++) {
-    //     tx_ring[i].addr = 0; 
-    //     tx_ring[i].cmd = 0;
-    //     tx_ring[i].status = 0;
-    //     tx_ring[i].css = 0;
-    //     tx_ring[i].special = 0;
-    // }
+        rx_ring[i].addr = (uint64_t)buffer;
+        rx_ring[i].status = 0;
+        rx_ring[i].errors = 0;
+        rx_ring[i].length = 0;
+        rx_ring[i].checksum = 0;
+        rx_ring[i].special = 0;
+    }
+
+    for (int i = 0; i < TX_RING_SIZE; i++) {
+        tx_ring[i].addr = 0; 
+        tx_ring[i].cmd = 0;
+        tx_ring[i].status = 1;
+        tx_ring[i].css = 0;
+        tx_ring[i].special = 0;
+    }
+
+    e1000_write_reg(mmio_base, 0x0000, e1000_read_reg(mmio_base, 0x0000) | 0x40);
 
     uint32_t ral = e1000_read_reg(mmio_base, 0x5400); // E1000_RAL, RAL (Receive Address Low)
     uint32_t rah = e1000_read_reg(mmio_base, 0x5404); // E1000_RAH, RAH (Receive Address High).
@@ -52,9 +65,17 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
     e1000_write_reg(mmio_base, 0x2804, rx_addr >> 32); // RDBAH (Receive Descriptor Base Address High)
     e1000_write_reg(mmio_base, 0x2808, RX_RING_SIZE * 16); // RDLEN (Receive Descriptor Length)
     
+    // CRITICAL: Initialize Head and Tail
+    e1000_write_reg(mmio_base, 0x2810, 0); // RDH (Head)
+    e1000_write_reg(mmio_base, 0x2818, RX_RING_SIZE - 1); // RDT (Tail) - Start at end so all descriptors are available
+    
     e1000_write_reg(mmio_base, 0x3800, tx_addr & 0xFFFFFFFF); // TDBAL
     e1000_write_reg(mmio_base, 0x3804, tx_addr >> 32); // TDBAH
     e1000_write_reg(mmio_base, 0x3808, TX_RING_SIZE * 16); // TDLEN
+    
+    // CRITICAL: Initialize Head and Tail
+    e1000_write_reg(mmio_base, 0x3810, 0); // TDH (Head)
+    e1000_write_reg(mmio_base, 0x3818, 0); // TDT (Tail)
 
     // Set RCTL: EN | SBP | UPE | MPE | LBM_NONE | RDMTS_HALF | BAM | SECRC | BSIZE_2048
     // 1 << 1 (EN): Enable Receiver. Turns the radio on.
@@ -73,13 +94,13 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
     e1000_write_reg(mmio_base, 0x00D0, (1 << 7) | (1 << 2));
 
     // Clear any pending interrupts by reading ICR
-    e1000_read_reg(mmio_base, 0x00C0);    
-    return 0; // Success
+    e1000_read_reg(mmio_base, 0x00C0);
+
+    return 0; 
 }
 
 SECURE_DRIVER_CODE int e1000_send_raw(uint64_t mmio_base, void *data, uint16_t len) {
     static int tx_idx = 0;
-    
     // 1. Capture the index we are using for THIS packet
     int current_idx = tx_idx;
 
@@ -94,6 +115,10 @@ SECURE_DRIVER_CODE int e1000_send_raw(uint64_t mmio_base, void *data, uint16_t l
 
     // 3. Update Tail to the NEXT available slot
     tx_idx = (tx_idx + 1) % TX_RING_SIZE;
+    
+    // MEMORY BARRIER: Ensure descriptors are written to RAM before notifying hardware
+    __asm__ volatile("" ::: "memory");
+    
     e1000_write_reg(mmio_base, 0x3818, tx_idx); // TDT
 
     // 4. Wait for the CURRENT packet to finish
@@ -109,17 +134,28 @@ SECURE_DRIVER_CODE int e1000_poll_receive(uint64_t mmio_base, void *buffer, uint
         uint16_t len = rx_ring[rx_idx].length;
         if (len > max_len) len = max_len;
         
-        // Copy out (crucial for MPK isolation: copy from "Driver Page" to "App Buffer")
-        CopyMem(buffer, (void*)rx_ring[rx_idx].addr, len);
+        // Copy out.
+        // NOTE: We use a raw loop because CopyMem (UEFI) might be disabled/unsafe after ExitBootServices.
+        char* packet_src = (char*)rx_ring[rx_idx].addr;
+        char* packet_dst = (char*)buffer;
+        
+        for (uint16_t i = 0; i < len; i++) {
+             packet_dst[i] = packet_src[i];
+        }
         
         // Reset descriptor
         rx_ring[rx_idx].status = 0;
-        
+
         // Advance and notify hardware
         rx_idx = (rx_idx + 1) % RX_RING_SIZE;
+        
+        // MEMORY BARRIER: Ensure status is cleared in RAM before notifying hardware
+        __asm__ volatile("" ::: "memory");
+        
         e1000_write_reg(mmio_base, 0x2818, rx_idx); // RDT
         
         return len;
     }
+
     return 0; // No data
 }

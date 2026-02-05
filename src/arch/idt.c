@@ -34,7 +34,7 @@ static idt_entry_t idt[256];
 static idtr_t idtr;
 
 extern uint32_t e1000_read_reg(uint64_t base, uint32_t offset);
-extern uint64_t global_mmio_base; // You need to store mmio_base globally to use it here
+extern uint64_t e1000_mmio_base_phys; // You need to store mmio_base globally to use it here
 extern void* isr_stub_table[];
 extern void load_idt(void* idtr_ptr);
 extern void serial_print(const char* str);
@@ -122,8 +122,8 @@ void interrupt_handler(registers_t* regs) {
         // serial_print("IRQ Received\n");
         
         // check pci interrupt (IRQ 10 or 11 for QEMU e1000), check e1000 status for IRQ > 32 to be safe for this phase
-        if (global_mmio_base != 0) {
-             uint32_t cause = e1000_read_reg(global_mmio_base, 0xC0); // 0xC0 = ICR (Interrupt Cause Register)
+        if (e1000_mmio_base_phys != 0) {
+             uint32_t cause = e1000_read_reg(e1000_mmio_base_phys, 0xC0); // 0xC0 = ICR (Interrupt Cause Register)
 
              if (cause & 0x80) { // Bit 7 = RXT0 (Timer Interrupt / Packet Received)
                  // A packet is waiting!

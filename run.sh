@@ -16,7 +16,7 @@ fi
 echo "Launching Unikernel (Monolithic + SMM OFF)..."
 #echo "DEBUG MODE: Waiting for GDB on localhost:1234..."
 qemu-system-x86_64 \
-    -cpu qemu64 \
+    -cpu max \
     -nographic \
     -machine q35,smm=off,accel=tcg \
     -m 512M \
