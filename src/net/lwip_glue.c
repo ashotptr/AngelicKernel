@@ -6,6 +6,7 @@
 #include "netif/ethernet.h"
 #include "drivers/e1000.h"
 #include <stddef.h>
+#include <stdint.h>
 
 // Defined in libefi (gnu-efi)
 //void *memcpy(void *dest, const void *src, size_t n);
@@ -31,13 +32,47 @@ void *memset(void *s, int c, size_t n) {
 // Defined in kernel.c
 void serial_print(const char* str);
 
+// 1. Implementation of abort()
+// This prevents the "Invalid Opcode" crash by giving the CPU a valid loop to sit in.
+// void abort(void) {
+//     serial_print("\n[FATAL] lwIP called abort()! System Halted.\n");
+//     while (1) {
+//         __asm__ volatile("hlt");
+//     }
+// }
+
+// // 2. Implementation of printf()
+// // lwIP uses this to tell you WHY it is aborting (e.g., "pbuf_alloc failed").
+// // We map it to your kernel's serial output.
+// int printf(const char *fmt, ...) {
+//     // Note: For a proper implementation, you would use vsnprintf.
+//     // For now, we just print the format string to catch the error message.
+//     serial_print("[LWIP MSG] ");
+//     serial_print(fmt); 
+//     // If your serial_print doesn't handle newlines automatically:
+//     serial_print("\n");
+//     return 0;
+// }
+// // 1. The missing function implementation
+// int rand(void) {
+//     static unsigned long next = 1;
+//     next = next * 1103515245 + 12345;
+//     return (unsigned int)(next / 65536) % 32768;
+// }
+
+// // 2. Sometimes lwIP expects 'srand' too, just in case:
+// void srand(unsigned int seed) {
+//     (void)seed; // We don't have storage for seed yet, or use a static variable if needed
+// }
 // this function must be defined for lwIP
 uint32_t sys_now(void) {
     uint32_t a, d;
     // Read Time-Stamp Counter
     __asm__ volatile("rdtsc" : "=a" (a), "=d" (d));
-    // Approximate conversion to ms (assuming ~2GHz CPU freq for QEMU)
-    return a / 2000; //ensure the correct division number
+    
+    // 2GHz = 2,000,000 cycles per millisecond
+    // Divide by 2,000,000 (approximate)
+    return a / 2000000; 
 }
 
 int mpk_trampoline_3(void* func, uint64_t arg1, uint64_t arg2, uint64_t arg3);

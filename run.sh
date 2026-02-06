@@ -26,10 +26,10 @@ qemu-system-x86_64 \
     -device e1000,netdev=n0 \
     -netdev user,id=n0,hostfwd=tcp::8080-:80 \
     -debugcon file:uefi_debug.log \
-    -global isa-debugcon.iobase=0x402
+    -global isa-debugcon.iobase=0x402 #\
+    #-s -S # for debugging with gdb
 
 #   -serial stdio \
-#   -s -S for debugging with gdb
 #  -bios /usr/share/ovmf/OVMF.fd \
 
 # for the future create disk images: https://wiki.osdev.org/UEFI

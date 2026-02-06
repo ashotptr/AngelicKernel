@@ -226,13 +226,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     pmm_init(MemoryMap, MapSize, DescriptorSize);
     vmm_init(); 
 
-    // Phase 3: Driver & Interrupts
     init_idt();
     
-    // Initialize Hardware (This fills the 'mac' variable)
     e1000_init(global_mmio_base, mac);
     
-    // Print MAC for debug
     serial_print("MAC Address: ");
 
     for (int i = 0; i < 6; i++) {
@@ -245,7 +242,23 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     
     serial_print("\n");
 
-    // Phase 3 Part 1: Network Stack
+    // --- NEW DEBUG INFO ---
+    serial_print("--- DEBUG INFO ---\n");
+    serial_print("Function 'init_network_stack' is at: ");
+    serial_print_hex((uint64_t)&init_network_stack); 
+    serial_print("\n------------------\n");
+    // ----------------------
+
+    // ==========================================================
+    // [DEBUG TRAP] Pauses execution so you can attach GDB safely
+    // ==========================================================
+    serial_print("[DEBUG] Waiting for GDB... Attach now!\n");
+    volatile int debug_wait = 0;
+    while (debug_wait) {
+        __asm__ volatile("pause");
+    }
+    // ==========================================================
+
     init_network_stack(global_mmio_base, mac);
     
     // Phase 4 Preparation (MPK)

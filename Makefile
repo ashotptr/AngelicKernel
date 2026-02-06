@@ -7,7 +7,7 @@ CFLAGS = -I. -Iinclude -Isrc/lwip/src/include \
     -fno-stack-protector -ffreestanding -fpic -fshort-wchar -mno-red-zone \
     -mno-mmx -mno-sse \
     -Wall -Wextra -DEFI_FUNCTION_WRAPPER -DGNU_EFI_USE_MS_ABI -g
-    #-DNO_SYS=1 -Dmemset=angelic_memset -Dmemcpy=angelic_memcpy
+    -DNO_SYS=1 -Dmemset=angelic_memset -Dmemcpy=angelic_memcpy #not sure about this line
 
 LWIP_CORE = src/lwip/src/core/init.c \
             src/lwip/src/core/def.c \
