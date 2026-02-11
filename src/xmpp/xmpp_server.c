@@ -1,15 +1,14 @@
 #include "xmpp_structs.h"
 #include <string.h>
-#include <stdio.h>  // Add this to fix implicit snprintf
-// Helper: Simple string search (strstr replacement if needed)
+#include <stdio.h>
+
+void serial_print(const char* str);
+
 int str_contains(const char *haystack, const char *needle) {
     return (strstr(haystack, needle) != NULL);
 }
 
-// ---------------------------------------------------------
-// XMPP PROTOCOL HANDLERS
-// ---------------------------------------------------------
-
+// xmpp protocol handlers
 // 1. Initial Handshake & SASL Bypass
 // Cited from XEP-0045 & RFC 6120: We spoof SASL to force ANONYMOUS login.
 void handle_handshake(struct tcp_pcb *pcb) {
@@ -24,6 +23,7 @@ void handle_handshake(struct tcp_pcb *pcb) {
         "</stream:features>";
     
     tcp_write(pcb, response, strlen(response), TCP_WRITE_FLAG_COPY);
+    tcp_output(pcb);
 }
 
 // 2. Service Discovery (Disco)
@@ -94,7 +94,8 @@ void handle_join_room(struct tcp_pcb *pcb, char *room_name, char *nick, char *fu
         if (r->users[i].active) {
             // Notify them about ME
             tcp_write(r->users[i].pcb, presence, strlen(presence), TCP_WRITE_FLAG_COPY);
-            
+            tcp_output(r->users[i].pcb);
+
             // Notify ME about THEM (if it's not me)
             if (r->users[i].pcb != pcb) {
                  char other_pres[512];
@@ -102,6 +103,7 @@ void handle_join_room(struct tcp_pcb *pcb, char *room_name, char *nick, char *fu
                     "<presence from='%s@muc.angelic.local/%s' to='%s'/>",
                     room_name, r->users[i].nick, full_from_jid);
                  tcp_write(pcb, other_pres, strlen(other_pres), TCP_WRITE_FLAG_COPY);
+                 tcp_output(pcb);
             }
         }
     }
@@ -136,7 +138,7 @@ void handle_message(struct tcp_pcb *pcb, char *room_name, char *body) {
         "<body>%s</body></message>",
         room_name, sender_nick, body);
 
-    for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
         if (r->users[i].active) {
             // Fix the 'to' address for each recipient
             // Note: In a real implementation, you'd replace 'ROOM' dynamically or loop better.
@@ -147,19 +149,17 @@ void handle_message(struct tcp_pcb *pcb, char *room_name, char *body) {
                 "<message type='groupchat' from='%s@muc.angelic.local/%s' to='%s'>"
                 "<body>%s</body></message>",
                 room_name, sender_nick, r->users[i].jid, body);
-            
+
             tcp_write(r->users[i].pcb, personal_msg, strlen(personal_msg), TCP_WRITE_FLAG_COPY);
+            tcp_output(r->users[i].pcb);
         }
     }
 }
 
-// ---------------------------------------------------------
-// LWIP CALLBACKS
-// ---------------------------------------------------------
-
+// lwIP callbacks
 err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
-    (void)arg; // Add this
-    (void)err; // Add this
+    (void)arg;
+    (void)err;
     if (p == NULL) {
         // Disconnect
         tcp_close(pcb);
@@ -174,7 +174,11 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
     memcpy(buffer, data, len);
     buffer[len] = '\0';
 
-    // --- PARSER (Very Basic State Machine) ---
+    serial_print("[XMPP RECV] > ");
+    serial_print(buffer);
+    serial_print("\n");
+
+    // parser (Very Basic State Machine) ---
     
     if (str_contains(buffer, "<stream:stream")) {
         handle_handshake(pcb);

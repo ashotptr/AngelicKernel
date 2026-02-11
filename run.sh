@@ -24,7 +24,7 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,unit=1,file=./OVMF_VARS_4M.fd \
     -drive file=fat:rw:internal-fs,format=raw,media=disk \
     -device e1000,netdev=n0 \
-    -netdev user,id=n0,hostfwd=tcp::8080-:80 \
+    -netdev user,id=n0,hostfwd=tcp::5222-:5222 \
     -debugcon file:uefi_debug.log \
     -global isa-debugcon.iobase=0x402 #\
     #-s -S # for debugging with gdb

@@ -15,6 +15,8 @@
 // #define GDB_INFO_ADDR   0x10008
 // #define MAGIC_SIGNATURE 0xDEADBEEF
 
+extern volatile int packet_pending;
+
 uint64_t global_mmio_base = 0;
 
 extern void mpk_enable();
@@ -45,7 +47,6 @@ void serial_print(const char* str) {
     }
 }
 
-// Put this helper function at the top of src/kernel.c
 static void enable_sse(void) {
     uint64_t cr0, cr4;
 
@@ -53,7 +54,8 @@ static void enable_sse(void) {
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
     
     // 2. Clear EM (Bit 2) - Emulation
-    cr0 &= ~(1UL << 2); 
+    cr0 &= ~(1UL << 2);
+
     // 3. Set MP (Bit 1) - Monitor Coprocessor
     cr0 |= (1UL << 1);  
     
@@ -64,7 +66,8 @@ static void enable_sse(void) {
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
     
     // 6. Set OSFXSR (Bit 9) - OS Support for FXSAVE/FXRSTOR
-    cr4 |= (1UL << 9);  
+    cr4 |= (1UL << 9);
+    
     // 7. Set OSXMMEXCPT (Bit 10) - OS Support for Unmasked SIMD Float Exceptions
     cr4 |= (1UL << 10); 
     
@@ -114,7 +117,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     // Print(L"[DEBUG] GDB Marker Set. Base: 0x%lx\n", (uint64_t)loaded_image->ImageBase);
     
-    // 2. ENABLE SSE IMMEDIATELY (Before PMM, VMM, or LwIP)
     enable_sse();
 
     Print(L"AngelicKernel Phase 1: Preparing for Exodus...\n");
@@ -191,22 +193,16 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     
     serial_print("\n");
 
-    // --- NEW DEBUG INFO ---
     serial_print("--- DEBUG INFO ---\n");
     serial_print("Function 'init_network_stack' is at: ");
     serial_print_hex((uint64_t)&init_network_stack); 
     serial_print("\n------------------\n");
-    // ----------------------
 
-    // ==========================================================
-    // [DEBUG TRAP] Pauses execution so you can attach GDB safely
-    // ==========================================================
     serial_print("[DEBUG] Waiting for GDB... Attach now!\n");
     volatile int debug_wait = 0;
     while (debug_wait) {
         __asm__ volatile("pause");
     }
-    // ==========================================================
 
     init_network_stack(global_mmio_base, mac);
     
@@ -217,9 +213,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     
     // Enable Interrupts globally
     __asm__ volatile("sti");
+
     serial_print("[KERNEL] Interrupts Enabled.\n");
     
     serial_print("[XMPP] Starting MUC Server on Port 5222...\n");
+
     xmpp_init_server();
 
     // Flag to track if we should sleep
@@ -227,19 +225,18 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     int use_interrupt_sleeping = 0; 
 
     while (1) {
-        angelic_netif_poll();
-        
+        if (packet_pending) {
+            // [FIX] Loop this a few times to drain the hardware buffer.
+            // Since angelic_netif_poll() returns void, we blindly call it 
+            // a few times. 4 is usually enough to clear a burst.
+            for(int i = 0; i < 4; i++) {
+                angelic_netif_poll();
+            }
+
+            packet_pending = 0; 
+        }
+
         sys_check_timeouts();
-        
-        if (use_interrupt_sleeping) {
-             // ONLY enable this if you have a PIT/LAPIC timer firing every ~10ms.
-             // Otherwise, TCP timers will freeze until a packet arrives.
-             __asm__ volatile("hlt");
-        }
-        else {
-             // Busy wait (High CPU usage, but guarantees TCP timers work)
-             __asm__ volatile("pause"); 
-        }
     }
 
     return EFI_SUCCESS;

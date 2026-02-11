@@ -1,5 +1,7 @@
 #include <stdint.h>
 
+volatile int packet_pending = 0;
+
 // Matches the registers saved in assembly
 typedef struct {
     // General Purpose Registers (Last pushed = First here)
@@ -34,7 +36,7 @@ static idt_entry_t idt[256];
 static idtr_t idtr;
 
 extern uint32_t e1000_read_reg(uint64_t base, uint32_t offset);
-extern uint64_t e1000_mmio_base_phys; // You need to store mmio_base globally to use it here
+extern uint64_t e1000_mmio_base_phys;
 extern void* isr_stub_table[];
 extern void load_idt(void* idtr_ptr);
 extern void serial_print(const char* str);
@@ -97,20 +99,21 @@ void idt_set_gate(uint8_t vector, void* isr) {
 }
 
 void init_idt() {
-    // 1. Remap PIC so hardware IRQs start at 32 instead of 0
+    // Remap PIC so hardware IRQs start at 32 instead of 0
     pic_remap(32, 40);
 
-    // 2. Unmask all interrupts (for now) to ensure we get e1000
+    // Unmask all interrupts (for now) to ensure we get e1000
     outb(PIC1_DATA, 0x00);
     outb(PIC2_DATA, 0x00);
 
-    // 3. Install stubs for Exceptions (0-31) and IRQs (32-47)
+    // Install stubs for Exceptions (0-31) and IRQs (32-47)
     for (int i = 0; i < 48; i++) {
         idt_set_gate(i, isr_stub_table[i]);
     }
 
     idtr.limit = sizeof(idt) - 1;
     idtr.base = (uint64_t)&idt;
+
     load_idt(&idtr);
     
     serial_print("[KERNEL] IDT Initialized (PIC Remapped).\n");
@@ -123,13 +126,17 @@ void interrupt_handler(registers_t* regs) {
         
         // check pci interrupt (IRQ 10 or 11 for QEMU e1000), check e1000 status for IRQ > 32 to be safe for this phase
         if (e1000_mmio_base_phys != 0) {
-             uint32_t cause = e1000_read_reg(e1000_mmio_base_phys, 0xC0); // 0xC0 = ICR (Interrupt Cause Register)
+            uint32_t cause = e1000_read_reg(e1000_mmio_base_phys, 0xC0); // Read ICR
 
-             if (cause & 0x80) { // Bit 7 = RXT0 (Timer Interrupt / Packet Received)
-                 // A packet is waiting!
-                 // Ideally, you set a flag here, but for now, we just clear it.
-                 serial_print("[INT] Packet Arrived!\n");
-             }
+            if (cause != 0) { // Bit 7 = RXT0 (Timer Interrupt / Packet Received)
+                serial_print("[INT] e1000 Cause: "); 
+                serial_print_hex(cause); 
+                serial_print("\n");
+
+                // If it's a Receive interrupt (Bit 7) OR a General/Link interrupt
+                // Just flag the kernel to look at the card. It's cheap to check.
+                packet_pending = 1;
+            }
         }
 
         pic_send_eoi(regs->int_no - 32);
@@ -145,11 +152,15 @@ void interrupt_handler(registers_t* regs) {
 
     if (regs->int_no == 14) {
         uint64_t cr2;
+        
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+
         serial_print("\nPAGE FAULT @ Address: ");
+        
         serial_print_hex(cr2);
     } 
 
     serial_print("\nHalting system.\n");
+    
     __asm__ volatile ("cli; hlt");
 }

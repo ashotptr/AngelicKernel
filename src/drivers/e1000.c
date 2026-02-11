@@ -101,28 +101,27 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
 
 SECURE_DRIVER_CODE int e1000_send_raw(uint64_t mmio_base, void *data, uint16_t len) {
     static int tx_idx = 0;
-    // 1. Capture the index we are using for THIS packet
+    // capture the index we are using for this packet
     int current_idx = tx_idx;
 
-    // 2. Map data
+    // map data
     tx_ring[current_idx].addr = (uint64_t)data;
     tx_ring[current_idx].length = len;
     tx_ring[current_idx].cmd = (1 << 0) | (1 << 3); // EOP | RS (Report Status)
     
-    // CRITICAL: Clear status. If we wrap around later, this must be 0 
-    // so we don't think a previous finished packet is the current one.
+    // clear status. If we wrap around later, this must be 0 so we don't think a previous finished packet is the current one.
     tx_ring[current_idx].status = 0;
 
-    // 3. Update Tail to the NEXT available slot
+    // update Tail to the next available slot
     tx_idx = (tx_idx + 1) % TX_RING_SIZE;
     
-    // MEMORY BARRIER: Ensure descriptors are written to RAM before notifying hardware
+    // memory barrier: ensure descriptors are written to RAM before notifying hardware
     __asm__ volatile("" ::: "memory");
     
     e1000_write_reg(mmio_base, 0x3818, tx_idx); // TDT
 
-    // 4. Wait for the CURRENT packet to finish
-    // FIX: We now check 'current_idx', not 'tx_idx'
+    // wait for the current packet to finish
+    // we now check 'current_idx', not 'tx_idx'
     while (!(tx_ring[current_idx].status & 1)); 
     
     return 0;
@@ -130,32 +129,37 @@ SECURE_DRIVER_CODE int e1000_send_raw(uint64_t mmio_base, void *data, uint16_t l
 
 SECURE_DRIVER_CODE int e1000_poll_receive(uint64_t mmio_base, void *buffer, uint16_t max_len) {
     static int rx_idx = 0;
-    if (rx_ring[rx_idx].status & 1) { // DD (Descriptor Done) bit set
+
+    // check if the current descriptor has the "Done" (DD) bit set
+    if (rx_ring[rx_idx].status & 1) { 
         uint16_t len = rx_ring[rx_idx].length;
         if (len > max_len) len = max_len;
         
-        // Copy out.
-        // NOTE: We use a raw loop because CopyMem (UEFI) might be disabled/unsafe after ExitBootServices.
+        // copy the packet data out
         char* packet_src = (char*)rx_ring[rx_idx].addr;
         char* packet_dst = (char*)buffer;
         
         for (uint16_t i = 0; i < len; i++) {
              packet_dst[i] = packet_src[i];
         }
-        
-        // Reset descriptor
+
+        // reset the status for reuse
         rx_ring[rx_idx].status = 0;
 
-        // Advance and notify hardware
+        // advance our software index
+        int old_idx = rx_idx;
         rx_idx = (rx_idx + 1) % RX_RING_SIZE;
         
-        // MEMORY BARRIER: Ensure status is cleared in RAM before notifying hardware
-        __asm__ volatile("" ::: "memory");
-        
-        e1000_write_reg(mmio_base, 0x2818, rx_idx); // RDT
-        
+        // memory barrier: ensure status is cleared in RAM before notifying hardware
+        //__asm__ volatile("" ::: "memory");
+
+        // update the Receive Descriptor Tail (RDT)
+        // We tell the hardware: "The slot at 'old_idx' is now free for you to use."
+        // RDT points to the descriptor *beyond* the valid data, so we set it to the one we just cleaned.
+        e1000_write_reg(mmio_base, 0x2818, old_idx); 
+
         return len;
     }
-
+    
     return 0; // No data
 }
