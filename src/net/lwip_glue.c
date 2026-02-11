@@ -11,22 +11,22 @@
 // Defined in libefi (gnu-efi)
 //void *memcpy(void *dest, const void *src, size_t n);
 // rename these to avoid conflicts with libefi/compiler builtins
-void *memcpy(void *dest, const void *src, size_t n) {
-    char *d = (char *)dest;
-    const char *s = (const char *)src;
-    while (n--) {
-        *d++ = *s++;
-    }
-    return dest;
-}
+// void *memcpy(void *dest, const void *src, size_t n) {
+//     char *d = (char *)dest;
+//     const char *s = (const char *)src;
+//     while (n--) {
+//         *d++ = *s++;
+//     }
+//     return dest;
+// }
 
-void *memset(void *s, int c, size_t n) {
-    unsigned char *p = (unsigned char *)s;
-    while (n--) {
-        *p++ = (unsigned char)c;
-    }
-    return s;
-}
+// void *memset(void *s, int c, size_t n) {
+//     unsigned char *p = (unsigned char *)s;
+//     while (n--) {
+//         *p++ = (unsigned char)c;
+//     }
+//     return s;
+// }
 
 void serial_print(const char* str);
 
@@ -178,3 +178,5 @@ void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
 // https://lwip.fandom.com/wiki/Writing_a_device_driver
 // https://lwip.fandom.com/wiki/Guide:_integrating_baremetal_lwip_2.2_on_a_Cortex_M
 // https://lwip.fandom.com/wiki/LwIP_Wiki
+
+// 4.1.2 Example of TCP echo server demonstration

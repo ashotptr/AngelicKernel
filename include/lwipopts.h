@@ -13,6 +13,15 @@
 #define PBUF_POOL_SIZE          32
 
 #define MEMP_NUM_TCP_SEG        32
+// MEMP_NUM_TCP_PCB_LISTEN
+// PBUF_POOL_BUFSIZE
+
+// --- 4. Tuning ---
+#define TCP_MSS                 1460
+#define TCP_WND                 (8 * TCP_MSS) // Increased to ~11KB for better speed
+#define TCP_SND_BUF             (8 * TCP_MSS)
+
+// TCP_SND_QUEUELEN
 
 // --- 3. Protocol Settings ---
 #define LWIP_ARP                1
@@ -22,11 +31,6 @@
 #define LWIP_UDP                1
 #define LWIP_ICMP               1
 #define LWIP_DHCP               0  // Static IP
-
-// --- 4. Tuning ---
-#define TCP_MSS                 1460
-#define TCP_WND                 (8 * TCP_MSS) // Increased to ~11KB for better speed
-#define TCP_SND_BUF             (8 * TCP_MSS)
 
 // #define LWIP_DEBUG LWIP_DBG_ON
 
@@ -62,3 +66,19 @@
 // https://lwip.fandom.com/wiki/LwIP_Application_Developers_Manual
 // https://lwip.fandom.com/wiki/Custom_memory_pools
 // https://lwip.fandom.com/wiki/Lwipopts.h
+
+// Table 7. LwIP memory configuration
+// LwIP memory option Definition
+// MEM_SIZE LwIP heap memory size: used for all LwIP dynamic memory
+// allocations.
+// MEMP_NUM_PBUF Total number of MEM_REF and MEM_ROM pbufs.
+// MEMP_NUM_UDP_PCB Total number of UDP PCB structures.
+// MEMP_NUM_TCP_PCB Total number of TCP PCB structures.
+// MEMP_NUM_TCP_PCB_LISTEN Total number of listening TCP PCBs.
+// MEMP_NUM_TCP_SEG Maximum number of simultaneously queued TCP segments.
+// PBUF_POOL_SIZE Total number of PBUF_POOL type pbufs.
+// PBUF_POOL_BUFSIZE Size of a PBUF_POOL type pbufs.
+// TCP_MSS TCP maximum segment size.
+// TCP_SND_BUF TCP send buffer space for a connection.
+// TCP_SND_QUEUELEN Maximum number of pbufs in the TCP send queue.
+// TCP_WND Advertised TCP receive window size.

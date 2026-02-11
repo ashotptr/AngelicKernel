@@ -14,7 +14,7 @@ typedef int32_t   s32_t;
 //typedef uint64_t u64_t;
 typedef uintptr_t mem_ptr_t;
 
-/* 2. Endianness (CRITICAL for x86_64) */
+/* 2. Endianness */
 #ifndef BYTE_ORDER
 #define BYTE_ORDER  LITTLE_ENDIAN
 #endif
@@ -36,25 +36,20 @@ typedef uintptr_t mem_ptr_t;
 #define PACK_STRUCT_END
 
 /* 5. Random Number Generator */
-/* TCP needs this for sequence numbers. 
-   If you have a timer, use it: #define LWIP_RAND() ((u32_t)get_timer_ticks()) 
-   For now, a simple counter or constant allows compilation, but is not secure. */
-extern u32_t get_ticks(void); // Ensure this exists in your kernel or use a dummy for now
-#define LWIP_RAND() ((u32_t)get_ticks())
+extern u32_t sys_now(void); 
+#define LWIP_RAND() sys_now()
 
 /* 6. Diagnostics & Logging */
-/* Map to your serial output function */
-extern void serial_print(const char *str); // Ensure this matches your kernel API
+extern int printf(const char *fmt, ...);
 
-// Optional: If you implement a full printf, use this:
-// #define LWIP_PLATFORM_DIAG(x) do { kprintf x; } while(0)
-// For now, valid to leave empty if you don't want debug spam:
-#define LWIP_PLATFORM_DIAG(x) do { } while(0)
+#define LWIP_PLATFORM_DIAG(x) do { printf x; } while(0)
 
-/* Fatal Error Handler - Hangs the kernel so you can see the error */
+extern void serial_print(const char *str);
+
 #define LWIP_PLATFORM_ASSERT(x) do { \
-    serial_print("\n[LWIP FATAL]: "); \
+    serial_print("\n[LWIP ASSERT]: "); \
     serial_print(x); \
+    serial_print("\n"); \
     while(1); \
 } while(0)
 

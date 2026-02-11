@@ -431,3 +431,15 @@ Setup GDT and TSS
 113) https://wiki.osdev.org/Debugging_UEFI_applications_with_GDB - for debugging
 
 114) https://lwip.fandom.com/wiki/Porting_For_Bare_Metal - for lwip, tells about makefile, cc.h, lwipopts.h, sys_arch.h
+
+115) 
+Table 6. Ethernet interface functions description
+Function Description
+low_level_init Calls the Ethernet driver functions to initialize the STM32F4xx
+Ethernet peripheral
+low_level_output Calls the Ethernet driver functions to send an Ethernet packet
+low_level_input Calls the Ethernet driver functions to receive an Ethernet packet.
+ethernetif_init Initializes the network interface structure (netif) and calls
+low_level_init to initialize the Ethernet peripheral
+ethernet_input Calls low_level_input to receive a packet then provide it to the
+LwIP stack
