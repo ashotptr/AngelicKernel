@@ -20,6 +20,8 @@ uint64_t global_mmio_base = 0;
 extern void mpk_enable();
 extern void vmm_protect_driver();
 
+void xmpp_init_server(void);
+
 void init_idt();
 
 static inline void outb(UINT16 port, UINT8 val) {

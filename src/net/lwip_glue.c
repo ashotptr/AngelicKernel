@@ -7,6 +7,7 @@
 #include "drivers/e1000.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h> // Add this to fix implicit memcpy
 
 // Defined in libefi (gnu-efi)
 //void *memcpy(void *dest, const void *src, size_t n);

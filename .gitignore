@@ -13,4 +13,3 @@ src/net/*.o
 
 internal-fs/EFI/BOOT/BOOTX64.EFI
 internal-fs/NvVars
-xmpp

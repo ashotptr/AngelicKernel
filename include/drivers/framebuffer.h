@@ -22,7 +22,7 @@ static void put_pixel(UINT32 x, UINT32 y, UINT32 color) {
 }
 
 // Draw a box (visual heartbeat)
-static void draw_rect(UINT32 x, UINT32 y, UINT32 w, UINT32 h, UINT32 color) {
+static inline void draw_rect(UINT32 x, UINT32 y, UINT32 w, UINT32 h, UINT32 color) {
     for (UINT32 i = 0; i < w; i++) {
         for (UINT32 j = 0; j < h; j++) {
             put_pixel(x + i, y + j, color);
