@@ -10,8 +10,7 @@
 
 // Defined in libefi (gnu-efi)
 //void *memcpy(void *dest, const void *src, size_t n);
-// --- CUSTOM MEMORY FUNCTIONS ---
-// We rename these to avoid conflicts with libefi/compiler builtins
+// rename these to avoid conflicts with libefi/compiler builtins
 void *memcpy(void *dest, const void *src, size_t n) {
     char *d = (char *)dest;
     const char *s = (const char *)src;
@@ -28,8 +27,7 @@ void *memset(void *s, int c, size_t n) {
     }
     return s;
 }
-// -------------------------------
-// Defined in kernel.c
+
 void serial_print(const char* str);
 
 // 1. Implementation of abort()
@@ -90,7 +88,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p) {
     // Flatten pbuf chain into contiguous memory for the driver
     for(q = p; q != NULL; q = q->next) {
         if (len + q->len > 1514) {
-            break; // Safety check
+            break;
         }
 
         memcpy(tx_buffer + len, q->payload, q->len);
@@ -98,9 +96,11 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p) {
         len += q->len;
     }
 
-    //e1000_send_raw(global_mmio_base, buffer, len);
-
-    mpk_trampoline_3((void*)e1000_send_raw, global_mmio_base, (uint64_t)tx_buffer, (uint64_t)len);
+    #ifdef USE_MPK
+        mpk_trampoline_3((void*)e1000_send_raw, global_mmio_base, (uint64_t)tx_buffer, (uint64_t)len);
+    #else
+        e1000_send_raw(global_mmio_base, (uint8_t*)tx_buffer, len);
+    #endif
 
     return ERR_OK;
 }
@@ -117,9 +117,13 @@ err_t angelic_netif_init(struct netif *netif) {
 }
 
 void angelic_netif_poll() {
-    //int len = e1000_poll_receive(global_mmio_base, buffer, 1514);
+    int len;
 
-    int len = mpk_trampoline_3((void*)e1000_poll_receive, global_mmio_base, (uint64_t)rx_buffer, 1514);
+    #ifdef USE_MPK
+        len = mpk_trampoline_3((void*)e1000_poll_receive, global_mmio_base, (uint64_t)rx_buffer, 1514);
+    #else
+        len = e1000_poll_receive(global_mmio_base, (uint8_t*)rx_buffer, 1514);
+    #endif
 
     if (len > 0) {
         struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);

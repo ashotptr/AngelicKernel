@@ -5,8 +5,8 @@ NASM = nasm
 CFLAGS = -I. -Iinclude -Isrc/lwip/src/include \
     -I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol \
     -fno-stack-protector -ffreestanding -fpic -fshort-wchar -mno-red-zone \
-    -mno-mmx -mno-sse \
-    -Wall -Wextra -DEFI_FUNCTION_WRAPPER -DGNU_EFI_USE_MS_ABI -g
+    -mno-mmx -mno-sse -mno-avx \
+    -Wall -Wextra -DEFI_FUNCTION_WRAPPER -DGNU_EFI_USE_MS_ABI -g \
     -DNO_SYS=1 -Dmemset=angelic_memset -Dmemcpy=angelic_memcpy #not sure about this line
 
 LWIP_CORE = src/lwip/src/core/init.c \
@@ -52,28 +52,29 @@ OBJS = src/kernel.o \
     src/mm/vmm.o \
     src/arch/interrupts.o \
     src/arch/idt.o \
-    src/arch/mpk.o
+    src/arch/mpk.o \
+    src/xmpp/xmpp_server.o
 
 all: unikernel.efi
 
 # to get PE32+
 unikernel.efi: unikernel.so
-	objcopy -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym -j .rel \
+    objcopy -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym -j .rel \
         -j .rela -j .reloc --target=efi-app-x86_64 --subsystem=10 $< $@
-	objcopy --only-keep-debug $< unikernel.debug
-	mkdir -p internal-fs/EFI/BOOT
-	cp $@ internal-fs/EFI/BOOT/BOOTX64.EFI
+    objcopy --only-keep-debug $< unikernel.debug
+    mkdir -p internal-fs/EFI/BOOT
+    cp $@ internal-fs/EFI/BOOT/BOOTX64.EFI
 
 # /usr/lib/elf_x86_64_efi.lds
 unikernel.so: $(OBJS)
-	ld -shared -Bsymbolic -nostdlib -znocombreloc -z muldefs -L/usr/lib -L/usr/lib64 -T linker.ld \
-		/usr/lib/crt0-efi-x86_64.o $(OBJS) -o $@ -lefi -lgnuefi
+    ld -shared -Bsymbolic -nostdlib -znocombreloc -z muldefs -L/usr/lib -L/usr/lib64 -T linker.ld \
+        /usr/lib/crt0-efi-x86_64.o $(OBJS) -o $@ -lefi -lgnuefi
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+    $(CC) $(CFLAGS) -c $< -o $@
 
 %.o: %.asm
-	$(NASM) -f elf64 $< -o $@
+    $(NASM) -f elf64 $< -o $@
 
 clean:
-	rm -f $(OBJS) *.so *.efi *.debug
+    rm -f $(OBJS) *.so *.efi *.debug

@@ -69,59 +69,6 @@ static void enable_sse(void) {
     // 8. Write back CR4
     __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
 }
-// --- NETWORK CALLBACKS ---
-const char RESPONSE[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
-                        "<html><body><h1>Hello from AngelicKernel!</h1>"
-                        "<p>Phase 3 Complete: Drivers & Interrupts Active.</p></body></html>";
-
-err_t http_sent_callback(void *arg, struct tcp_pcb *pcb, u16_t len) {
-    (void)arg; (void)len;
-    tcp_close(pcb);
-    return ERR_OK;
-}
-
-err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
-    (void)arg; (void)err; 
-    if (!p) {
-        tcp_close(pcb);
-        return ERR_OK;
-    }
-    tcp_recved(pcb, p->tot_len);
-    tcp_write(pcb, RESPONSE, sizeof(RESPONSE) - 1, TCP_WRITE_FLAG_COPY);
-    tcp_sent(pcb, http_sent_callback);
-    tcp_output(pcb);
-    pbuf_free(p);
-    return ERR_OK;
-}
-
-static err_t http_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
-    (void)arg; (void)err;
-    tcp_recv(newpcb, http_recv);
-    return ERR_OK;
-}
-
-void start_http_server() {
-    struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) {
-        serial_print("[ERROR] Failed to create TCP PCB\n");
-        return;
-    }
-
-    // Bind to 0.0.0.0 (All interfaces) on Port 80
-    err_t err = tcp_bind(pcb, IP_ADDR_ANY, 80);
-    if (err != ERR_OK) {
-        serial_print("[ERROR] Failed to bind to Port 80\n");
-        return;
-    }
-
-    // Put into listening mode
-    pcb = tcp_listen(pcb);
-    
-    // Register the callback we wrote earlier
-    tcp_accept(pcb, http_accept_callback);
-    
-    serial_print("[INFO] HTTP Server started on Port 80\n");
-}
 
 void serial_print_hex(uint64_t n) {
     char hex[] = "0123456789ABCDEF";
@@ -269,10 +216,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     // Enable Interrupts globally
     __asm__ volatile("sti");
     serial_print("[KERNEL] Interrupts Enabled.\n");
-
-    start_http_server();
-
-    serial_print("[KERNEL] Network Online. Listening on Port 80...\n");
+    
+    serial_print("[XMPP] Starting MUC Server on Port 5222...\n");
+    xmpp_init_server();
 
     // Flag to track if we should sleep
     // Set this to 0 if you don't have a PIT/LAPIC timer yet!
