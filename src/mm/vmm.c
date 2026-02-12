@@ -11,6 +11,10 @@ void serial_print_hex(uint64_t n);
 
 uint64_t* kernel_pml4 = 0;
 
+uint64_t virt_to_phys(void* addr) {
+    return (uint64_t)addr; // currently 1:1
+}
+
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t* pml4 = kernel_pml4;
     
@@ -41,7 +45,6 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     pt[PT_INDEX(virt)] = phys | flags;
 }
 
-// Assembly helper to load CR3 register
 extern void load_cr3(uint64_t pml4_addr);
 
 void vmm_init() {
@@ -65,7 +68,6 @@ void vmm_init() {
 extern uint64_t __secure_driver_data_start;
 extern uint64_t __secure_driver_data_end;
 
-// Helper to set PKEY bits on an existing page
 void vmm_set_pkey(uint64_t virt, int pkey) {
     uint64_t* pml4 = kernel_pml4;
     uint64_t idx = PML4_INDEX(virt);
@@ -77,11 +79,11 @@ void vmm_set_pkey(uint64_t virt, int pkey) {
     idx = PD_INDEX(virt);
     uint64_t* pt = (uint64_t*)(pd[idx] & ~0xFFF);
     
-    // Set bits 59-62
-    pt[PT_INDEX(virt)] &= ~(0xFULL << 59); // Clear old key
-    pt[PT_INDEX(virt)] |= PTE_PKEY(pkey);  // Set new key
+    // set bits 59-62
+    pt[PT_INDEX(virt)] &= ~(0xFULL << 59); // clear old key
+    pt[PT_INDEX(virt)] |= PTE_PKEY(pkey);  // set new key
     
-    // Invalidate TLB for this address
+    // invalidate TLB for this address
     __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
 }
 
