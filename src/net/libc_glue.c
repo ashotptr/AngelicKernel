@@ -142,6 +142,36 @@ char *strstr(const char *haystack, const char *needle) {
     return NULL;
 }
 
+char *strcpy(char *dest, const char *src) {
+    char *save = dest;
+
+    while ((*dest++ = *src++));
+
+    return save;
+}
+
+char *strchr(const char *s, int c) {
+    while (*s != (char)c) {
+        if (!*s++) {
+            return NULL;
+        }
+    }
+
+    return (char *)s;
+}
+
+char *strrchr(const char *s, int c) {
+    const char *last = NULL;
+
+    do {
+        if (*s == (char)c) {
+            last = s;
+        }
+    } while (*s++);
+    
+    return (char *)last;
+}
+
 int atoi(const char *str) {
     int res = 0;
     int sign = 1;
@@ -164,6 +194,12 @@ int atoi(const char *str) {
     }
 
     return res * sign;
+}
+
+int putchar(int c) {
+    char str[2] = {(char)c, '\0'};
+    serial_print(str);
+    return c;
 }
 
 static void simple_append_int(char **buf, size_t *limit, unsigned long n) {
@@ -190,6 +226,113 @@ static void simple_append_hex(char **buf, size_t *limit, unsigned long n) {
         (*buf)++;
         (*limit)--;
     }
+}
+
+static void print_int(long n) {
+    char buffer[21];
+    int i = 0;
+    int is_neg = 0;
+
+    if (n == 0) {
+        putchar('0');
+        return;
+    }
+
+    if (n < 0) {
+        is_neg = 1;
+        n = -n; 
+    }
+
+    while (n > 0) {
+        buffer[i++] = (n % 10) + '0';
+        n /= 10;
+    }
+
+    if (is_neg) {
+        putchar('-');
+    }
+
+    while (i > 0) {
+        putchar(buffer[--i]);
+    }
+}
+
+static void print_hex(unsigned long n) {
+    char buffer[16];
+    int i = 0;
+    char hex_digits[] = "0123456789ABCDEF";
+
+    if (n == 0) {
+        putchar('0');
+        return;
+    }
+
+    while (n > 0) {
+        buffer[i++] = hex_digits[n % 16];
+        n /= 16;
+    }
+
+    while (i > 0) {
+        putchar(buffer[--i]);
+    }
+}
+
+static void print_str(const char *s) {
+    if (!s) s = "(null)";
+    while (*s) putchar(*s++);
+}
+
+//review
+int vprintf(const char *format, va_list args) {
+    int count = 0;
+
+    while (*format) {
+        if (*format == '%') {
+            format++;
+            switch (*format) {
+                case 'd':
+                    print_int(va_arg(args, int));
+                    break;
+                case 'u':
+                    print_int(va_arg(args, unsigned int));
+                    break;
+                case 'x':
+                case 'p':
+                    print_str("0x");
+                    print_hex(va_arg(args, unsigned long));
+                    break;
+                case 's':
+                    print_str(va_arg(args, char*));
+                    break;
+                case 'c':
+                    putchar(va_arg(args, int));
+                    break;
+                case '%':
+                    putchar('%');
+                    break;
+                default:
+                    putchar('%');
+                    putchar(*format);
+            }
+        } else {
+            putchar(*format);
+        }
+        format++;
+        count++;
+    }
+    return count;
+}
+
+int printf(const char *format, ...) {
+    va_list args;
+
+    va_start(args, format);
+
+    int ret = vprintf(format, args);
+
+    va_end(args);
+    
+    return ret;
 }
 
 //review
@@ -257,20 +400,20 @@ int snprintf(char *str, size_t size, const char *format, ...) {
 }
 
 //review
-int printf(const char *format, ...) {
-    char buf[256];
-    va_list args;
+// int printf(const char *format, ...) {
+//     char buf[256];
+//     va_list args;
 
-    va_start(args, format);
+//     va_start(args, format);
     
-    int ret = vsnprintf(buf, sizeof(buf), format, args);
+//     int ret = vsnprintf(buf, sizeof(buf), format, args);
     
-    va_end(args);
+//     va_end(args);
     
-    serial_print(buf);
+//     serial_print(buf);
     
-    return ret;
-}
+//     return ret;
+// }
 
 //review
 int rand(void) {

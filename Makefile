@@ -54,7 +54,12 @@ OBJS = src/kernel.o \
 	src/arch/interrupts.o \
 	src/arch/idt.o \
 	src/arch/mpk.o \
-    src/xmpp/xmpp_server.o
+	src/xmpp/xmpp_server.o \
+	src/xmpp/xmpp_parser.o \
+	src/xmpp/xmpp_router.o \
+	src/xmpp/xmpp_handlers.o \
+	src/xmpp/xmpp_log.o \
+	src/xmpp/xmpp_memory.o
 
 all: unikernel.efi
 
@@ -69,7 +74,7 @@ unikernel.efi: unikernel.so
 # /usr/lib/elf_x86_64_efi.lds
 # --no-undefined
 unikernel.so: $(OBJS)
-	ld -shared -Bsymbolic -nostdlib -znocombreloc -z muldefs -L/usr/lib -L/usr/lib64 -T linker.ld \
+	ld -shared -Bsymbolic -nostdlib -znocombreloc -z muldefs -L/usr/lib --no-undefined -L/usr/lib64 -T linker.ld \
 		/usr/lib/crt0-efi-x86_64.o $(OBJS) -o $@ -lefi -lgnuefi
 
 %.o: %.c
