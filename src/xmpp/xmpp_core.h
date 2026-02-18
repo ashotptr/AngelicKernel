@@ -75,5 +75,9 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void xmpp_log(const char *direction, const char *data, int len);
+void send_raw(xmpp_client_ctx_t *ctx, const char *data);
+extern int rand(void);
+void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
+void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 
 #endif

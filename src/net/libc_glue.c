@@ -416,6 +416,7 @@ int snprintf(char *str, size_t size, const char *format, ...) {
 // }
 
 //review
+// better random number generator
 int rand(void) {
     static unsigned long next = 123456789;
     next = next * 1103515245 + 12345;

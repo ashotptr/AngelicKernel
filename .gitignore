@@ -13,3 +13,8 @@ src/net/*.o
 
 internal-fs/EFI/BOOT/BOOTX64.EFI
 internal-fs/NvVars
+
+xmpp_understanding.txt
+rfc6120.txt
+rfc6121.txt
+xep0045.txt

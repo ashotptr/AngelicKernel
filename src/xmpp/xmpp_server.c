@@ -5,24 +5,25 @@ room_t rooms[MAX_ROOMS];
 
 void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
     char response[512];
+    int stream_id = rand(); 
 
     if (ctx->authenticated) {
-        // 
-        // Case 2: User is Logged In -> Offer Bind and Session
         snprintf(response, sizeof(response),
             "<?xml version='1.0'?>"
-            "<stream:stream from='%s' id='12345' version='1.0' "
+            "<stream:stream from='%s' id='%u' version='1.0' "
+            "xml:lang='en' "
             "xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>"
             "<stream:features>"
             "<bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>"
-            "<session xmlns='urn:ietf:params:xml:ns:xmpp-session'/>"
+            "<session xmlns='urn:ietf:params:xml:ns:xmpp-session'/>" // maybe comment out
             "</stream:features>",
-            XMPP_DOMAIN);
-    } else {
-        // Case 1: New Connection -> Offer SASL (Login)
+            XMPP_DOMAIN, stream_id);
+    } 
+    else {
         snprintf(response, sizeof(response),
             "<?xml version='1.0'?>"
-            "<stream:stream from='%s' id='12345' version='1.0' "
+            "<stream:stream from='%s' id='%u' version='1.0' "
+            "xml:lang='en' "
             "xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>"
             "<stream:features>"
             "<mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
@@ -30,12 +31,10 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
             "<mechanism>PLAIN</mechanism>"
             "</mechanisms>"
             "</stream:features>",
-            XMPP_DOMAIN);
+            XMPP_DOMAIN, stream_id);
     }
 
-    xmpp_log("SEND", response, strlen(response));
-    tcp_write(ctx->pcb, response, strlen(response), TCP_WRITE_FLAG_COPY);
-    tcp_output(ctx->pcb);
+    send_raw(ctx, response);
 }
 
 void handle_handshake(struct tcp_pcb *pcb) {
@@ -73,72 +72,76 @@ void handle_sasl_success(xmpp_client_ctx_t *ctx) {
 err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
     xmpp_client_ctx_t *ctx = (xmpp_client_ctx_t*)arg;
     
-    // 1. Connection Closed
     if (!p) { 
         tcp_close(pcb);
+
         return ERR_OK; 
     }
 
-    // 2. Log Raw Input
     xmpp_log("RECV", (char*)p->payload, p->len);
 
-    // 3. Append to Buffer
     if (ctx->rx_pos + p->len < 2048) {
         memcpy(ctx->rx_buffer + ctx->rx_pos, p->payload, p->len);
+
         ctx->rx_pos += p->len;
-        ctx->rx_buffer[ctx->rx_pos] = '\0'; // Safety: Always Null-Terminate
+        ctx->rx_buffer[ctx->rx_pos] = '\0';
     }
     else {
         printf("[XMPP] Buffer Overflow! Resetting parser.\n");
+
         ctx->rx_pos = 0; 
     }
     
     tcp_recved(pcb, p->len);
     pbuf_free(p);
 
-    // 4. Process Buffer Loop
     while (ctx->rx_pos > 0) {
-        
-        // --- WHITESPACE EATER (Optimized) ---
-        // Count how many whitespace chars are at the front
         int shift = 0;
+
         while (shift < ctx->rx_pos) {
             char c = ctx->rx_buffer[shift];
-            if (c != ' ' && c != '\n' && c != '\r' && c != '\t') break;
+
+            if (c != ' ' && c != '\n' && c != '\r' && c != '\t'){
+                break;
+            }
+            
             shift++;
         }
-
-        // If we found whitespace, shift the buffer ONCE
+        
         if (shift > 0) {
             memmove(ctx->rx_buffer, ctx->rx_buffer + shift, ctx->rx_pos - shift);
+
             ctx->rx_pos -= shift;
-            ctx->rx_buffer[ctx->rx_pos] = '\0'; // Safety: Re-terminate
+            
+            ctx->rx_buffer[ctx->rx_pos] = '\0';
         }
 
-        // If buffer is empty after cleaning, stop processing
-        if (ctx->rx_pos == 0) break;
+        if (ctx->rx_pos == 0) {
+            break;
+        }
 
-        // --- STREAM HEADER DETECTION ---
         if (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream")) {
             handle_handshake_logic(ctx);
+
             ctx->rx_pos = 0; 
+            
             return ERR_OK;
         }
 
-        // --- STANZA PARSING ---
         int bytes_consumed = 0;
+
         xmpp_stanza_t *stanza = parse_xml_stream(ctx->rx_buffer, ctx->rx_pos, &bytes_consumed);
 
         if (stanza) {
-            // ROUTING LOGIC
             if (ctx->state == STATE_CONNECTED) {
-                // Only allow Auth in this state
                 if (strcmp(stanza->xmlns, "urn:ietf:params:xml:ns:xmpp-sasl") == 0) {
                     handle_sasl_success(ctx); 
                 }
-            } else {
+            }
+            else {
                 xmpp_route_stanza(ctx, stanza);
             }
+            
             xmpp_free_stanza(stanza);
 
             // REMOVE PROCESSED DATA

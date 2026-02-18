@@ -3,7 +3,6 @@
 #include <stdio.h>
 
 // Helper to extract attributes safely
-// REPLACE your old extract_attribute with this Lexer-based function
 static void extract_attribute(const char *tag, const char *key, char *dest, int max_len) {
     const char *p = tag;
     int key_len = strlen(key);
@@ -14,16 +13,14 @@ static void extract_attribute(const char *tag, const char *key, char *dest, int 
             // Ensure it's the whole word (not "topic" matching "to")
             char after = p[key_len];
             if (after == '=' || after == ' ' || after == '\t') {
-                
                 // 2. Skip garbage until '='
-                p += key_len; 
+                p += key_len;
                 while (*p == ' ' || *p == '\t' || *p == '=') p++;
 
                 // 3. Detect Quote Type (' or ")
-                char quote = *p; 
+                char quote = *p;
                 if (quote == '"' || quote == '\'') {
                     p++; // Skip opening quote
-                    
                     // 4. Copy Value until closing quote
                     int i = 0;
                     while (*p && *p != quote && i < max_len - 1) {
@@ -38,35 +35,58 @@ static void extract_attribute(const char *tag, const char *key, char *dest, int 
     }
 }
 
-//Replace your parse_xml_stream function with this:
 xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
     *bytes_consumed = 0;
     
-    // 1. Safety check
-    if (len < 4) return NULL; 
-
-    // 2. Determine end of stanza
-    // This is a simplified check. In production, count depth of < > tags.
-    char *end_tag = NULL;
+    int offset = 0;
     
-    // Check for self-closing tags first (e.g. <auth .../>)
-    char *self_close = strstr(payload, "/>");
-    char *close_tag = strstr(payload, "</"); // e.g. </message>
+    while (offset < len && (payload[offset] == ' ' || payload[offset] == '\r' || payload[offset] == '\n' || payload[offset] == '\t')) {
+        offset++;
+    }
 
-    if (self_close && (!close_tag || self_close < close_tag)) {
+    if (offset >= len) {
+        *bytes_consumed = offset;
+
+        return NULL;
+    }
+
+    char *xml_start = payload + offset;
+    int remaining_len = len - offset;
+
+    if (remaining_len < 4) {
+        *bytes_consumed = offset;
+
+        return NULL;
+    }
+
+    char *end_tag = NULL;
+
+    char *self_close = strstr(xml_start, "/>");
+    char *close_tag_ptr = strstr(xml_start, "</"); // e.g. </message>
+
+    // Prioritize whichever comes first
+    if (self_close && (!close_tag_ptr || self_close < close_tag_ptr)) {
         end_tag = self_close + 2;
-    } else if (close_tag) {
-        end_tag = strchr(close_tag, '>');
+    } else if (close_tag_ptr) {
+        end_tag = strchr(close_tag_ptr, '>');
         if (end_tag) end_tag += 1;
     }
 
-    if (!end_tag) return NULL; // Stanza is incomplete, wait for more TCP data
+    if (!end_tag) {
+        // Incomplete stanza, but we might have consumed whitespace
+        *bytes_consumed = offset;
+        return NULL;
+    }
 
-    // Calculate total stanza length
-    int stanza_len = end_tag - payload;
-    if (stanza_len > len) return NULL; // Should not happen but safety first
+    // Calculate total stanza length (whitespace + xml)
+    int stanza_len = (end_tag - xml_start);
+    
+    // Safety: ensure we didn't go out of bounds (shouldn't happen with strstr/strchr on null-term buffer, 
+    // but useful if buffer isn't null-term)
+    if (stanza_len > remaining_len) return NULL;
 
-    *bytes_consumed = stanza_len;
+    // IMPORTANT: Consume the whitespace + the stanza
+    *bytes_consumed = offset + stanza_len;
 
     // 3. Alloc and Parse
     xmpp_stanza_t *s = xmpp_alloc_stanza();
@@ -75,7 +95,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
     // Copy only this stanza to a temp buffer for string manipulation safely
     char temp_buf[1024];
     int copy_len = (stanza_len < 1023) ? stanza_len : 1023;
-    memcpy(temp_buf, payload, copy_len);
+    memcpy(temp_buf, xml_start, copy_len);
     temp_buf[copy_len] = '\0';
 
     // --- LOGIC FROM YOUR ORIGINAL PARSER ---
@@ -84,21 +104,27 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
         strcpy(s->xmlns, "jabber:client"); // Default for chat
     } 
     else if (strncmp(temp_buf, "<iq", 3) == 0) {
-        if (strstr(temp_buf, "type='get'")) s->type = XMPP_IQ_GET;
-        else if (strstr(temp_buf, "type='set'")) s->type = XMPP_IQ_SET;
-        else s->type = XMPP_IQ_RESULT;
-        
+        if (strstr(temp_buf, "type='get'") || strstr(temp_buf, "type=\"get\"")) 
+            s->type = XMPP_IQ_GET;
+        else if (strstr(temp_buf, "type='set'") || strstr(temp_buf, "type=\"set\"")) 
+            s->type = XMPP_IQ_SET;
+        else 
+            s->type = XMPP_IQ_RESULT;
+
+        // Extract inner xmlns for router
         char *query = strstr(temp_buf, "<query");
         if (query) extract_attribute(query, "xmlns", s->xmlns, 128);
+        else if (strstr(temp_buf, "jabber:iq:roster")) {
+            strcpy(s->xmlns, "jabber:iq:roster");
+        }
         else if (strstr(temp_buf, "<bind")) strcpy(s->xmlns, "urn:ietf:params:xml:ns:xmpp-bind");
         else if (strstr(temp_buf, "<session")) strcpy(s->xmlns, "urn:ietf:params:xml:ns:xmpp-session");
     }
     else if (strncmp(temp_buf, "<presence", 9) == 0) {
         s->type = XMPP_PRESENCE;
-        // Don't force MUC namespace here, let it be generic if needed
-        if(strstr(temp_buf, "http://jabber.org/protocol/muc")) 
+        if(strstr(temp_buf, "http://jabber.org/protocol/muc"))
             strcpy(s->xmlns, "http://jabber.org/protocol/muc");
-        else 
+        else
             strcpy(s->xmlns, "jabber:client");
     }
     else if (strncmp(temp_buf, "<auth", 5) == 0) {
@@ -110,12 +136,14 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
     extract_attribute(temp_buf, "id", s->id, 64);
 
     // Extract Payload (Body/Inner XML)
+    // Simple heuristic: content between first '>' and last '<'
     char *inner_start = strchr(temp_buf, '>');
     if (inner_start && inner_start < (temp_buf + copy_len)) {
-        // Calculate inner content length excluding outer tags if desirable
-        // For simplicity, we just copy everything after the first >
-        strcpy(s->payload, inner_start + 1); 
-        // Remove closing tag from payload for cleaner processing
+        // Copy everything after the first >
+        strncpy(s->payload, inner_start + 1, sizeof(s->payload) - 1);
+        s->payload[sizeof(s->payload) - 1] = '\0'; // Ensure null termination
+        
+        // Find the LAST < to strip the closing tag
         char *last_close = strrchr(s->payload, '<');
         if(last_close) *last_close = '\0';
     }
