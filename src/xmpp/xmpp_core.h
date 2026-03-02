@@ -2,6 +2,7 @@
 #define XMPP_CORE_H
 
 #include "lwip/tcp.h" 
+#include <stdio.h>
 #include <string.h>
 
 #define MAX_ROOMS 4
@@ -14,8 +15,13 @@
 #define SERVER_JID(user) user "@" XMPP_DOMAIN
 
 typedef enum {
-    XMPP_IQ_GET, XMPP_IQ_SET, XMPP_IQ_RESULT, XMPP_IQ_ERROR,
-    XMPP_MESSAGE, XMPP_PRESENCE
+    XMPP_UNKNOWN = 0,
+    XMPP_IQ_GET, 
+    XMPP_IQ_SET, 
+    XMPP_IQ_RESULT, 
+    XMPP_IQ_ERROR,
+    XMPP_MESSAGE, 
+    XMPP_PRESENCE
 } stanza_type_t;
 
 typedef enum {
@@ -41,8 +47,9 @@ typedef struct {
     struct tcp_pcb *pcb;
     client_state_t state;
     char full_jid[64];
+    char username[32];
     int authenticated;
-    char rx_buffer[2048];
+    char rx_buffer[16384];
     int rx_pos;
 } xmpp_client_ctx_t;
 
@@ -68,6 +75,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed);
 void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void handle_core_session(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
+void handle_muc_owner(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
@@ -79,5 +87,8 @@ void send_raw(xmpp_client_ctx_t *ctx, const char *data);
 extern int rand(void);
 void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
+void handle_private_storage(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
+void handle_muc_admin(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
+void handle_general_success(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 
 #endif

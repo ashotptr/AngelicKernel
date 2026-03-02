@@ -5,7 +5,7 @@ room_t rooms[MAX_ROOMS];
 
 void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
     char response[512];
-    int stream_id = rand(); 
+    int stream_id = rand(); // make not repeating
 
     if (ctx->authenticated) {
         snprintf(response, sizeof(response),
@@ -28,34 +28,14 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
             "<stream:features>"
             "<mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
             "<mechanism>ANONYMOUS</mechanism>"
-            "<mechanism>PLAIN</mechanism>"
+            "<mechanism>PLAIN</mechanism>" //tls for future
             "</mechanisms>"
             "</stream:features>",
             XMPP_DOMAIN, stream_id);
     }
-
+// add error cases for invalid stream, etc.
+// https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.1.1
     send_raw(ctx, response);
-}
-
-void handle_handshake(struct tcp_pcb *pcb) {
-    char response[512];
-    
-    snprintf(response, sizeof(response),
-        "<?xml version='1.0'?>"
-        "<stream:stream from='%s' id='12345' version='1.0' "
-        "xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>"
-        "<stream:features>"
-        "<mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
-        "<mechanism>ANONYMOUS</mechanism>"
-        "<mechanism>PLAIN</mechanism>"
-        "</mechanisms>"
-        "</stream:features>",
-        XMPP_DOMAIN
-    );
-
-    xmpp_log("SEND", response, strlen(response));
-    tcp_write(pcb, response, strlen(response), TCP_WRITE_FLAG_COPY);
-    tcp_output(pcb);
 }
 
 void handle_sasl_success(xmpp_client_ctx_t *ctx) {
@@ -64,7 +44,9 @@ void handle_sasl_success(xmpp_client_ctx_t *ctx) {
     xmpp_log("SEND", resp, strlen(resp));
 
     tcp_write(ctx->pcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
+    
     tcp_output(ctx->pcb);
+
     ctx->authenticated = 1;
     ctx->state = STATE_AUTHENTICATED;
 }
@@ -80,19 +62,20 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
 
     xmpp_log("RECV", (char*)p->payload, p->len);
 
-    if (ctx->rx_pos + p->len < 2048) {
+    if (ctx->rx_pos + (int)p->len < (int)(sizeof(ctx->rx_buffer) - 1)) {
         memcpy(ctx->rx_buffer + ctx->rx_pos, p->payload, p->len);
 
         ctx->rx_pos += p->len;
         ctx->rx_buffer[ctx->rx_pos] = '\0';
     }
     else {
-        printf("[XMPP] Buffer Overflow! Resetting parser.\n");
+        printf("[XMPP] Buffer Overflow! Dropping %d bytes. rx_pos=%d\n", p->len, ctx->rx_pos);
 
-        ctx->rx_pos = 0; 
+        ctx->rx_pos = 0;
     }
     
     tcp_recved(pcb, p->len);
+
     pbuf_free(p);
 
     while (ctx->rx_pos > 0) {
@@ -123,19 +106,22 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
         if (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream")) {
             handle_handshake_logic(ctx);
 
-            ctx->rx_pos = 0; 
-            
+            ctx->rx_pos = 0;
+
             return ERR_OK;
         }
 
         int bytes_consumed = 0;
 
         xmpp_stanza_t *stanza = parse_xml_stream(ctx->rx_buffer, ctx->rx_pos, &bytes_consumed);
-
+        
         if (stanza) {
             if (ctx->state == STATE_CONNECTED) {
-                if (strcmp(stanza->xmlns, "urn:ietf:params:xml:ns:xmpp-sasl") == 0) {
-                    handle_sasl_success(ctx); 
+                if (strcmp(stanza->xmlns, "urn:ietf:params:xml:ns:xmpp-sasl") == 0) { 
+                    // check for error cases such as invalid mechanism, etc.
+                    // https://datatracker.ietf.org/doc/html/rfc6120#section-13.9.1
+                    // https://datatracker.ietf.org/doc/html/rfc6120#section-6.5.5                    
+                    handle_sasl(ctx, stanza); 
                 }
             }
             else {
@@ -144,14 +130,14 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
             
             xmpp_free_stanza(stanza);
 
-            // REMOVE PROCESSED DATA
             if (bytes_consumed > 0) {
                 memmove(ctx->rx_buffer, ctx->rx_buffer + bytes_consumed, ctx->rx_pos - bytes_consumed);
+
                 ctx->rx_pos -= bytes_consumed;
-                ctx->rx_buffer[ctx->rx_pos] = '\0'; // Safety: Re-terminate
+                ctx->rx_buffer[ctx->rx_pos] = '\0';
             }
-        } else {
-            // Stanza incomplete (wait for next packet)
+        }
+        else {
             break; 
         }
     }
@@ -171,6 +157,7 @@ err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
     ctx->authenticated = 0;
 
     tcp_arg(newpcb, ctx);
+    
     tcp_recv(newpcb, xmpp_recv_callback);
 
     return ERR_OK;

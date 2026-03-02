@@ -6,7 +6,6 @@
 #include "lwip/init.h"
 #include "lwip/tcp.h"
 #include "lwip/timeouts.h"
-#include "drivers/framebuffer.h" 
 #include "mm/pmm.h" 
 #include "mm/vmm.h"
 
@@ -206,8 +205,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     init_network_stack(global_mmio_base, mac);
     
-    // Phase 4 Preparation (MPK)
-    // Only enable these if you are 100% sure the VMM setup is perfect
     // mpk_enable();           
     // vmm_protect_driver();   
     
@@ -221,7 +218,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     xmpp_init_server();
 
     // Flag to track if we should sleep
-    // Set this to 0 if you don't have a PIT/LAPIC timer yet!
+    // Set this to 0 if don't have a PIT/LAPIC timer yet!
     int use_interrupt_sleeping = 0; 
 
     while (1) {

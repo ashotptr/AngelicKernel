@@ -65,7 +65,7 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
     e1000_write_reg(mmio_base, 0x2804, rx_addr >> 32); // RDBAH (Receive Descriptor Base Address High)
     e1000_write_reg(mmio_base, 0x2808, RX_RING_SIZE * 16); // RDLEN (Receive Descriptor Length)
     
-    // CRITICAL: Initialize Head and Tail
+    // Initialize Head and Tail
     e1000_write_reg(mmio_base, 0x2810, 0); // RDH (Head)
     e1000_write_reg(mmio_base, 0x2818, RX_RING_SIZE - 1); // RDT (Tail) - Start at end so all descriptors are available
     
@@ -73,7 +73,7 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
     e1000_write_reg(mmio_base, 0x3804, tx_addr >> 32); // TDBAH
     e1000_write_reg(mmio_base, 0x3808, TX_RING_SIZE * 16); // TDLEN
     
-    // CRITICAL: Initialize Head and Tail
+    // Initialize Head and Tail
     e1000_write_reg(mmio_base, 0x3810, 0); // TDH (Head)
     e1000_write_reg(mmio_base, 0x3818, 0); // TDT (Tail)
 

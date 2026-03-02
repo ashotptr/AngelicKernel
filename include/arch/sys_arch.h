@@ -8,7 +8,7 @@
 #define SYS_SEM_NULL    NULL
 
 // We don't need protection because we aren't using threads.
-// If you start calling lwIP from interrupts, you MUST implement this.
+// When calling lwIP from interrupts, must implement this.
 typedef u32_t sys_prot_t;
 
 // typedef void * sys_sem_t;

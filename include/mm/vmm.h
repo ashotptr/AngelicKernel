@@ -14,7 +14,6 @@
 // We shift the key value (0-15) by 59 bits to place it in the PTE
 #define PTE_PKEY(k)   ((uint64_t)(k) << 59)
 
-// Initialize VMM and switch to our new Page Tables
 void vmm_init();
 void vmm_protect_driver(void);
 

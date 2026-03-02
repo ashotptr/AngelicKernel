@@ -443,3 +443,24 @@ ethernetif_init Initializes the network interface structure (netif) and calls
 low_level_init to initialize the Ethernet peripheral
 ethernet_input Calls low_level_input to receive a packet then provide it to the
 LwIP stack
+
+116) Williams, N., "On the Use of Channel Bindings to Secure Channels", RFC 5056, November 2007. 
+use this to bind sasl to tls somehow
+
+117) Leach, P., Mealling, M., and R. Salz, "A Universally Unique IDentifier (UUID) URN Namespace", RFC 4122, July 2005.
+use this for uuid
+
+118)
+currently this is used for xml parsing
+https://github.com/JulStrat/yxml
+https://dev.yorhel.nl/yxml
+
+those I can try later
+Mini-XML
+https://github.com/michaelrsweet/mxml
+https://www.msweet.org/mxml/mxml.html
+https://www.msweet.org/mxml/
+
+libexpat
+https://github.com/libexpat/libexpat
+https://github.com/libexpat/libexpat/releases

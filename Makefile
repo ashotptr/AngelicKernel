@@ -59,8 +59,9 @@ OBJS = src/kernel.o \
 	src/xmpp/xmpp_router.o \
 	src/xmpp/xmpp_handlers.o \
 	src/xmpp/xmpp_log.o \
-	src/xmpp/xmpp_memory.o
-
+	src/xmpp/xmpp_memory.o\
+    src/xmpp/yxml.o
+	
 all: unikernel.efi
 
 # to get PE32+

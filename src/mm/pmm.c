@@ -28,7 +28,7 @@ void pmm_init(EFI_MEMORY_DESCRIPTOR* mem_map, uint64_t map_size, uint64_t descri
     }
 
     //Memory technically opens up at 1MB (0x100000).
-    //However, because "Free for use" implies your Kernel might be loaded there, and because of the 2MB alignment issue we found in the Intel Manual, your decision to skip to 2MB (0x200000) remains the safest engineering choice.
+    //However, because "Free for use" implies Kernel might be loaded there, and because of the 2MB alignment issue we found in the Intel Manual, your decision to skip to 2MB (0x200000) remains the safest engineering choice.
     if (free_memory_start < 0x200000) { //Table 4-17. Format of an IA-32e Page-Directory Entry that Maps a 2-MByte Page
         free_memory_start = 0x200000; 
     }

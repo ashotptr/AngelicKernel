@@ -65,6 +65,20 @@ int memcmp(const void *s1, const void *s2, size_t n) {
     return 0;
 }
 
+void *memchr(const void *s, int c, size_t n) {
+    const unsigned char *p = (const unsigned char *)s;
+    
+    while (n--) {
+        if (*p == (unsigned char)c) {
+            return (void *)p;
+        }
+        
+        p++;
+    }
+    
+    return NULL;
+}
+
 size_t strlen(const char *str) {
     const char *s = str;
 
@@ -170,6 +184,22 @@ char *strrchr(const char *s, int c) {
     } while (*s++);
     
     return (char *)last;
+}
+
+char *strncat(char *dest, const char *src, size_t n) {
+    char *d = dest;
+    
+    while (*d != '\0') {
+        d++;
+    }
+    
+    while (n-- > 0 && *src != '\0') {
+        *d++ = *src++;
+    }
+    
+    *d = '\0';
+    
+    return dest;
 }
 
 int atoi(const char *str) {
