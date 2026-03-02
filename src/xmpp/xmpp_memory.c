@@ -6,7 +6,7 @@
 static xmpp_stanza_t stanza_pool[MAX_POOL_STANZAS];
 
 xmpp_stanza_t* xmpp_alloc_stanza() {
-    for(int i=0; i<MAX_POOL_STANZAS; i++) {
+    for(int i = 0; i < MAX_POOL_STANZAS; i++) {
         if(stanza_pool[i].is_used == 0) {            
             memset(&stanza_pool[i], 0, sizeof(xmpp_stanza_t));
 
@@ -15,6 +15,7 @@ xmpp_stanza_t* xmpp_alloc_stanza() {
             return &stanza_pool[i];
         }
     }
+    
     return NULL;
 }
 

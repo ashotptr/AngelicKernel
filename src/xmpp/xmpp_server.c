@@ -120,8 +120,8 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                 if (strcmp(stanza->xmlns, "urn:ietf:params:xml:ns:xmpp-sasl") == 0) { 
                     // check for error cases such as invalid mechanism, etc.
                     // https://datatracker.ietf.org/doc/html/rfc6120#section-13.9.1
-                    // https://datatracker.ietf.org/doc/html/rfc6120#section-6.5.5                    
-                    handle_sasl(ctx, stanza); 
+                    // https://datatracker.ietf.org/doc/html/rfc6120#section-6.5.5
+                    handle_sasl(ctx, stanza);
                 }
             }
             else {

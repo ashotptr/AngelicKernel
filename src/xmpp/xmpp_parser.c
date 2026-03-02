@@ -134,7 +134,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
     }
 
     yxml_t x;
-    char stack[1024]; 
+    char stack[1024]; // might be small for some cases
 
     yxml_init(&x, stack, sizeof(stack));
 
@@ -207,13 +207,13 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
         }
     }
 
-    char temp_buf[1024];
+    char temp_buf[1024]; // might be small for some cases
     int copy_len = (stanza_len < 1023) ? stanza_len : 1023;
 
     memcpy(temp_buf, xml_start, copy_len);
     
     temp_buf[copy_len] = '\0';
-
+    // why not done along the other xmlns maybe because of depth uncertainty? or maybe to catch some specific cases that are not covered by the yxml parsing?
     if (strstr(temp_buf, "jabber:iq:roster")) {
         strcpy(s->xmlns, "jabber:iq:roster");
     }
@@ -233,6 +233,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
         strcpy(s->xmlns, "http://jabber.org/protocol/muc");
     }
     
+    // why not use yxml for this? maybe to handle some edge cases or to simplify the logic for extracting inner text without dealing with nested elements?
     char *header_end = strchr(temp_buf, '>');
     int is_self_closing = (header_end && header_end > temp_buf && *(header_end - 1) == '/');
 

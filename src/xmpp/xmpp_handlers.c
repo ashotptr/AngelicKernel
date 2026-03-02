@@ -1,6 +1,7 @@
 #include "xmpp_core.h"
 #include <stdio.h>
 
+// review
 static int b64decode(const char *src, unsigned char *dst, int dst_len) {
     static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -42,16 +43,19 @@ void send_raw(xmpp_client_ctx_t *ctx, const char *data) {
     xmpp_log("SEND", data, strlen(data));
     
     tcp_write(ctx->pcb, data, strlen(data), TCP_WRITE_FLAG_COPY);
+
     tcp_output(ctx->pcb);
 }
 
 void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     char response[512];
+    
     snprintf(response, sizeof(response), 
         "<iq type='result' id='%s' to='%s'>"
         "<query xmlns='jabber:iq:roster'/>" 
         "</iq>", 
         stanza->id, ctx->full_jid);
+
     send_raw(ctx, response);
 }
 
