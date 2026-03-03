@@ -756,11 +756,11 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  * Processes the SASL <auth> element and grants access.
  *
  * RECEIVE:
- *   RFC 6120 §6.3.3 — SASL negotiation, client sends:
+ *   RFC 6120 §6.4.2 — SASL negotiation, client sends:
  *     <auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>
  *       [Base64-encoded initial response]
  *     </auth>
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.3.3
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.2
  *   (Session log: <auth mechanism="PLAIN">AHVzZXIxAGFzZGY=</auth>
  *    — https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.2)
  *
@@ -778,10 +778,10 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   https://datatracker.ietf.org/doc/html/rfc4505
  *
  * SEND:
- *   RFC 6120 §6.3.6 — on success:
+ *   RFC 6120 §6.4.6 — on success:
  *     <success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>
  *   Client MUST then open a new XML stream.
- *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.3.6
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.6
  *
  * NOTE — code duplication:
  *   The tcp_write / state-update block here duplicates handle_sasl_success()
@@ -824,7 +824,7 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     unsigned char decoded[128] = {0};
 
-    /* RFC 4616 §2 / RFC 6120 §6.3.3 — decode Base64 PLAIN payload.
+    /* RFC 4616 §2 / RFC 6120 §6.4.2 — decode Base64 PLAIN payload.
      * TODO: treat b64decode() returning an error indicator as a signal
      * to send <failure><incorrect-encoding/></failure>. */
     int len = b64decode(stanza->payload, decoded, sizeof(decoded) - 1);
@@ -859,7 +859,7 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
      * On failure: send <failure><not-authorized/></failure>
      * (RFC 6120 §6.5) and return without setting authenticated = 1. */
 
-    /* RFC 6120 §6.3.6 — SASL success */
+    /* RFC 6120 §6.4.6 — SASL success */
     const char *resp = "<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
 
     xmpp_log("SEND", resp, strlen(resp));
@@ -868,7 +868,7 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
     tcp_output(ctx->pcb);
 
-    /* RFC 6120 §6.3.6 step 5 — server resets stream state; client will
+    /* RFC 6120 §6.4.6 — server resets stream state; client will
      * re-open the stream and xmpp_recv_callback will call
      * handle_handshake_logic() again for the new stream. */
     ctx->authenticated = 1;
@@ -921,13 +921,13 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   For existing room: affiliation='member' role='participant'
  *
  * SEND 4 — room subject (REQUIRED):
- *   XEP-0045 §7.2.16 — after all occupant presences, send the subject:
+ *   XEP-0045 §7.2.15 — after all occupant presences, send the subject:
  *     <message from='room@service' type='groupchat'><subject>…</subject></message>
  *   https://xmpp.org/extensions/xep-0045.html#enter-subject
  *
  * KNOWN MISSING:
  *
- *   Nick conflict (XEP-0045 §7.2.9):
+ *   Nick conflict (XEP-0045 §7.2.8):
  *     Before adding the user, check that no active participant already
  *     holds the requested nick. If taken:
  *       <presence type='error' from='room/nick'>
@@ -945,7 +945,7 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *     https://datatracker.ietf.org/doc/html/rfc6121#section-4.5
  *     (Session log: "type='unavailable' should be implemented")
  *
- *   Discussion history (XEP-0045 §7.2.14):
+ *   Discussion history (XEP-0045 §7.2.13):
  *     After subject, send recent room messages. Sending none is
  *     minimally compliant.
  *     https://xmpp.org/extensions/xep-0045.html#enter-history
@@ -1035,7 +1035,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         return; /* Room pool exhausted */
     }
 
-    /* TODO: XEP-0045 §7.2.9 — nick conflict check before adding user.
+    /* TODO: XEP-0045 §7.2.8 — nick conflict check before adding user.
      * Iterate r->users[], compare nick; if taken send presence error. */
 
     /* Add joining user to the room */
@@ -1126,7 +1126,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
     send_raw(ctx, response);
 
-    /* SEND 4: XEP-0045 §7.2.16 — room subject (REQUIRED after presences).
+    /* SEND 4: XEP-0045 §7.2.15 — room subject (REQUIRED after presences).
      * Sent from the room bare JID, not an occupant JID. */
     snprintf(response, sizeof(response),
         "<message from='%s' to='%s' type='groupchat'>"
@@ -1136,7 +1136,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
     send_raw(ctx, response);
 
-    /* TODO: XEP-0045 §7.2.14 — send discussion history after subject.
+    /* TODO: XEP-0045 §7.2.13 — send discussion history after subject.
      * Minimum valid implementation: send nothing (zero messages).
      * https://xmpp.org/extensions/xep-0045.html#enter-history */
 }

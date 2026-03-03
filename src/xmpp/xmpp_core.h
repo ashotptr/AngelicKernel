@@ -31,9 +31,9 @@
  *
  * RFC 6120 §2.1   — JID syntax: [localpart "@"] domainpart ["/" resourcepart]
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-2.1
- * RFC 6120 §4.7.2 — Server's <stream:stream> MUST set 'from' to its
+ * RFC 6120 §4.7.1 — Server's <stream:stream> MUST set 'from' to its
  *   authoritative domain.
- *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.7.2 */
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.7.1 */
 #define XMPP_DOMAIN "angelic.local"
 #define SERVER_JID(user) user "@" XMPP_DOMAIN
 
@@ -42,21 +42,21 @@
  *
  * RFC 6120 §8   — XML Stanzas
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-8
- * RFC 6120 §8.2 — <iq>: type MUST be exactly one of get|set|result|error
- *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2
- * RFC 6120 §8.4 — <message>
- *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.4
- * RFC 6120 §8.5 — <presence>
- *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.5
+ * RFC 6120 §8.2.3 — <iq>: type MUST be exactly one of get|set|result|error
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
+ * RFC 6120 §8.2.1 — <message>
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.1
+ * RFC 6120 §8.2.2 — <presence>
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.2
  * ------------------------------------------------------------------ */
 typedef enum {
     XMPP_UNKNOWN = 0,  /* type attribute absent or unrecognised      */
-    XMPP_IQ_GET,        /* RFC 6120 §8.2.1 — type="get"    */
-    XMPP_IQ_SET,        /* RFC 6120 §8.2.1 — type="set"    */
-    XMPP_IQ_RESULT,     /* RFC 6120 §8.2.1 — type="result" */
-    XMPP_IQ_ERROR,      /* RFC 6120 §8.2.1 — type="error"  */
-    XMPP_MESSAGE,       /* RFC 6120 §8.4                    */
-    XMPP_PRESENCE       /* RFC 6120 §8.5                    */
+    XMPP_IQ_GET,        /* RFC 6120 §8.2.3 — type="get"    */
+    XMPP_IQ_SET,        /* RFC 6120 §8.2.3 — type="set"    */
+    XMPP_IQ_RESULT,     /* RFC 6120 §8.2.3 — type="result" */
+    XMPP_IQ_ERROR,      /* RFC 6120 §8.2.3 — type="error"  */
+    XMPP_MESSAGE,       /* RFC 6120 §8.2.1                  */
+    XMPP_PRESENCE       /* RFC 6120 §8.2.2                  */
 } stanza_type_t;
 
 /* ------------------------------------------------------------------
@@ -72,8 +72,8 @@ typedef enum {
  *
  *   STATE_SASL
  *     Server sent <stream:features> with SASL mechanisms.
- *     RFC 6120 §6.3.4 — advertising mechanisms
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.3
+ *     RFC 6120 §6.3.4 / §6.4.1 — Mechanism Offers / Exchange of Stream Headers and Features
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.1
  *     NOTE: currently set in handle_sasl() but not used as a
  *     min_state gate — consider enforcing it so SASL <auth> is only
  *     accepted before authentication, not after.
@@ -132,8 +132,8 @@ typedef enum {
  *   room configuration (XEP-0045 §10.2) can easily exceed 1 KB and
  *   will be silently truncated.
  *   To enforce a server-side limit, send a stream error:
- *     RFC 6120 §4.9.3.20 — <policy-violation/>
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.3.20
+ *     RFC 6120 §4.9.3.14 — <policy-violation/>
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.3.14
  * ------------------------------------------------------------------ */
 typedef struct {
     stanza_type_t type;
@@ -235,7 +235,7 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
      * https://xmpp.org/extensions/xep-0045.html#disco-rooms */
 
 void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
-    /* XEP-0045 §7.1 / §7.14 — Entering and leaving a room
+    /* XEP-0045 §7.2 / §7.14 — Entering and leaving a room
      * https://xmpp.org/extensions/xep-0045.html#enter
      * https://xmpp.org/extensions/xep-0045.html#exit */
 
@@ -254,7 +254,7 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
      * https://datatracker.ietf.org/doc/html/rfc6121#section-4.2 */
 
 void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
-    /* RFC 6121 §2.1 — Roster Get / §2.3 — Roster Set
+    /* RFC 6121 §2.1 — Roster Get / §2.1.5 — Roster Set
      * https://datatracker.ietf.org/doc/html/rfc6121#section-2 */
 
 void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);

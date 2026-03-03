@@ -15,8 +15,8 @@
  *   some headroom. If xmpp_alloc_stanza() returns NULL (pool
  *   exhausted), the caller (xmpp_recv_callback) silently loses
  *   the stanza. Consider sending:
- *     RFC 6120 §4.9.3.9 — <resource-constraint/> stream error
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.3.9
+ *     RFC 6120 §4.9.3.17 — <resource-constraint/> stream error
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.3.17
  * ------------------------------------------------------------------ */
 #define MAX_POOL_STANZAS 16
 static xmpp_stanza_t stanza_pool[MAX_POOL_STANZAS];
@@ -41,7 +41,7 @@ xmpp_stanza_t* xmpp_alloc_stanza() {
         }
     }
     /* Pool exhausted.
-     * TODO: RFC 6120 §4.9.3.9 — send <resource-constraint/> stream
+     * TODO: RFC 6120 §4.9.3.17 — send <resource-constraint/> stream
      * error and close the offending connection. */
     return NULL;
 }
