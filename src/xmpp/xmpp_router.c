@@ -22,8 +22,8 @@ struct route_entry {
  * RFC / XEP reference for each namespace:
  *
  *   urn:ietf:params:xml:ns:xmpp-sasl
- *     RFC 6120 §6.3  — SASL Negotiation
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.3
+ *     RFC 6120 §6    — SASL Negotiation (top-level)
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-6
  *
  *   urn:ietf:params:xml:ns:xmpp-bind
  *     RFC 6120 §7    — Resource Binding
@@ -46,7 +46,7 @@ struct route_entry {
  *     https://xmpp.org/extensions/xep-0045.html#disco-rooms
  *
  *   http://jabber.org/protocol/muc
- *     XEP-0045 §7.1  — Entering a Room (presence with <x> child)
+ *     XEP-0045 §7.2  — Entering a Room (presence with <x> child)
  *     https://xmpp.org/extensions/xep-0045.html#enter
  *
  *   http://jabber.org/protocol/muc#owner
@@ -113,16 +113,10 @@ static struct route_entry router[] = {
  *   RFC 6120 §4.2  — stream:stream opening
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.2
  *
- * MUC#OWNER PRE-CHECK:
- *   BUG: The muc#owner check at the top will invoke handle_muc_owner
- *   a second time for stanzas that also match the table entry. This is
- *   harmless only because handle_muc_owner is idempotent for the same
- *   stanza, but it should be removed — the table entry is sufficient.
- *
  * PRESENCE ROUTING:
  *   RFC 6121 §4.2  — initial/subsequent presence broadcast
  *     https://datatracker.ietf.org/doc/html/rfc6121#section-4.2
- *   XEP-0045 §7.1  — MUC presence to conference.* subdomain
+ *   XEP-0045 §7.2  — MUC presence to conference.* subdomain
  *     https://xmpp.org/extensions/xep-0045.html#enter
  *
  * IQ FALLBACK ERROR:
@@ -148,13 +142,11 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         return;
     }
 
-    /* FIXME: This block is redundant with the table entry for muc#owner
-     * and causes double-dispatch. Remove it — the table handles it. */
-    if (strstr(stanza->payload, "http://jabber.org/protocol/muc#owner") || strcmp(stanza->xmlns, "http://jabber.org/protocol/muc#owner") == 0) {
-        handle_muc_owner(ctx, stanza);
-
-        return;
-    }
+    /* FIX (§3 HIGH): Removed the muc#owner strstr() pre-check block that
+     * was here. It caused handle_muc_owner() to be called twice for every
+     * muc#owner stanza — once by this block and again by the routing table
+     * entry below. The table entry is sufficient and correct; the pre-check
+     * was entirely redundant. */
 
     /* Primary dispatch: xmlns-based routing table */
     for (int i = 0; router[i].xmlns != NULL; i++) {
@@ -186,7 +178,7 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         else if (stanza->type == XMPP_PRESENCE) {
             if (strstr(stanza->to, "conference.angelic.local")) {
                 /* Presence directed at the MUC service subdomain.
-                 * XEP-0045 §7.1 — entering a room
+                 * XEP-0045 §7.2  — entering a room
                  * XEP-0045 §7.14 — exiting a room (type='unavailable')
                  * https://xmpp.org/extensions/xep-0045.html#enter */
                 handle_muc_presence(ctx, stanza);

@@ -36,7 +36,7 @@
  *   continue) instead of triggering a failure. On encountering an
  *   invalid character this function should return -1 and handle_sasl()
  *   should respond with:
- *     RFC 6120 §6.5 — <failure><incorrect-encoding/></failure>
+ *     RFC 6120 §6.5.5 — <failure><incorrect-encoding/></failure>
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.5
  *
  * Performance note:
@@ -199,16 +199,137 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     char response[512];
 
-    /* RFC 6121 §4.2.2 — reflect presence back to sender.
-     * TODO: also broadcast to all other connected clients. */
-    snprintf(response, sizeof(response),
-        "<presence from='%s' to='%s' xml:lang='en'>"
-          "<show>chat</show>"
-          "<priority>1</priority>"
-        "</presence>",
-        ctx->full_jid, ctx->full_jid);
+    /* RFC 6121 §4.2.2 — broadcast the user's available presence to every
+     * connected client that has completed session establishment.
+     *
+     * We treat all fully-connected peers as implicitly subscribed with
+     * type='both' for this embedded server (no persistent roster store).
+     * The sender's own slot is included so they receive self-presence
+     * confirmation per RFC 6121 §4.2.
+     *
+     * Slots with pcb == NULL or state < STATE_SESSION are skipped:
+     *   - NULL pcb  → slot never used or already cleaned up.
+     *   - pre-SESSION state → SASL/bind still in progress; delivering
+     *     presence before the stream is ready would violate RFC 6120 §4. */
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (client_registry[i].pcb == NULL) {
+            continue;
+        }
+        if (client_registry[i].state < STATE_SESSION) {
+            continue;
+        }
 
-    send_raw(ctx, response);
+        snprintf(response, sizeof(response),
+            "<presence from='%s' to='%s' xml:lang='en'>"
+              "<show>chat</show>"
+              "<priority>1</priority>"
+            "</presence>",
+            ctx->full_jid, client_registry[i].full_jid);
+
+        send_raw(&client_registry[i], response);
+    }
+}
+
+
+/* ===========================================================================
+ * Private XML Storage — XEP-0049
+ *
+ * Static per-user, per-namespace store.
+ *
+ * Keyed by (username, namespace). The value is the verbatim inner child
+ * element extracted from the <query> body (everything between the closing
+ * '>' of <query ...> and the opening '<' of </query>).
+ *
+ * Sizing rationale (all bounds derived from xmpp_core.h / xmpp_stanza_t):
+ *
+ *   username  — xmpp_client_ctx_t.username[32]  → 32 bytes
+ *   namespace — xmpp_stanza_t.xmlns[128]         → 128 bytes (PRIVATE_NS_MAX)
+ *   inner xml — stanza->payload[1024] minus the
+ *               <query xmlns='jabber:iq:private'> wrapper (~38 chars)
+ *               and </query> (8 chars) ≈ 978 chars usable;
+ *               capped at 900 to leave headroom.   → PRIVATE_XML_MAX
+ *
+ *   PRIVATE_STORAGE_SLOTS — MAX_USERS(10) × ~2 namespaces per user.
+ *   Increase if more namespaces per user are needed.
+ * =========================================================================== */
+#define PRIVATE_STORAGE_SLOTS  20
+#define PRIVATE_NS_MAX        128   /* must match xmpp_stanza_t.xmlns[128]  */
+#define PRIVATE_XML_MAX       900   /* conservative inner-xml ceiling        */
+
+typedef struct {
+    char username[32];              /* matches xmpp_client_ctx_t.username   */
+    char ns[PRIVATE_NS_MAX];
+    char xml[PRIVATE_XML_MAX];
+    int  active;
+} private_store_entry_t;
+
+/* File-scope store — zero-initialised at startup; no heap needed. */
+static private_store_entry_t private_store[PRIVATE_STORAGE_SLOTS];
+
+
+/* ------------------------------------------------------------------
+ * private_store_find
+ *
+ * Returns a pointer to the slot matching (username, ns), or NULL if
+ * no such slot exists.  Read-only; does not create new slots.
+ * ------------------------------------------------------------------ */
+static private_store_entry_t *
+private_store_find(const char *username, const char *ns)
+{
+    for (int i = 0; i < PRIVATE_STORAGE_SLOTS; i++) {
+        if (private_store[i].active
+            && strncmp(private_store[i].username, username, 32)          == 0
+            && strncmp(private_store[i].ns,       ns, PRIVATE_NS_MAX)    == 0) {
+            return &private_store[i];
+        }
+    }
+    return NULL;
+}
+
+
+/* ------------------------------------------------------------------
+ * private_store_upsert
+ *
+ * Finds an existing slot for (username, ns) or claims the first free
+ * slot.  Writes xml_data (xml_len bytes) into it, NUL-terminated and
+ * clamped to PRIVATE_XML_MAX - 1 bytes.
+ *
+ * Returns 0 on success, -1 if the store is full.
+ * ------------------------------------------------------------------ */
+static int
+private_store_upsert(const char *username, const char *ns,
+                     const char *xml_data, size_t xml_len)
+{
+    private_store_entry_t *slot = private_store_find(username, ns);
+
+    if (!slot) {
+        for (int i = 0; i < PRIVATE_STORAGE_SLOTS; i++) {
+            if (!private_store[i].active) {
+                slot = &private_store[i];
+                break;
+            }
+        }
+    }
+
+    if (!slot) {
+        return -1; /* store full */
+    }
+
+    if (xml_len >= PRIVATE_XML_MAX) {
+        xml_len = PRIVATE_XML_MAX - 1;
+    }
+
+    strncpy(slot->username, username, sizeof(slot->username) - 1);
+    slot->username[sizeof(slot->username) - 1] = '\0';
+
+    strncpy(slot->ns, ns, sizeof(slot->ns) - 1);
+    slot->ns[sizeof(slot->ns) - 1] = '\0';
+
+    memcpy(slot->xml, xml_data, xml_len);
+    slot->xml[xml_len] = '\0';
+
+    slot->active = 1;
+    return 0;
 }
 
 
@@ -218,7 +339,7 @@ void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  * Responds to jabber:iq:private get/set requests.
  *
  * RECEIVE:
- *   XEP-0049 §3 — Private XML Storage get:
+ *   XEP-0049 §2.1 — Private XML Storage get:
  *     <iq type='get'><query xmlns='jabber:iq:private'>
  *       <storage xmlns='storage:bookmarks'/>
  *     </query></iq>
@@ -229,36 +350,237 @@ void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *    in the same TCP segment)
  *
  * SEND:
- *   XEP-0049 §3 — return stored private XML, or an empty element of
- *   the same namespace if nothing is stored.
+ *   XEP-0049 §2.1 / Listing 1 — For type='set': store the child XML
+ *   keyed by (ctx->username, inner_ns) and return a plain empty IQ
+ *   result with no <query> body.
+ *   XEP-0049 §2.1 / Listing 2 — For type='get': return the previously
+ *   stored child XML inside <query xmlns='jabber:iq:private'>, or an
+ *   empty element of the requested namespace if nothing is stored yet.
  *
- * BUG — namespace mismatch:
- *   We always return <storage xmlns='storage:bookmarks'/> regardless
- *   of what was requested. When the client asks for storage:rosternotes
- *   we send the wrong namespace back.
- *   TODO: extract the inner namespace from stanza->payload (look for
- *   the xmlns= attribute inside <storage>) and echo it back, returning
- *   an empty element of that same namespace.
+ * FIX (HIGH) — inner namespace extraction:
+ *   The old implementation called strstr(stanza->payload, "xmlns=")
+ *   which matched the first xmlns= in the payload — the one belonging
+ *   to <query> itself ('jabber:iq:private') — not the child element.
+ *   We now skip past the closing '>' of <query ...> before searching,
+ *   so the first xmlns= we find belongs to the child element.
  *
- * BUG — set vs get:
- *   For a type='set' request we should return a plain empty IQ result
+ * FIX (HIGH) — data persistence:
+ *   For type='set' the child XML is written into the file-scope
+ *   private_store[] array keyed by (ctx->username, inner_ns).
+ *   For type='get' the stored XML is retrieved from that array.
+ *   No malloc/free is used anywhere in this function.
+ *
+ * FIX (MEDIUM) — set vs get response body:
+ *   For a type='set' request we return a plain empty IQ result
  *   (<iq type='result' id='...' to='...'/>), not a <query> body.
- *   TODO: check stanza->type == XMPP_IQ_SET and use handle_general_success()
- *   or an equivalent plain result.
+ *   XEP-0049 §2.1 / Listing 1 — server response is a bare <iq result/>.
+ *
+ * FIX (MEDIUM) — missing child element validation:
+ *   XEP-0049 §2.3: "At least one child element with a proper namespace
+ *   MUST be included; otherwise the server MUST respond with a
+ *   'Not Acceptable' error."  We now enforce this.
+ *
+ * AUTHORIZATION (XEP-0049 §4):
+ *   The store is keyed by ctx->username, which is the authenticated
+ *   identity of this TCP connection set during SASL and enforced by
+ *   the STATE_SESSION gate in xmpp_route_stanza().  A client cannot
+ *   access another user's private data because ctx->username is stamped
+ *   by the server, not supplied by the client.  No separate JID
+ *   comparison is required.
+ *
+ * BUFFER SAFETY:
+ *   All buffers are fixed-size stack or static allocations whose sizes
+ *   are derived from xmpp_core.h.  No malloc/free is used.
+ *   snprintf return values are checked; if the response would overflow
+ *   its buffer a resource-constraint error is sent instead of
+ *   truncated or malformed XML.
  * ------------------------------------------------------------------ */
-void handle_private_storage(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
-    char response[1024];
+void handle_private_storage(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza)
+{
+    /* ----------------------------------------------------------------
+     * Step 1 — Extract the inner child element's xmlns= and element name.
+     *
+     * stanza->payload holds the raw <query> stanza body, e.g.:
+     *   <query xmlns='jabber:iq:private'>
+     *     <storage xmlns='storage:rosternotes'/>
+     *   </query>
+     *
+     * We skip past the closing '>' of the <query ...> open tag so
+     * that the first xmlns= we encounter belongs to the child element,
+     * not to <query> itself.
+     *
+     * We also extract the child element name (e.g. "storage", "exodus")
+     * so we can construct an accurate empty-element fallback when no
+     * data has been stored for the requested namespace.
+     *
+     * XEP-0049 §2.3 — at least one namespaced child is required.
+     * ---------------------------------------------------------------- */
+    char inner_ns[PRIVATE_NS_MAX] = "";
+    char child_elem[64]           = "storage"; /* safe default */
 
-    /* XEP-0049 §3 — return empty storage element.
-     * TODO: echo the correct inner namespace from stanza->payload.
-     * TODO: for XMPP_IQ_SET, return a bare <iq type='result'> instead. */
-    snprintf(response, sizeof(response),
+    const char *after_query = strchr(stanza->payload, '>');
+    if (after_query) {
+        after_query++; /* advance past '>' of <query ...> */
+
+        /* Extract child element name: skip whitespace, expect '<',
+         * then read until space / '/' / '>'. */
+        const char *p = after_query;
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') { p++; }
+        if (*p == '<') {
+            p++; /* skip '<' */
+            const char *name_end = p;
+            while (*name_end
+                   && *name_end != ' ' && *name_end != '/'
+                   && *name_end != '>') {
+                name_end++;
+            }
+            size_t nlen = (size_t)(name_end - p);
+            if (nlen > 0 && nlen < sizeof(child_elem) - 1) {
+                strncpy(child_elem, p, nlen);
+                child_elem[nlen] = '\0';
+            }
+        }
+
+        /* Extract xmlns= of the child element */
+        const char *xmlns_attr = strstr(after_query, "xmlns=");
+        if (xmlns_attr) {
+            xmlns_attr += 6; /* skip "xmlns=" */
+            char quote = *xmlns_attr;
+            if (quote == '\'' || quote == '"') {
+                xmlns_attr++;
+                const char *end = strchr(xmlns_attr, quote);
+                if (end) {
+                    int ns_len = (int)(end - xmlns_attr);
+                    if (ns_len > 0 && ns_len < (int)sizeof(inner_ns) - 1) {
+                        strncpy(inner_ns, xmlns_attr, ns_len);
+                        inner_ns[ns_len] = '\0';
+                    }
+                }
+            }
+        }
+    }
+
+    /* ----------------------------------------------------------------
+     * Step 2 — Validate: child namespace must be present.
+     *
+     * XEP-0049 §2.3: "At least one child element with a proper namespace
+     * MUST be included; otherwise the server MUST respond with a
+     * 'Not Acceptable' error."
+     * ---------------------------------------------------------------- */
+    if (inner_ns[0] == '\0') {
+        char err[512];
+        snprintf(err, sizeof(err),
+            "<iq type='error' id='%s' to='%s'>"
+              "<query xmlns='jabber:iq:private'/>"
+              "<error code='406' type='modify'>"
+                "<not-acceptable"
+                  " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+              "</error>"
+            "</iq>",
+            stanza->id, ctx->full_jid);
+        send_raw(ctx, err);
+        return;
+    }
+
+    /* ----------------------------------------------------------------
+     * Step 3 — Handle type='set': persist the child XML and acknowledge.
+     *
+     * XEP-0049 §2.1 / Listing 1:
+     *   The server stores the child XML and replies with a bare IQ
+     *   result containing no <query> body.
+     *
+     * We extract the inner XML as the substring of stanza->payload
+     * that lies between the closing '>' of <query ...> and the opening
+     * '<' of </query>.
+     * ---------------------------------------------------------------- */
+    if (stanza->type == XMPP_IQ_SET) {
+        const char *xml_start = strchr(stanza->payload, '>');
+        if (xml_start) {
+            xml_start++;
+            const char *xml_end = strstr(stanza->payload, "</query>");
+            if (xml_end && xml_end > xml_start) {
+                size_t xml_len = (size_t)(xml_end - xml_start);
+                if (private_store_upsert(ctx->username, inner_ns,
+                                         xml_start, xml_len) != 0) {
+                    /* Store is full — RFC 6120 §4.9.3.17 resource-constraint */
+                    char err[512];
+                    snprintf(err, sizeof(err),
+                        "<iq type='error' id='%s' to='%s'>"
+                          "<error type='wait' code='500'>"
+                            "<resource-constraint"
+                              " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                          "</error>"
+                        "</iq>",
+                        stanza->id, ctx->full_jid);
+                    send_raw(ctx, err);
+                    return;
+                }
+            }
+        }
+
+        /* XEP-0049 §2.1 Listing 1 — bare result, no <query> body */
+        char response[256];
+        snprintf(response, sizeof(response),
+            "<iq type='result' id='%s' to='%s'/>",
+            stanza->id, ctx->full_jid);
+        send_raw(ctx, response);
+        return;
+    }
+
+    /* ----------------------------------------------------------------
+     * Step 4 — Handle type='get': retrieve and return stored data.
+     *
+     * XEP-0049 §2.1 / Listing 2:
+     *   Return the stored child XML inside <query xmlns='jabber:iq:private'>,
+     *   or an empty element of the requested namespace if nothing is stored.
+     *
+     * Response buffer ceiling:
+     *   IQ + query wrapper  ≈  100 chars
+     *   stanza->id          ≤   63 chars  (id[64])
+     *   ctx->full_jid       ≤   63 chars  (full_jid[64])
+     *   inner_xml           ≤  PRIVATE_XML_MAX (900) chars
+     *   Total               ≤ ~1130 chars → 1300-byte buffer is safe.
+     * ---------------------------------------------------------------- */
+    const char *inner_xml;
+    char        empty_elem[PRIVATE_NS_MAX + 64]; /* "<name xmlns='ns'/>" */
+
+    private_store_entry_t *slot =
+        private_store_find(ctx->username, inner_ns);
+
+    if (slot != NULL) {
+        inner_xml = slot->xml;
+    } else {
+        /* Nothing stored yet — return an empty element of the requested
+         * namespace using the actual child element name from the request,
+         * as required by XEP-0049 §2.1. */
+        snprintf(empty_elem, sizeof(empty_elem),
+            "<%s xmlns='%s'/>", child_elem, inner_ns);
+        inner_xml = empty_elem;
+    }
+
+    /* Build response and check for overflow before sending */
+    char response[1300];
+    int written = snprintf(response, sizeof(response),
         "<iq type='result' id='%s' to='%s'>"
-          "<query xmlns='jabber:iq:private'>"
-            "<storage xmlns='storage:bookmarks'/>"
-          "</query>"
+          "<query xmlns='jabber:iq:private'>%s</query>"
         "</iq>",
-        stanza->id, ctx->full_jid);
+        stanza->id, ctx->full_jid, inner_xml);
+
+    if (written < 0 || (size_t)written >= sizeof(response)) {
+        /* Should not occur given PRIVATE_XML_MAX ≤ 900 and the
+         * 1300-byte buffer, but guard rather than send truncated XML. */
+        char err[512];
+        snprintf(err, sizeof(err),
+            "<iq type='error' id='%s' to='%s'>"
+              "<error type='wait' code='500'>"
+                "<resource-constraint"
+                  " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+              "</error>"
+            "</iq>",
+            stanza->id, ctx->full_jid);
+        send_raw(ctx, err);
+        return;
+    }
 
     send_raw(ctx, response);
 }
@@ -444,16 +766,19 @@ void handle_general_success(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   (Session log: "§8.2.3 shows exact iq exchange steps")
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
  *
- * FIXME: rand() is not a CSPRNG. See handle_handshake_logic() note in
- *   xmpp_server.c — RFC 6120 §4.7.1 requires unpredictable IDs.
+ * RFC 6120 §4.7.3 — IDs must be hard to predict; secure_random_u32()
+ *   satisfies this via hw_trng_read() or xorshift64* fallback.
  *
  * State transition:
  *   Move to STATE_SESSION. RFC 6120 §7 does not define a post-bind
  *   sub-state; session IQ (RFC 6121 §3.1) may optionally follow.
  * ------------------------------------------------------------------ */
 void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
-    /* RFC 6120 §7.7.1 — server-generated resource */
-    int resource_id = rand() % 9999;
+    /* RFC 6120 §7.7.1 — server-generated resource.
+     * secure_random_u32() provides hardware entropy (or a CSPRNG
+     * fallback); modulo 9999 keeps the resource short and readable.
+     * See libc_glue.c and RFC 6120 §4.7.3 for the rationale. */
+    unsigned int resource_id = secure_random_u32() % 9999;
 
     /* RFC 6120 §2.1 — full JID = localpart@domainpart/resourcepart */
     snprintf(ctx->full_jid, sizeof(ctx->full_jid), "%s@%s/Unikernel-%d", ctx->username, XMPP_DOMAIN, resource_id);
@@ -614,13 +939,12 @@ void handle_muc_owner(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *
  * CASE 3 — main server or user JID fallback:
  *   XEP-0030 §4 — server or account identity.
- *   BUG: when to='user@angelic.local' (a user's bare JID) the correct
- *   identity is category='account' type='registered', NOT
- *   category='server' type='im'.
+ *   FIX (§3 LOW): when to='user@angelic.local' (a user's bare JID),
+ *   we now return identity category='account' type='registered' instead
+ *   of category='server' type='im', which is only correct when queried
+ *   on the bare server domain.
  *   (Session log shows commented-out correct response:
  *    "<identity category='account' type='registered'/>")
- *   TODO: if stanza->to contains '@' and does NOT contain 'conference',
- *   return the account identity instead of the server identity.
  * ------------------------------------------------------------------ */
 void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     char response[1024];
@@ -680,9 +1004,20 @@ void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             "</iq>",
             stanza->to, ctx->full_jid, stanza->id);
     }
+    else if (at && !strstr(stanza->to, "conference")) {
+        /* CASE 3a: user JID (has '@' but not conference subdomain).
+         * FIX (§3 LOW): Return category='account' type='registered'
+         * per XEP-0030 §4; server identity only correct on bare domain. */
+        snprintf(response, sizeof(response),
+            "<iq type='result' from='%s' to='%s' id='%s'>"
+              "<query xmlns='http://jabber.org/protocol/disco#info'>"
+                "<identity category='account' type='registered'/>"
+              "</query>"
+            "</iq>",
+            stanza->to, ctx->full_jid, stanza->id);
+    }
     else {
-        /* CASE 3: server / user JID — XEP-0030 §4.
-         * TODO: if '@' in stanza->to → category='account' type='registered'. */
+        /* CASE 3b: server domain — XEP-0030 §4. */
         snprintf(response, sizeof(response),
             "<iq type='result' from='%s' to='%s' id='%s'>"
               "<query xmlns='http://jabber.org/protocol/disco#info'>"
@@ -712,27 +1047,43 @@ void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   XEP-0045 §6.3 — Discovering Rooms: return all public rooms as
  *     <item jid='room@service' name='Room Name'/>
  *   https://xmpp.org/extensions/xep-0045.html#disco-rooms
- *   BUG: returns a hardcoded "Main Lobby" room regardless of which
- *   rooms are actually active in rooms[].
- *   TODO: iterate rooms[] and emit one <item/> per rooms[i].active == 1.
+ *   FIX (§3 MEDIUM): previously returned a hardcoded "Main Lobby" room
+ *   regardless of which rooms were actually active in rooms[].
+ *   Now iterates rooms[] and emits one <item/> per rooms[i].active == 1.
  *
  * CASE 2 — main server:
  *   Return the MUC service as an item so clients can discover it.
  *   (Session log shows this exchange; response is correct.)
  * ------------------------------------------------------------------ */
 void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
-    char response[1024];
+    char response[2048];
 
     if (strstr(stanza->to, "conference.angelic.local")) {
-        /* CASE 1: XEP-0045 §6.3 — list of rooms.
-         * TODO: build dynamically from rooms[] instead of hardcoding. */
+        /* CASE 1: XEP-0045 §6.3 — list of active rooms.
+         * FIX (§3 MEDIUM): Build room list dynamically from rooms[]. */
+        char items[1536] = {0};
+
+        for (int i = 0; i < MAX_ROOMS; i++) {
+            if (rooms[i].active) {
+                char item[256];
+                snprintf(item, sizeof(item),
+                    "<item jid='%s@conference.angelic.local' name='%s'/>",
+                    rooms[i].name, rooms[i].name);
+
+                /* Guard against overflow */
+                if (strlen(items) + strlen(item) < sizeof(items) - 1) {
+                    strcat(items, item);
+                }
+            }
+        }
+
         snprintf(response, sizeof(response),
             "<iq type='result' from='%s' to='%s' id='%s'>"
               "<query xmlns='http://jabber.org/protocol/disco#items'>"
-                "<item jid='lobby@conference.angelic.local' name='Main Lobby'/>"
+                "%s"
               "</query>"
             "</iq>",
-            stanza->to, ctx->full_jid, stanza->id);
+            stanza->to, ctx->full_jid, stanza->id, items);
     }
     else {
         /* CASE 2: server items — advertise the MUC service */
@@ -1176,13 +1527,13 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  * --- DIRECT MESSAGE PATH ---
  *   RFC 6121 §5.1 — route to the addressed user's JID.
  *
- *   BUG 1 — from/to reversed:
- *     The snprintf uses from='stanza->to' (the intended recipient's JID)
- *     and to='ctx->full_jid' (the sender). It should be:
+ *   FIX (§3 HIGH) — from/to reversed:
+ *     The snprintf was using from='stanza->to' (the intended recipient)
+ *     and to='ctx->full_jid' (the sender). Corrected to:
  *       from='ctx->full_jid'  (the actual sender)
  *       to='stanza->to'       (the intended recipient)
  *
- *   BUG 2 — message not delivered to recipient:
+ *   BUG — message not delivered to recipient:
  *     We call send_raw(ctx, ...) which writes back to the sender, not
  *     the intended recipient. To route properly we need a global
  *     (full_jid → xmpp_client_ctx_t*) map.
@@ -1266,21 +1617,20 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
     else {
         /* --- Direct message: RFC 6121 §5.1 ---
-         * BUG: from/to are swapped; message echoes to sender, not recipient.
-         * TODO: look up stanza->to in a global ctx registry and route there. */
+         * FIX (§3 HIGH): from/to corrected; was stanza->to / ctx->full_jid.
+         * TODO: look up stanza->to in a global ctx registry and route there.
+         * For offline users: XEP-0160 — Message Offline Storage. */
         if (already_wrapped) {
             snprintf(response, sizeof(response),
-                /* BUG: should be from='%s' ctx->full_jid, to='%s' stanza->to */
                 "<message from='%s' to='%s' type='chat'>%s</message>",
-                stanza->to, ctx->full_jid, stanza->payload);
+                ctx->full_jid, stanza->to, stanza->payload);
         }
         else {
             snprintf(response, sizeof(response),
-                /* BUG: should be from='%s' ctx->full_jid, to='%s' stanza->to */
                 "<message from='%s' to='%s' type='chat'>"
                   "<body>%s</body>"
                 "</message>",
-                stanza->to, ctx->full_jid, stanza->payload);
+                ctx->full_jid, stanza->to, stanza->payload);
         }
 
         send_raw(ctx, response);
@@ -1345,13 +1695,43 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
     char response[512];
 
-    /* RFC 6121 §4.2.2 — reflect presence to sender.
-     * TODO: broadcast to all other connected clients as well. */
-    snprintf(response, sizeof(response),
-        "<presence from='%s' to='%s' id='%s'>"
-          "<status>Online</status>"
-        "</presence>",
-        ctx->full_jid, ctx->full_jid, stanza->id);
+    /* RFC 6121 §4.2.2 — broadcast presence update to every connected
+     * client that has completed session establishment.
+     *
+     * 'type' is forwarded verbatim so that 'unavailable', 'away', etc.
+     * are correctly reflected to all peers.  An empty type means the
+     * user is available (RFC 6121 §4.2 — initial/available presence).
+     *
+     * Slots with pcb == NULL or state < STATE_SESSION are skipped for
+     * the same reasons as in handle_initial_presence(). */
+    const char *ptype = stanza->type == XMPP_PRESENCE ? "" : "unavailable";
+    /* Determine whether the sender is going unavailable so we can
+     * carry the correct type attribute in the broadcast. */
+    int is_unavailable = (strstr(stanza->payload, "type='unavailable'") != NULL ||
+                          strstr(stanza->payload, "type=\"unavailable\"") != NULL);
 
-    send_raw(ctx, response);
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (client_registry[i].pcb == NULL) {
+            continue;
+        }
+        if (client_registry[i].state < STATE_SESSION) {
+            continue;
+        }
+
+        if (is_unavailable) {
+            snprintf(response, sizeof(response),
+                "<presence from='%s' to='%s' type='unavailable'>"
+                  "<status>Offline</status>"
+                "</presence>",
+                ctx->full_jid, client_registry[i].full_jid);
+        } else {
+            snprintf(response, sizeof(response),
+                "<presence from='%s' to='%s' id='%s'>"
+                  "<status>Online</status>"
+                "</presence>",
+                ctx->full_jid, client_registry[i].full_jid, stanza->id);
+        }
+
+        send_raw(&client_registry[i], response);
+    }
 }

@@ -5,6 +5,11 @@
 #include <stdio.h>
 #include <string.h>
 
+typedef enum {
+    PARSE_INCOMPLETE,   // wait for more data — do nothing
+    PARSE_NO_MEMORY,    // pool exhausted — send resource-constraint + close
+} parse_null_reason_t;
+
 /* ============================================================
  * XMPP CORE — shared types, constants, and declarations
  *
@@ -40,13 +45,13 @@
 /* ------------------------------------------------------------------
  * Stanza types
  *
- * RFC 6120 §8   — XML Stanzas
+ * RFC 6120 §8    — XML Stanzas (parent section)
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-8
  * RFC 6120 §8.2.3 — <iq>: type MUST be exactly one of get|set|result|error
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
- * RFC 6120 §8.2.1 — <message>
+ * RFC 6120 §8.2.1 — <message> semantics
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.1
- * RFC 6120 §8.2.2 — <presence>
+ * RFC 6120 §8.2.2 — <presence> semantics
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.2
  * ------------------------------------------------------------------ */
 typedef enum {
@@ -55,8 +60,8 @@ typedef enum {
     XMPP_IQ_SET,        /* RFC 6120 §8.2.3 — type="set"    */
     XMPP_IQ_RESULT,     /* RFC 6120 §8.2.3 — type="result" */
     XMPP_IQ_ERROR,      /* RFC 6120 §8.2.3 — type="error"  */
-    XMPP_MESSAGE,       /* RFC 6120 §8.2.1                  */
-    XMPP_PRESENCE       /* RFC 6120 §8.2.2                  */
+    XMPP_MESSAGE,       /* RFC 6120 §8.2.1 — Message Semantics       */
+    XMPP_PRESENCE       /* RFC 6120 §8.2.2 — Presence Semantics      */
 } stanza_type_t;
 
 /* ------------------------------------------------------------------
@@ -72,7 +77,8 @@ typedef enum {
  *
  *   STATE_SASL
  *     Server sent <stream:features> with SASL mechanisms.
- *     RFC 6120 §6.3.4 / §6.4.1 — Mechanism Offers / Exchange of Stream Headers and Features
+ *     RFC 6120 §6.3.4 Mechanism Offers / §6.4.1 Exchange of Stream
+ *     Headers and Features — advertising mechanisms in stream:features.
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.1
  *     NOTE: currently set in handle_sasl() but not used as a
  *     min_state gate — consider enforcing it so SASL <auth> is only
@@ -80,9 +86,9 @@ typedef enum {
  *
  *   STATE_AUTHENTICATED
  *     <success/> sent; old stream is now dead.
- *     RFC 6120 §6.3.6 step 4 — "the initiating entity MUST initiate
- *     a new stream to the receiving entity."
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.3.6
+ *     RFC 6120 §6.4.6 — SASL Success: "the initiating entity MUST
+ *     initiate a new stream to the receiving entity."
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.6
  *
  *   STATE_BIND
  *     Client opened new stream; server offered <bind> feature.
@@ -199,6 +205,21 @@ typedef struct {
 extern room_t rooms[MAX_ROOMS];
 
 /* ------------------------------------------------------------------
+ * Global client registry
+ *
+ * Exposes the flat pool of all connection contexts so that handlers
+ * can iterate every connected client — required for RFC 6121 §4.2.2
+ * presence broadcasting.
+ *
+ * client_registry[i].pcb == NULL  → slot is free / never used.
+ * client_registry[i].state < STATE_SESSION → negotiation not complete;
+ *   skip for presence delivery.
+ *
+ * Defined in xmpp_server.c; declared here for use in xmpp_handlers.c.
+ * ------------------------------------------------------------------ */
+extern xmpp_client_ctx_t client_registry[MAX_USERS];
+
+/* ------------------------------------------------------------------
  * Function declarations
  * (See each .c file for per-function RFC annotations)
  * ------------------------------------------------------------------ */
@@ -208,7 +229,7 @@ xmpp_stanza_t* xmpp_alloc_stanza();
 void xmpp_free_stanza(xmpp_stanza_t *s);
 
 /* xmpp_parser.c */
-xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed);
+xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, parse_null_reason_t *reason);
 
 /* xmpp_router.c */
 void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
@@ -235,7 +256,8 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
      * https://xmpp.org/extensions/xep-0045.html#disco-rooms */
 
 void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
-    /* XEP-0045 §7.2 / §7.14 — Entering and leaving a room
+    /* XEP-0045 §7.2  — Entering a Room (presence protocol)
+     * XEP-0045 §7.14 — Exiting a Room (type='unavailable')
      * https://xmpp.org/extensions/xep-0045.html#enter
      * https://xmpp.org/extensions/xep-0045.html#exit */
 
@@ -246,15 +268,17 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
      * https://xmpp.org/extensions/xep-0045.html#message */
 
 void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
-    /* RFC 6120 §6.3 — SASL negotiation
-     * https://datatracker.ietf.org/doc/html/rfc6120#section-6.3 */
+    /* RFC 6120 §6   — SASL negotiation (top-level)
+     * RFC 6120 §6.4 — SASL Process
+     * https://datatracker.ietf.org/doc/html/rfc6120#section-6 */
 
 void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
     /* RFC 6121 §4.2 — Broadcasting presence to contacts
      * https://datatracker.ietf.org/doc/html/rfc6121#section-4.2 */
 
 void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
-    /* RFC 6121 §2.1 — Roster Get / §2.1.5 — Roster Set
+    /* RFC 6121 §2.1   — Roster Management
+     * RFC 6121 §2.1.5 — Roster Set
      * https://datatracker.ietf.org/doc/html/rfc6121#section-2 */
 
 void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
@@ -276,6 +300,10 @@ void handle_general_success(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void xmpp_log(const char *direction, const char *data, int len);
 void send_raw(xmpp_client_ctx_t *ctx, const char *data);
 
-extern int rand(void);
+/* libc_glue.c — cryptographically unpredictable random word.
+ * Use this (never rand()) for stream IDs and resource IDs.
+ * RFC 6120 §4.7.3 — stream 'id' MUST be hard to predict.
+ * RFC 6120 §7.7.1 — server-generated resource IDs (same requirement). */
+extern unsigned int secure_random_u32(void);
 
 #endif

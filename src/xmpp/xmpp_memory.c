@@ -13,9 +13,9 @@
  *   In the worst case, one stanza per connected client can be in
  *   flight at once. With MAX_USERS = 10, a pool of 16 provides
  *   some headroom. If xmpp_alloc_stanza() returns NULL (pool
- *   exhausted), the caller (xmpp_recv_callback) silently loses
- *   the stanza. Consider sending:
+ *   exhausted), the caller (xmpp_recv_callback) should send:
  *     RFC 6120 §4.9.3.17 — <resource-constraint/> stream error
+ *     and close the offending connection with tcp_close().
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.3.17
  * ------------------------------------------------------------------ */
 #define MAX_POOL_STANZAS 16
@@ -29,6 +29,11 @@ static xmpp_stanza_t stanza_pool[MAX_POOL_STANZAS];
  *
  * Thread safety: not thread-safe. Acceptable on a single-core MCU
  * running lwIP in a cooperative (no-preemption) mode.
+ *
+ * On NULL return: the caller MUST send
+ *   RFC 6120 §4.9.3.17 — <resource-constraint/> stream error
+ *   and close the connection. See xmpp_recv_callback() in
+ *   xmpp_server.c for the implemented handler.
  * ------------------------------------------------------------------ */
 xmpp_stanza_t* xmpp_alloc_stanza() {
     for (int i = 0; i < MAX_POOL_STANZAS; i++) {
@@ -41,8 +46,8 @@ xmpp_stanza_t* xmpp_alloc_stanza() {
         }
     }
     /* Pool exhausted.
-     * TODO: RFC 6120 §4.9.3.17 — send <resource-constraint/> stream
-     * error and close the offending connection. */
+     * RFC 6120 §4.9.3.17 — caller must send <resource-constraint/>
+     * stream error and close the offending connection. */
     return NULL;
 }
 

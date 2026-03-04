@@ -142,25 +142,28 @@ static int find_stanza_end(const char *xml, int len) {
  * --- RFC/XEP references by section ---
  *
  * Stanza kinds and their top-level element names:
- *   RFC 6120 §8.2  — <iq>
+ *   RFC 6120 §8.2   — Basic Semantics (parent section)
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.2
- *   RFC 6120 §8.4  — <message>
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.4
- *   RFC 6120 §8.5  — <presence>
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.5
+ *   RFC 6120 §8.2.1 — <message> semantics
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.1
+ *   RFC 6120 §8.2.2 — <presence> semantics
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.2
+ *   RFC 6120 §8.2.3 — <iq> semantics
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
  *
  * IQ type attribute (MUST be exactly one of get|set|result|error):
- *   RFC 6120 §8.2.1 — IQ Semantics
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.1
- *   BUG: s->type is pre-set to XMPP_IQ_RESULT before the type
- *   attribute is read. If yxml never fires YXML_ATTRVAL for "type"
- *   (e.g. malformed or very long element), the stanza silently becomes
- *   a RESULT. Fix: initialise to XMPP_UNKNOWN and set XMPP_IQ_ERROR
- *   if type="error" is encountered.
+ *   RFC 6120 §8.2.3 — IQ Semantics
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
+ *   FIX (§3 HIGH): s->type is now initialised to XMPP_UNKNOWN at the
+ *   depth-1 ELEMSTART for <iq> rather than being pre-set to
+ *   XMPP_IQ_RESULT. XMPP_IQ_RESULT is set explicitly only when
+ *   x.data == "result" in the ATTRVAL branch. This prevents a
+ *   malformed or attribute-less <iq> from silently becoming an
+ *   IQ-result and bypassing get/set handling.
  *
  * SASL <auth> element:
- *   RFC 6120 §6.3.3 — namespace urn:ietf:params:xml:ns:xmpp-sasl
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.3.3
+ *   RFC 6120 §6.4.2 — Initiation: <auth> element sent by the client
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.2
  *
  * Resource bind child element:
  *   RFC 6120 §7.6 — namespace urn:ietf:params:xml:ns:xmpp-bind
@@ -180,11 +183,11 @@ static int find_stanza_end(const char *xml, int len) {
  *     https://xmpp.org/extensions/xep-0045.html#disco
  *
  * MUC namespaces:
- *   XEP-0045 §7.1 — http://jabber.org/protocol/muc  (entering a room)
+ *   XEP-0045 §7.2  — http://jabber.org/protocol/muc  (entering a room)
  *     https://xmpp.org/extensions/xep-0045.html#enter
- *   XEP-0045 §10  — http://jabber.org/protocol/muc#owner
+ *   XEP-0045 §10   — http://jabber.org/protocol/muc#owner
  *     https://xmpp.org/extensions/xep-0045.html#createroom
- *   XEP-0045 §9   — http://jabber.org/protocol/muc#admin
+ *   XEP-0045 §9    — http://jabber.org/protocol/muc#admin
  *     https://xmpp.org/extensions/xep-0045.html#admin
  *
  * SIZE WARNINGS:
@@ -201,7 +204,7 @@ static int find_stanza_end(const char *xml, int len) {
  *   — if the order were reversed, muc#owner stanzas would be misclassified
  *   as plain MUC. Do not reorder these checks.
  * ------------------------------------------------------------------ */
-xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
+xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, parse_null_reason_t *reason) {
     *bytes_consumed = 0;
     int offset = 0;
 
@@ -212,6 +215,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
 
     if (offset >= len) {
         *bytes_consumed = offset;
+        *reason = PARSE_INCOMPLETE;
 
         return NULL;
     }
@@ -221,6 +225,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
 
     if (remaining_len < 4) {
         *bytes_consumed = offset;
+        *reason = PARSE_INCOMPLETE;
 
         return NULL;
     }
@@ -230,6 +235,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
 
     if (stanza_len < 0) {
         *bytes_consumed = offset;
+        *reason = PARSE_INCOMPLETE;
 
         return NULL;
     }
@@ -239,6 +245,8 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
     xmpp_stanza_t *s = xmpp_alloc_stanza();
 
     if (!s) {
+        *reason = PARSE_NO_MEMORY;
+        
         return NULL;
     }
 
@@ -259,26 +267,31 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
 
             if (depth == 1) {
                 /* Top-level stanza element name determines the stanza kind.
-                 * RFC 6120 §8 — the three stanza types are <message>, <iq>,
-                 * <presence>; anything else at depth 1 is invalid mid-stream.
+                 * RFC 6120 §8.2 — the three stanza types are <message>,
+                 * <iq>, <presence>; anything else at depth 1 is invalid
+                 * mid-stream.
                  *
-                 * BUG: IQ type is set to XMPP_IQ_RESULT here before we have
-                 * read the type attribute. Should be XMPP_UNKNOWN. */
+                 * FIX (§3 HIGH): IQ type is now initialised to XMPP_UNKNOWN
+                 * here, not XMPP_IQ_RESULT. XMPP_IQ_RESULT is only set
+                 * when the type="result" attribute is explicitly parsed in
+                 * the ATTRVAL branch below. This prevents a malformed or
+                 * attribute-less <iq> from silently becoming an IQ-result. */
                 if (strcmp(x.elem, "message") == 0) {
                     s->type = XMPP_MESSAGE;
 
-                    strcpy(s->xmlns, "jabber:client"); /* RFC 6120 §8.4 */
+                    strcpy(s->xmlns, "jabber:client"); /* RFC 6120 §8.2.1 */
                 }
                 else if (strcmp(x.elem, "iq") == 0) {
-                    s->type = XMPP_IQ_RESULT; /* FIXME: should be XMPP_UNKNOWN */
+                    s->type = XMPP_UNKNOWN; /* FIX: was XMPP_IQ_RESULT; set explicitly in ATTRVAL */
                 }
                 else if (strcmp(x.elem, "presence") == 0) {
                     s->type = XMPP_PRESENCE;
 
-                    strcpy(s->xmlns, "jabber:client"); /* RFC 6120 §8.5 */
+                    strcpy(s->xmlns, "jabber:client"); /* RFC 6120 §8.2.2 */
                 }
                 else if (strcmp(x.elem, "auth") == 0) {
-                    /* RFC 6120 §6.3.3 — SASL <auth> element */
+                    /* RFC 6120 §6.4.2 — SASL Initiation: <auth> element
+                     * sent by the client to begin SASL negotiation */
                     strcpy(s->xmlns, "urn:ietf:params:xml:ns:xmpp-sasl");
                 }
             }
@@ -313,7 +326,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
                     strncat(s->id, x.data, sizeof(s->id) - strlen(s->id) - 1);
                 }
                 else if (strcmp(current_attr, "type") == 0 && strcmp(x.elem, "iq") == 0) {
-                    /* RFC 6120 §8.2.1 — IQ type values */
+                    /* RFC 6120 §8.2.3 — IQ Semantics: type values */
                     if (strcmp(x.data, "get") == 0) {
                         s->type = XMPP_IQ_GET;
                     }
@@ -326,7 +339,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
                     else if (strcmp(x.data, "result") == 0) {
                         s->type = XMPP_IQ_RESULT;
                     }
-                    /* TODO: RFC 6120 §8.2.1 — if type is none of the above,
+                    /* TODO: RFC 6120 §8.2.3 — if type is none of the above,
                      * respond with <bad-request/> stanza error. */
                 }
             }
@@ -378,7 +391,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed) {
         strcpy(s->xmlns, "http://jabber.org/protocol/disco#items");
     }
     else if (strstr(temp_buf, "http://jabber.org/protocol/muc")) {
-        /* XEP-0045 §7.1 — <x xmlns='http://jabber.org/protocol/muc'/>
+        /* XEP-0045 §7.2 — <x xmlns='http://jabber.org/protocol/muc'/>
          * embedded in a <presence> stanza to enter a room */
         strcpy(s->xmlns, "http://jabber.org/protocol/muc");
     }
