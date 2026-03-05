@@ -130,6 +130,30 @@ static struct route_entry router[] = {
  *   from the response in that case).
  * ------------------------------------------------------------------ */
 void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
+    /* ------------------------------------------------------------------
+     * Fix (§5): RFC 6120 §8.1.2 — server MUST overwrite the 'from'
+     * attribute on every inbound stanza with the authenticated sender JID.
+     *
+     * Clients can put any value (including another user's JID) in their
+     * outgoing 'from=' attribute.  If we relay stanza->from without
+     * replacement, a client can trivially impersonate any other user.
+     * Overwriting here — before any handler sees the stanza — is the
+     * single chokepoint that prevents all JID spoofing across every
+     * protocol path (IQ, message, presence, subscription).
+     *
+     * After SASL+bind, ctx->full_jid is the server-assigned full JID
+     * (localpart@domain/resource) and is authoritative.
+     * Handlers that need a bare JID derive it from this value.
+     *
+     *   RFC 6120 §8.1.2 — "from" attribute MUST be stamped by server
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.1.2
+     * ------------------------------------------------------------------ */
+    if (ctx->full_jid[0] != '\0') {
+        strncpy(stanza->from, ctx->full_jid, sizeof(stanza->from) - 1);
+
+        stanza->from[sizeof(stanza->from) - 1] = '\0';
+    }
+
     /* Stream-level element detection (should not reach here normally,
      * but guard against edge cases in stream restart).
      * RFC 6120 §4.2 — stream:stream element
@@ -175,17 +199,20 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
             return;
         }
-        else if (stanza->type == XMPP_PRESENCE) {
+        else if (stanza->type == XMPP_PRESENCE || stanza->type == XMPP_PRESENCE_UNAVAILABLE || stanza->type == XMPP_PRESENCE_SUBSCRIBE || stanza->type == XMPP_PRESENCE_SUBSCRIBED || stanza->type == XMPP_PRESENCE_UNSUBSCRIBE || stanza->type == XMPP_PRESENCE_UNSUBSCRIBED) {
             if (strstr(stanza->to, "conference.angelic.local")) {
                 /* Presence directed at the MUC service subdomain.
                  * XEP-0045 §7.2  — entering a room
                  * XEP-0045 §7.14 — exiting a room (type='unavailable')
-                 * https://xmpp.org/extensions/xep-0045.html#enter */
+                 * https://xmpp.org/extensions/xep-0045.html#enter
+                 * NOTE: handle_muc_presence() checks stanza->type to
+                 * distinguish enter vs exit vs subscription. */
                 handle_muc_presence(ctx, stanza);
             }
             else {
                 /* Presence to/from regular contacts.
-                 * RFC 6121 §4.2 — broadcasting initial/updated presence
+                 * RFC 6121 §4.2   — broadcasting initial/updated presence
+                 * RFC 6121 §3.1.3 — subscription stanzas forwarded to target
                  * https://datatracker.ietf.org/doc/html/rfc6121#section-4.2 */
                 handle_broadcast_presence(ctx, stanza);
             }
@@ -201,19 +228,38 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             /* RFC 6120 §8.2.3 — MUST send error for unrecognised IQ.
              * RFC 6120 §8.3.3.19 — <service-unavailable/> is the correct
              * condition when the server does not offer the feature.
-             * https://datatracker.ietf.org/doc/html/rfc6120#section-8.3.3.19
-             * TODO: also send when stanza->id is empty (omit id attr). */
-            if (strlen(stanza->id) > 0) {
+             *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.3.3.19
+             *
+             * FIX (§4 ⚠ Partial): Reply even when stanza->id is empty.
+             * RFC 6120 §8.2.3 — MUST reply to every IQ get/set regardless
+             * of whether 'id' was present. When id is absent, the response
+             * omits the id= attribute entirely (rather than echoing an empty
+             * string) so the client can still correlate by stream position.
+             *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3 */
+            {
                 char response[512];
 
-                snprintf(response, sizeof(response),
-                    "<iq type='error' from='%s' to='%s' id='%s'>"
-                      "<error type='cancel' code='503'>"
-                        "<service-unavailable "
-                          "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
-                      "</error>"
-                    "</iq>",
-                    stanza->to, ctx->full_jid, stanza->id);
+                if (strlen(stanza->id) > 0) {
+                    snprintf(response, sizeof(response),
+                        "<iq type='error' from='%s' to='%s' id='%s'>"
+                          "<error type='cancel' code='503'>"
+                            "<service-unavailable "
+                              "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                          "</error>"
+                        "</iq>",
+                        stanza->to, ctx->full_jid, stanza->id);
+                }
+                else {
+                    /* id absent — omit id= attribute per RFC 6120 §8.2.3 */
+                    snprintf(response, sizeof(response),
+                        "<iq type='error' from='%s' to='%s'>"
+                          "<error type='cancel' code='503'>"
+                            "<service-unavailable "
+                              "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                          "</error>"
+                        "</iq>",
+                        stanza->to, ctx->full_jid);
+                }
 
                 send_raw(ctx, response);
             }

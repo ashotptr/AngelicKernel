@@ -55,13 +55,25 @@ typedef enum {
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.2
  * ------------------------------------------------------------------ */
 typedef enum {
-    XMPP_UNKNOWN = 0,  /* type attribute absent or unrecognised      */
-    XMPP_IQ_GET,        /* RFC 6120 §8.2.3 — type="get"    */
-    XMPP_IQ_SET,        /* RFC 6120 §8.2.3 — type="set"    */
-    XMPP_IQ_RESULT,     /* RFC 6120 §8.2.3 — type="result" */
-    XMPP_IQ_ERROR,      /* RFC 6120 §8.2.3 — type="error"  */
-    XMPP_MESSAGE,       /* RFC 6120 §8.2.1 — Message Semantics       */
-    XMPP_PRESENCE       /* RFC 6120 §8.2.2 — Presence Semantics      */
+    XMPP_UNKNOWN = 0,              /* type attribute absent or unrecognised           */
+    XMPP_IQ_GET,                   /* RFC 6120 §8.2.3 — type="get"                    */
+    XMPP_IQ_SET,                   /* RFC 6120 §8.2.3 — type="set"                    */
+    XMPP_IQ_RESULT,                /* RFC 6120 §8.2.3 — type="result"                 */
+    XMPP_IQ_ERROR,                 /* RFC 6120 §8.2.3 — type="error"                  */
+    XMPP_MESSAGE,                  /* RFC 6120 §8.2.1 — Message Semantics             */
+    XMPP_PRESENCE,                 /* RFC 6120 §8.2.2 — available (no type attribute) */
+
+    /* Presence subtypes — RFC 6121 §4.5, §3.1.3
+     * These are separate enum values so routing code can use a single
+     * stanza->type check rather than calling strstr() on raw XML.
+     * The parser sets these from the 'type' attribute on <presence>.
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.5
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-3.1.3 */
+    XMPP_PRESENCE_UNAVAILABLE,    /* RFC 6121 §4.5  — type="unavailable"              */
+    XMPP_PRESENCE_SUBSCRIBE,      /* RFC 6121 §3.1.3 — type="subscribe"               */
+    XMPP_PRESENCE_SUBSCRIBED,     /* RFC 6121 §3.1.3 — type="subscribed"              */
+    XMPP_PRESENCE_UNSUBSCRIBE,    /* RFC 6121 §3.1.3 — type="unsubscribe"             */
+    XMPP_PRESENCE_UNSUBSCRIBED    /* RFC 6121 §3.1.3 — type="unsubscribed"            */
 } stanza_type_t;
 
 /* ------------------------------------------------------------------
@@ -148,6 +160,14 @@ typedef struct {
     char id[64];
     char xmlns[128];
     char payload[1024];
+    /* mechanism — populated for <auth mechanism='...'> elements.
+     * RFC 6120 §6.4.2 — client specifies the mechanism name in this
+     * attribute. Used by handle_sasl() to validate that the requested
+     * mechanism (PLAIN or ANONYMOUS) was actually offered.
+     * RFC 6120 §6.5.7 — if the mechanism is not in the offered list,
+     * server MUST respond with <failure><invalid-mechanism/></failure>.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.2 */
+    char mechanism[32];
     int is_used;
 } xmpp_stanza_t;
 
@@ -199,6 +219,24 @@ typedef struct {
 typedef struct {
     char name[MAX_ROOM_NAME_LEN];
     participant_t users[MAX_USERS_PER_ROOM];
+    /* creator_jid — the bare JID of the user who first created this room.
+     * Set in handle_muc_presence() when is_new_room == 1.
+     * Used by handle_muc_admin() to return an accurate owner in
+     * affiliation list queries (XEP-0045 §9.5) instead of falling
+     * back to the first active participant as a proxy.
+     *   https://xmpp.org/extensions/xep-0045.html#modifymember */
+    char creator_jid[64];
+    /* semi_anon — room anonymity type.
+     * XEP-0045 §7.2.3 — controls whether real JIDs are exposed in
+     * <item jid='...'/> within MUC presence stanzas.
+     *   1 (default) = semi-anonymous: real JIDs visible only to
+     *     moderators and the room owner.  Regular participants see
+     *     occupant JIDs only (room@service/nick).
+     *   0 = non-anonymous: real JID visible to all occupants.
+     * Rooms start as semi-anonymous.  A future room-config IQ
+     * (XEP-0045 §10.2) can set this to 0.
+     *   https://xmpp.org/extensions/xep-0045.html#enter-pres */
+    int semi_anon;
     int active;
 } room_t;
 
@@ -305,5 +343,31 @@ void send_raw(xmpp_client_ctx_t *ctx, const char *data);
  * RFC 6120 §4.7.3 — stream 'id' MUST be hard to predict.
  * RFC 6120 §7.7.1 — server-generated resource IDs (same requirement). */
 extern unsigned int secure_random_u32(void);
+
+/* ------------------------------------------------------------------
+ * Compile-time credential table
+ *
+ * RFC 6120 §6.5 — SASL <not-authorized/>: server MUST send this failure
+ *   condition when provided credentials do not match any known account.
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5
+ *
+ * RFC 4616 §2 — PLAIN mechanism: credentials travel in cleartext.
+ *   MUST only be used over a TLS-protected stream in production.
+ *   Acceptable here for a trusted, closed LAN.
+ *   https://datatracker.ietf.org/doc/html/rfc4616#section-2
+ *
+ * ANONYMOUS mechanism bypasses credential verification entirely per
+ * RFC 4505; entries here only apply to SASL PLAIN logins.
+ *
+ * Usage: change entries and recompile to update the user list.
+ * ------------------------------------------------------------------ */
+typedef struct {
+    char username[32];
+    char password[64];
+} xmpp_credential_t;
+
+/* Defined in xmpp_handlers.c; declared here for shared visibility. */
+extern const xmpp_credential_t xmpp_credentials[];
+extern const int                xmpp_credential_count;
 
 #endif

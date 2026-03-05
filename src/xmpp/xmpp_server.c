@@ -273,11 +273,135 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * element is never "complete" XML — it is deliberately left open
          * for the lifetime of the session. */
         if (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream")) {
+            /* ------------------------------------------------------------------
+             * Fix (§5): RFC 6120 §4.9.1 — validate the stream opening element
+             * before accepting.  If required attributes are absent or wrong,
+             * send the appropriate <stream:error> and close the connection.
+             *
+             * We check only when the <stream:stream> tag is actually present
+             * in the buffer; if only the XML declaration arrived so far we
+             * wait for more data so the check is meaningful.
+             *
+             * Conditions checked:
+             *   <invalid-namespace/>   — xmlns != 'jabber:client' or
+             *                            xmlns:stream wrong / absent
+             *   <unsupported-version/> — version attribute absent or not "1.0"
+             *                            (RFC 6120 §4.7.5 requires exactly "1.0")
+             *
+             *   RFC 6120 §4.9.1  https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.1
+             *   RFC 6120 §4.9.3.11 (invalid-namespace)
+             *   RFC 6120 §4.9.3.22 (unsupported-version)
+             * ------------------------------------------------------------------ */
+            if (strstr(ctx->rx_buffer, "<stream:stream")) {
+                /* Check for required xmlns='jabber:client' */
+                int bad_ns = (strstr(ctx->rx_buffer, "xmlns='jabber:client'") == NULL && strstr(ctx->rx_buffer, "xmlns=\"jabber:client\"") == NULL);
+
+                /* Check for required xmlns:stream namespace URI */
+                int bad_stream_ns = (strstr(ctx->rx_buffer, "xmlns:stream='http://etherx.jabber.org/streams'") == NULL &&
+                                     strstr(ctx->rx_buffer, "xmlns:stream=\"http://etherx.jabber.org/streams\"") == NULL);
+
+                /* Check for version='1.0' (RFC 6120 §4.7.5: MUST be "1.0") */
+                int bad_ver = (strstr(ctx->rx_buffer, "version='1.0'") == NULL && strstr(ctx->rx_buffer, "version=\"1.0\"") == NULL);
+
+                if (bad_ns || bad_stream_ns) {
+                    /* RFC 6120 §4.9.3.11 — <invalid-namespace/> */
+                    const char *err =
+                        "<?xml version='1.0'?>"
+                        "<stream:stream from='" XMPP_DOMAIN "' id='0' version='1.0' "
+                          "xmlns='jabber:client' "
+                          "xmlns:stream='http://etherx.jabber.org/streams'>"
+                        "<stream:error>"
+                          "<invalid-namespace "
+                            "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                        "</stream:error>"
+                        "</stream:stream>";
+
+                    /* pbuf already freed above the while() loop */
+                    tcp_write(ctx->pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
+
+                    tcp_output(ctx->pcb);
+
+                    tcp_close(ctx->pcb);
+
+                    ctx->rx_pos = 0;
+
+                    return ERR_OK;
+                }
+
+                if (bad_ver) {
+                    /* RFC 6120 §4.9.3.22 — <unsupported-version/>
+                     * Absent version attribute is treated as < 1.0 per §4.7.5. */
+                    const char *err =
+                        "<?xml version='1.0'?>"
+                        "<stream:stream from='" XMPP_DOMAIN "' id='0' version='1.0' "
+                          "xmlns='jabber:client' "
+                          "xmlns:stream='http://etherx.jabber.org/streams'>"
+                        "<stream:error>"
+                          "<unsupported-version "
+                            "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                        "</stream:error>"
+                        "</stream:stream>";
+
+                    tcp_write(ctx->pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
+
+                    tcp_output(ctx->pcb);
+
+                    tcp_close(ctx->pcb);
+
+                    ctx->rx_pos = 0;
+
+                    return ERR_OK;
+                }
+            }
+            else {
+                /* Only the <?xml?> declaration seen; <stream:stream> not yet
+                 * received.  Wait for the rest of the stream open. */
+                break;
+            }
+
             handle_handshake_logic(ctx);
 
             ctx->rx_pos = 0;
 
             return ERR_OK;
+        }
+
+        /* ------------------------------------------------------------------
+         * RFC 6120 §6.4.4 — SASL <abort/> handling.
+         * If the client sends an <abort/> element during SASL negotiation,
+         * the server MUST respond with <failure><aborted/></failure>.
+         * We detect this BEFORE parsing because the <abort/> element's
+         * namespace is an outer attribute that the parser does not capture
+         * in stanza->xmlns for unknown element names.
+         *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.4
+         *
+         * This check only triggers in STATE_CONNECTED (pre-authentication)
+         * where SASL exchange is valid; it is a no-op in all other states.
+         * ------------------------------------------------------------------ */
+        if (ctx->state == STATE_CONNECTED && strncmp(ctx->rx_buffer, "<abort", 6) == 0) {
+            /* Find the end of the abort element (self-closing or with children) */
+            char *gt = strchr(ctx->rx_buffer, '>');
+
+            if (gt) {
+                int abort_consumed = (int)((gt - ctx->rx_buffer) + 1);
+
+                const char *abort_resp =
+                    "<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
+                      "<aborted/>"
+                    "</failure>";
+
+                send_raw(ctx, abort_resp);
+
+                /* Consume the abort element from the receive buffer */
+                memmove(ctx->rx_buffer, ctx->rx_buffer + abort_consumed, ctx->rx_pos - abort_consumed);
+
+                ctx->rx_pos -= abort_consumed;
+                ctx->rx_buffer[ctx->rx_pos] = '\0';
+
+                continue; /* restart the parse loop */
+            }
+
+            break; /* abort element incomplete — wait for more data */
         }
 
         int bytes_consumed = 0;

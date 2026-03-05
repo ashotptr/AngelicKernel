@@ -342,6 +342,37 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
                     /* TODO: RFC 6120 §8.2.3 — if type is none of the above,
                      * respond with <bad-request/> stanza error. */
                 }
+                else if (strcmp(current_attr, "type") == 0 && strcmp(x.elem, "presence") == 0) {
+                    /* RFC 6121 §4.5   — unavailable presence
+                     * RFC 6121 §3.1.3 — subscription presence types
+                     *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.5
+                     *   https://datatracker.ietf.org/doc/html/rfc6121#section-3.1.3
+                     *
+                     * NOTE: an available <presence/> has no 'type' attribute; the
+                     * type remains XMPP_PRESENCE (set at ELEMSTART above). */
+                    if (strcmp(x.data, "unavailable") == 0) {
+                        s->type = XMPP_PRESENCE_UNAVAILABLE;
+                    }
+                    else if (strcmp(x.data, "subscribe") == 0) {
+                        s->type = XMPP_PRESENCE_SUBSCRIBE;
+                    }
+                    else if (strcmp(x.data, "subscribed") == 0) {
+                        s->type = XMPP_PRESENCE_SUBSCRIBED;
+                    }
+                    else if (strcmp(x.data, "unsubscribe") == 0) {
+                        s->type = XMPP_PRESENCE_UNSUBSCRIBE;
+                    }
+                    else if (strcmp(x.data, "unsubscribed") == 0) {
+                        s->type = XMPP_PRESENCE_UNSUBSCRIBED;
+                    }
+                }
+                else if (strcmp(current_attr, "mechanism") == 0 && strcmp(x.elem, "auth") == 0) {
+                    /* RFC 6120 §6.4.2 — capture the SASL mechanism name.
+                     * Used by handle_sasl() to validate that the client
+                     * requested a mechanism that was actually offered.
+                     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.2 */
+                    strncat(s->mechanism, x.data, sizeof(s->mechanism) - strlen(s->mechanism) - 1);
+                }
             }
             else if (depth == 2) {
                 /* <query xmlns='...'> pattern used by roster and disco.

@@ -19,6 +19,36 @@
 
 
 /* ------------------------------------------------------------------
+ * Compile-time credential table
+ *
+ * RFC 6120 §6.5 — <not-authorized/>: MUST be sent when the username or
+ *   password provided by the client does not match a known account.
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5
+ *
+ * RFC 4616 §2 — SASL PLAIN: credentials are {authzid NUL authcid NUL passwd}.
+ *   Only authcid (username) and passwd are checked here; authzid is
+ *   ignored per RFC 4616 §2 for simple implementations.
+ *   https://datatracker.ietf.org/doc/html/rfc4616#section-2
+ *
+ * SECURITY NOTE: PLAIN credentials travel in cleartext.
+ *   Acceptable only over a trusted, isolated LAN with no TLS.
+ *   Do NOT expose this server on a public or untrusted network.
+ *
+ * ANONYMOUS mechanism (RFC 4505) bypasses this table entirely;
+ * any client using ANONYMOUS is allowed in unconditionally.
+ *
+ * To update: change the entries below and recompile.
+ * ------------------------------------------------------------------ */
+const xmpp_credential_t xmpp_credentials[] = {
+    { "admin",  "admin"  },
+    { "user1",  "pass1"  },
+    { "user2",  "pass2"  },
+    /* Add more { "username", "password" } entries as needed */
+};
+const int xmpp_credential_count = (int)(sizeof(xmpp_credentials) / sizeof(xmpp_credentials[0]));
+
+
+/* ------------------------------------------------------------------
  * b64decode  (static helper)
  *
  * Decodes a Base64 string into raw bytes.
@@ -62,9 +92,14 @@ static int b64decode(const char *src, unsigned char *dst, int dst_len) {
         }
 
         if (val < 0) {
-            /* TODO: RFC 6120 §13.9.1 — return -1 here and send
-             * <failure><incorrect-encoding/></failure> in handle_sasl(). */
-            continue;
+            /* RFC 6120 §13.9.1 — "the receiving entity MUST verify that
+             * the [Base64] data is properly encoded."  An invalid character
+             * means the entire payload is malformed; return -1 so the
+             * caller can send <failure><incorrect-encoding/></failure>
+             * per RFC 6120 §6.5.5.
+             *   https://datatracker.ietf.org/doc/html/rfc6120#section-13.9.1
+             *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5.5 */
+            return -1;
         }
 
         buf = (buf << 6) | (unsigned int)val;
@@ -138,12 +173,94 @@ void send_raw(xmpp_client_ctx_t *ctx, const char *data) {
 void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     char response[512];
 
-    /* RFC 6121 §2.1.4 — empty roster result */
-    snprintf(response, sizeof(response),
-        "<iq type='result' id='%s' to='%s'>"
-          "<query xmlns='jabber:iq:roster'/>"
-        "</iq>",
-        stanza->id, ctx->full_jid);
+    /* ------------------------------------------------------------------
+     * RFC 6121 §2.1.5 — Roster Set: client adds/updates/removes a contact.
+     * We have no persistent roster store, so we acknowledge the set and
+     * push the change to any other resources of the same user that are
+     * currently connected.
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.1.5
+     * RFC 6121 §2.1.6 — Roster Push: after a successful set, server MUST
+     * send an IQ-set roster push to all active resources of the account.
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.1.6
+     * ------------------------------------------------------------------ */
+    if (stanza->type == XMPP_IQ_SET) {
+        /* Acknowledge the set — RFC 6121 §2.1.5 result is an empty IQ */
+        snprintf(response, sizeof(response),
+            "<iq type='result' id='%s' to='%s'/>",
+            stanza->id, ctx->full_jid);
+
+        send_raw(ctx, response);
+
+        /* Roster push to other connected resources of the same user.
+         * RFC 6121 §2.1.6 — server MUST push to all active resources.
+         * We identify "same user" by matching ctx->username. */
+        char push[768];
+
+        snprintf(push, sizeof(push),
+            "<iq type='set' to='%%s'>"
+              "<query xmlns='jabber:iq:roster'>%s</query>"
+            "</iq>",
+            stanza->payload);
+
+        for (int i = 0; i < MAX_USERS; i++) {
+            if (client_registry[i].pcb == NULL){ 
+                continue;
+            }
+
+            if (client_registry[i].state < STATE_SESSION) {
+                continue;
+            }
+
+            if (&client_registry[i] == ctx) {
+                continue; /* skip sender */
+            }
+
+            if (strcmp(client_registry[i].username, ctx->username) != 0) {
+                continue;
+            }
+
+            /* This is another resource of the same account */
+            char push_with_to[768];
+
+            snprintf(push_with_to, sizeof(push_with_to),
+                "<iq type='set' to='%s'>"
+                  "<query xmlns='jabber:iq:roster'>%s</query>"
+                "</iq>",
+                client_registry[i].full_jid, stanza->payload);
+
+            send_raw(&client_registry[i], push_with_to);
+        }
+
+        return;
+    }
+
+    /* ------------------------------------------------------------------
+     * RFC 6121 §2.1.3 / §2.1.4 — Roster Get: return an empty roster.
+     *
+     * RFC 6121 §2.6 — Roster Versioning: if the client included a 'ver'
+     * attribute in its get request, we SHOULD include a 'ver' attribute
+     * in the result. Since we have no persistent roster, we always return
+     * the same empty roster and echo a static ver="0" token.
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.6
+     * ------------------------------------------------------------------ */
+    int has_ver = (strstr(stanza->payload, "ver=") != NULL || strstr(stanza->payload, "ver ") != NULL);
+
+    if (has_ver) {
+        /* RFC 6121 §2.6 — include ver= in result */
+        snprintf(response, sizeof(response),
+            "<iq type='result' id='%s' to='%s'>"
+              "<query xmlns='jabber:iq:roster' ver='0'/>"
+            "</iq>",
+            stanza->id, ctx->full_jid);
+    }
+    else {
+        /* RFC 6121 §2.1.4 — empty roster result */
+        snprintf(response, sizeof(response),
+            "<iq type='result' id='%s' to='%s'>"
+              "<query xmlns='jabber:iq:roster'/>"
+            "</iq>",
+            stanza->id, ctx->full_jid);
+    }
 
     send_raw(ctx, response);
 }
@@ -191,9 +308,12 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   pending subscription requests that arrived while offline.
  *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3
  *
- * TODO — presence probing (session log: "use only when I get 4.3.1 done"):
- *   RFC 6121 §4.3.1 — probe each subscribed contact for their status.
- *   RFC 6121 §4.3.2 / §4.3.2.1 — handle probe responses.
+ * Presence probing (Fix §5):
+ *   RFC 6121 §4.3.1 — after broadcasting initial presence the server
+ *   SHOULD send a <presence type='probe'> to each contact so that it
+ *   triggers a presence update back to the newly-available user.
+ *   We probe all connected users since we have no subscription store
+ *   and treat all peers as implicitly subscribed (type='both').
  *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3.1
  * ------------------------------------------------------------------ */
 void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
@@ -226,6 +346,71 @@ void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             "</presence>",
             ctx->full_jid, client_registry[i].full_jid);
 
+        send_raw(&client_registry[i], response);
+    }
+
+    /* ------------------------------------------------------------------
+     * Fix (§5): RFC 6121 §4.3.1 — presence probing.
+     *
+     * After advertising our own availability, send a presence probe to
+     * every other fully-connected user.  A probe causes each peer to
+     * re-send its current presence to us, ensuring we immediately get
+     * up-to-date status for all contacts rather than waiting for their
+     * next voluntary presence update.
+     *
+     * Probe format: RFC 6121 §4.3.1
+     *   <presence type='probe' from='bare-sender-jid' to='bare-target-jid'/>
+     *
+     * We skip our own slot (no point probing ourselves) and any slot
+     * that has not completed session establishment.
+     *
+     * Since we have no subscription store, we probe everyone (implicitly
+     * treating all peers as subscribed with type='both' or 'from').
+     *
+     *   RFC 6121 §4.3.1  https://datatracker.ietf.org/doc/html/rfc6121#section-4.3.1
+     * ------------------------------------------------------------------ */
+    /* Build bare sender JID once (RFC 6120 §2.1 — bare = localpart@domain) */
+    char bare_from[64] = {0};
+
+    strncpy(bare_from, ctx->full_jid, sizeof(bare_from) - 1);
+
+    char *from_slash = strchr(bare_from, '/');
+
+    if (from_slash) {
+        *from_slash = '\0';
+    }
+
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (client_registry[i].pcb  == NULL) {
+            continue;
+        }
+
+        if (client_registry[i].state < STATE_SESSION) {
+            continue;
+        }
+
+        if (&client_registry[i]     == ctx) {
+            continue; /* skip self */
+        }
+
+        /* Build bare target JID */
+        char bare_to[64] = {0};
+
+        strncpy(bare_to, client_registry[i].full_jid, sizeof(bare_to) - 1);
+
+        char *to_slash = strchr(bare_to, '/');
+        
+        if (to_slash) {
+            *to_slash = '\0';
+        }
+
+        snprintf(response, sizeof(response),
+            "<presence type='probe' from='%s' to='%s'/>",
+            bare_from, bare_to);
+
+        /* Deliver the probe directly to the peer's TCP connection.
+         * The peer's client will respond with its current presence,
+         * which routes through handle_broadcast_presence() back to us. */
         send_raw(&client_registry[i], response);
     }
 }
@@ -632,20 +817,256 @@ void handle_private_storage(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza)
 void handle_muc_admin(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     char response[1024];
 
-    int want_owner  = strstr(stanza->payload, "affiliation='owner'")  || strstr(stanza->payload, "affiliation=\"owner\"");
-    int want_admin  = strstr(stanza->payload, "affiliation='admin'")  || strstr(stanza->payload, "affiliation=\"admin\"");
-    int want_member = strstr(stanza->payload, "affiliation='member'") || strstr(stanza->payload, "affiliation=\"member\"");
+    /* ------------------------------------------------------------------
+     * IQ-set: role/affiliation change (kick or ban).
+     *
+     * XEP-0045 §9.3 — Kick: moderator sets role='none' for a nick.
+     *   Server broadcasts type='unavailable' with status code 307
+     *   to all occupants; the kicked user's presence has code 307.
+     *   https://xmpp.org/extensions/xep-0045.html#kick
+     *
+     * XEP-0045 §9.4 — Ban: admin sets affiliation='outcast' for a JID.
+     *   Server broadcasts type='unavailable' with status code 301.
+     *   https://xmpp.org/extensions/xep-0045.html#ban
+     *
+     * We locate the target room from stanza->to (room@service), find the
+     * occupant by nick or JID, broadcast the removal, and return an empty
+     * IQ result.  A persistent ban list is not maintained (no flash/EEPROM
+     * storage on this embedded target); the user may rejoin immediately.
+     * ------------------------------------------------------------------ */
+    if (stanza->type == XMPP_IQ_SET) {
+        int want_kick = (strstr(stanza->payload, "role='none'") != NULL || strstr(stanza->payload, "role=\"none\"") != NULL);
+        int want_ban = (strstr(stanza->payload, "affiliation='outcast'") != NULL || strstr(stanza->payload, "affiliation=\"outcast\"") != NULL);
+
+        if (want_kick || want_ban) {
+            /* Extract the target nick */
+            char target_nick[MAX_NICK_LEN] = {0};
+            const char *nick_p = strstr(stanza->payload, "nick='");
+
+            if (!nick_p) {
+                nick_p = strstr(stanza->payload, "nick=\"");
+            }
+
+            if (nick_p) {
+                nick_p += 6; /* skip  nick=' */
+                char q = *(nick_p - 1);
+                const char *end = strchr(nick_p, q);
+
+                if (end) {
+                    int nlen = (int)(end - nick_p);
+
+                    if (nlen >= MAX_NICK_LEN) {
+                        nlen = MAX_NICK_LEN - 1;
+                    }
+
+                    strncpy(target_nick, nick_p, nlen);
+                }
+            }
+
+            /* Extract optional <reason> text */
+            char reason[128] = {0};
+            const char *reason_start = strstr(stanza->payload, "<reason>");
+
+            if (reason_start) {
+                reason_start += 8; /* skip <reason> */
+                const char *reason_end = strstr(reason_start, "</reason>");
+
+                if (reason_end) {
+                    int rlen = (int)(reason_end - reason_start);
+
+                    if (rlen >= (int)sizeof(reason)) {
+                        rlen = sizeof(reason) - 1;
+                    }
+
+                    strncpy(reason, reason_start, rlen);
+                }
+            }
+
+            /* Locate the room from stanza->to */
+            char room_name[MAX_ROOM_NAME_LEN] = {0};
+            char *at = strchr(stanza->to, '@');
+
+            if (at) {
+                int name_len = (int)(at - stanza->to);
+
+                if (name_len >= MAX_ROOM_NAME_LEN) {
+                    name_len = MAX_ROOM_NAME_LEN - 1;
+                }
+
+                strncpy(room_name, stanza->to, name_len);
+            }
+
+            char bare_jid[64] = {0};
+
+            strncpy(bare_jid, stanza->to, sizeof(bare_jid) - 1);
+            /* bare_jid is already room@service from stanza->to */
+
+            int status_code = want_ban ? 301 : 307;
+            /* 301 = banned (outcast), 307 = kicked (role change to none)
+             * XEP-0045 §9.3 / §9.4 */
+
+            for (int i = 0; i < MAX_ROOMS; i++) {
+                if (!rooms[i].active || strcmp(rooms[i].name, room_name) != 0) {
+                    continue;
+                }
+
+                room_t *r = &rooms[i];
+
+                for (int j = 0; j < MAX_USERS_PER_ROOM; j++) {
+                    if (!r->users[j].active) {
+                        continue;
+                    }
+
+                    if (target_nick[0] != '\0' && strcmp(r->users[j].nick, target_nick) != 0) {
+                        continue;
+                    }
+
+                    /* Found the target occupant */
+                    char kicked_nick[MAX_NICK_LEN];
+
+                    strncpy(kicked_nick, r->users[j].nick, MAX_NICK_LEN - 1);
+
+                    char kicked_jid[64];
+
+                    strncpy(kicked_jid, r->users[j].jid, 63);
+
+                    struct tcp_pcb *kicked_pcb = r->users[j].pcb;
+
+                    /* Build the removal stanza */
+                    char removal[512];
+
+                    if (reason[0] != '\0') {
+                        snprintf(removal, sizeof(removal),
+                            "<presence type='unavailable' from='%s/%s' to='%%s'>"
+                              "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                                "<item affiliation='%s' role='none'>"
+                                  "<reason>%s</reason>"
+                                "</item>"
+                                "<status code='%d'/>"
+                              "</x>"
+                            "</presence>",
+                            bare_jid, kicked_nick,
+                            want_ban ? "outcast" : "none",
+                            reason, status_code);
+                    }
+                    else {
+                        snprintf(removal, sizeof(removal),
+                            "<presence type='unavailable' from='%s/%s' to='%%s'>"
+                              "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                                "<item affiliation='%s' role='none'/>"
+                                "<status code='%d'/>"
+                              "</x>"
+                            "</presence>",
+                            bare_jid, kicked_nick,
+                            want_ban ? "outcast" : "none",
+                            status_code);
+                    }
+
+                    /* Broadcast removal to all remaining occupants */
+                    for (int k = 0; k < MAX_USERS_PER_ROOM; k++) {
+                        if (!r->users[k].active || k == j) {
+                            continue;
+                        }
+
+                        xmpp_client_ctx_t target_ctx;
+                        target_ctx.pcb = r->users[k].pcb;
+                        char msg[512];
+
+                        snprintf(msg, sizeof(msg), removal, r->users[k].jid);
+
+                        send_raw(&target_ctx, msg);
+                    }
+
+                    /* Send to the kicked/banned user with status code 110 */
+                    {
+                        xmpp_client_ctx_t kicked_ctx;
+                        kicked_ctx.pcb = kicked_pcb;
+                        char msg[512];
+
+                        snprintf(msg, sizeof(msg), removal, kicked_jid);
+
+                        /* Replace closing </x></presence> with code 110 version */
+                        char self_msg[640];
+
+                        if (reason[0] != '\0') {
+                            snprintf(self_msg, sizeof(self_msg),
+                                "<presence type='unavailable' from='%s/%s' to='%s'>"
+                                  "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                                    "<item affiliation='%s' role='none'>"
+                                      "<reason>%s</reason>"
+                                    "</item>"
+                                    "<status code='110'/>"
+                                    "<status code='%d'/>"
+                                  "</x>"
+                                "</presence>",
+                                bare_jid, kicked_nick, kicked_jid,
+                                want_ban ? "outcast" : "none",
+                                reason, status_code);
+                        }
+                        else {
+                            snprintf(self_msg, sizeof(self_msg),
+                                "<presence type='unavailable' from='%s/%s' to='%s'>"
+                                  "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                                    "<item affiliation='%s' role='none'/>"
+                                    "<status code='110'/>"
+                                    "<status code='%d'/>"
+                                  "</x>"
+                                "</presence>",
+                                bare_jid, kicked_nick, kicked_jid,
+                                want_ban ? "outcast" : "none",
+                                status_code);
+                        }
+
+                        send_raw(&kicked_ctx, self_msg);
+                    }
+
+                    /* Remove from room */
+                    memset(&r->users[j], 0, sizeof(participant_t));
+
+                    break;
+                }
+
+                break;
+            }
+
+            /* Acknowledge the admin action — RFC 6120 §8.2.3 */
+            snprintf(response, sizeof(response),
+                "<iq type='result' id='%s' to='%s'/>",
+                stanza->id, ctx->full_jid);
+
+            send_raw(ctx, response);
+
+            return;
+        }
+
+        /* Unrecognised IQ-set — return empty result */
+        snprintf(response, sizeof(response),
+            "<iq type='result' id='%s' to='%s'/>",
+            stanza->id, ctx->full_jid);
+
+        send_raw(ctx, response);
+
+        return;
+    }
+
+    /* ------------------------------------------------------------------
+     * IQ-get: affiliation list queries.
+     * XEP-0045 §9.5 — owner/admin/member list.
+     * ------------------------------------------------------------------ */
+    int want_owner  = (strstr(stanza->payload, "affiliation='owner'")  || strstr(stanza->payload, "affiliation=\"owner\""));
+    int want_admin  = (strstr(stanza->payload, "affiliation='admin'")  || strstr(stanza->payload, "affiliation=\"admin\""));
+    int want_member = (strstr(stanza->payload, "affiliation='member'") || strstr(stanza->payload, "affiliation=\"member\""));
 
     if (want_owner) {
         /* XEP-0045 §9.5 — owner list.
-         * Find first active occupant as a proxy for the owner.
-         * TODO: add a creator_jid field to room_t set in handle_muc_presence(). */
+         * Use creator_jid stored at room creation time instead of proxying
+         * the first active participant (see room_t.creator_jid comment). */
         char owner_jid[64] = {0};
         char *at = strchr(stanza->to, '@');
 
         if (at) {
             char room_name[MAX_ROOM_NAME_LEN] = {0};
-            int name_len = at - stanza->to;
+            int name_len = (int)(at - stanza->to);
 
             if (name_len >= MAX_ROOM_NAME_LEN) {
                 name_len = MAX_ROOM_NAME_LEN - 1;
@@ -655,17 +1076,24 @@ void handle_muc_admin(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
             for (int i = 0; i < MAX_ROOMS; i++) {
                 if (rooms[i].active && strcmp(rooms[i].name, room_name) == 0) {
-                    for (int j = 0; j < MAX_USERS_PER_ROOM; j++) {
-                        if (rooms[i].users[j].active) {
-                            strncpy(owner_jid, rooms[i].users[j].jid, 63);
-                            /* Strip resource → bare JID per RFC 6120 §2.1 */
-                            char *slash = strchr(owner_jid, '/');
+                    if (rooms[i].creator_jid[0] != '\0') {
+                        strncpy(owner_jid, rooms[i].creator_jid, 63);
+                    }
+                    else {
+                        /* Fallback: first active occupant */
+                        for (int j = 0; j < MAX_USERS_PER_ROOM; j++) {
+                            if (rooms[i].users[j].active) {
+                                strncpy(owner_jid, rooms[i].users[j].jid, 63);
 
-                            if (slash) {
-                                *slash = '\0';
+                                /* Strip resource → bare JID per RFC 6120 §2.1 */
+                                char *slash = strchr(owner_jid, '/');
+
+                                if (slash) {
+                                    *slash = '\0';
+                                }
+
+                                break;
                             }
-
-                            break;
                         }
                     }
 
@@ -1173,12 +1601,52 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.4
  * ------------------------------------------------------------------ */
 void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
+    /* ------------------------------------------------------------------
+     * RFC 6120 §6.5.7 — Validate offered mechanism.
+     * We advertise only PLAIN and ANONYMOUS; any other value MUST result
+     * in <failure><invalid-mechanism/></failure>.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5.7
+     * stanza->mechanism is populated by the parser from the 'mechanism'
+     * attribute of the <auth> element (RFC 6120 §6.4.2).
+     * An empty mechanism field is tolerated (ANONYMOUS clients may omit it).
+     * ------------------------------------------------------------------ */
+    if (stanza->mechanism[0] != '\0' && strcmp(stanza->mechanism, "PLAIN") != 0 && strcmp(stanza->mechanism, "ANONYMOUS") != 0) {
+        const char *inv_mech =
+            "<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
+              "<invalid-mechanism/>"
+            "</failure>";
+
+        xmpp_log("SEND", inv_mech, strlen(inv_mech));
+
+        tcp_write(ctx->pcb, inv_mech, strlen(inv_mech), TCP_WRITE_FLAG_COPY);
+
+        tcp_output(ctx->pcb);
+
+        return; /* state unchanged; client may retry with a valid mechanism */
+    }
+
     unsigned char decoded[128] = {0};
 
     /* RFC 4616 §2 / RFC 6120 §6.4.2 — decode Base64 PLAIN payload.
-     * TODO: treat b64decode() returning an error indicator as a signal
-     * to send <failure><incorrect-encoding/></failure>. */
+     * RFC 6120 §6.5.5 — b64decode() returns -1 on invalid characters;
+     * MUST respond with <failure><incorrect-encoding/></failure>.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5.5 */
     int len = b64decode(stanza->payload, decoded, sizeof(decoded) - 1);
+
+    if (len < 0) {
+        const char *bad_enc =
+            "<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
+              "<incorrect-encoding/>"
+            "</failure>";
+
+        xmpp_log("SEND", bad_enc, strlen(bad_enc));
+
+        tcp_write(ctx->pcb, bad_enc, strlen(bad_enc), TCP_WRITE_FLAG_COPY);
+
+        tcp_output(ctx->pcb);
+
+        return;
+    }
 
     ctx->username[0] = '\0';
 
@@ -1206,9 +1674,83 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         strncpy(ctx->username, "user", 31);
     }
 
-    /* TODO: verify password against expected credentials.
-     * On failure: send <failure><not-authorized/></failure>
-     * (RFC 6120 §6.5) and return without setting authenticated = 1. */
+    /* ------------------------------------------------------------------
+     * Fix (§5): RFC 6120 §6.5 — credential verification for PLAIN.
+     *
+     * Verify the decoded authcid/password pair against the compile-time
+     * credential table (xmpp_credentials[] defined at the top of this
+     * file).  On mismatch, send <failure><not-authorized/></failure> and
+     * return without advancing state, leaving the stream open so the
+     * client may retry with a different mechanism.
+     *
+     * ANONYMOUS mechanism skips verification per RFC 4505 §3.
+     *   https://datatracker.ietf.org/doc/html/rfc4505#section-3
+     *
+     * Note: the server already decoded the PLAIN payload above and
+     * stored the password in decoded[] starting at offset (i) after the
+     * second NUL separator.  We re-read from that position here.
+     *
+     *   RFC 6120 §6.5   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5
+     *   RFC 4616 §2     https://datatracker.ietf.org/doc/html/rfc4616#section-2
+     * ------------------------------------------------------------------ */
+    if (strcmp(stanza->mechanism, "PLAIN") == 0) {
+        /* Extract password: the third NUL-delimited field in decoded[]. */
+        char password[64] = {0};
+
+        /* Skip authzid (first field) */
+        int pos = 0;
+
+        while (pos < len && decoded[pos] != '\0') {
+            pos++;
+        }
+
+        pos++; /* skip NUL */
+
+        /* Skip authcid (second field — already in ctx->username) */
+        while (pos < len && decoded[pos] != '\0') {
+            pos++;
+        }
+
+        pos++; /* skip NUL */
+
+        /* Read password (third field) */
+        int pw_len = 0;
+
+        while (pos < len && decoded[pos] != '\0' && pw_len < 63) {
+            password[pw_len++] = decoded[pos++];
+        }
+
+        password[pw_len] = '\0';
+
+        /* Look up username + password in the credential table */
+        int authorized = 0;
+
+        for (int ci = 0; ci < xmpp_credential_count; ci++) {
+            if (strcmp(xmpp_credentials[ci].username, ctx->username) == 0 && strcmp(xmpp_credentials[ci].password, password) == 0) {
+                authorized = 1;
+
+                break;
+            }
+        }
+
+        if (!authorized) {
+            /* RFC 6120 §6.5 — send <not-authorized/> failure */
+            const char *not_auth =
+                "<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
+                  "<not-authorized/>"
+                "</failure>";
+
+            xmpp_log("SEND", not_auth, strlen(not_auth));
+
+            tcp_write(ctx->pcb, not_auth, strlen(not_auth), TCP_WRITE_FLAG_COPY);
+
+            tcp_output(ctx->pcb);
+
+            /* Do NOT advance state — client may retry with valid credentials */
+            return;
+        }
+    }
+    /* ANONYMOUS — no credential check required (RFC 4505 §3) */
 
     /* RFC 6120 §6.4.6 — SASL success */
     const char *resp = "<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
@@ -1233,7 +1775,7 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  * Handles a user entering or creating a MUC room.
  *
  * RECEIVE:
- *   XEP-0045 §7.1 — Entering a Room: client sends
+ *   XEP-0045 §7.2 — Entering a Room: client sends
  *     <presence to='room@service/desired-nick'>
  *       <x xmlns='http://jabber.org/protocol/muc'/>
  *     </presence>
@@ -1375,6 +1917,25 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
                 strcpy(r->name, room_name);
 
+                /* Store creator JID for accurate owner reporting.
+                 * XEP-0045 §9.5 / handle_muc_admin() uses this instead
+                 * of proxying the first active participant. */
+                strncpy(r->creator_jid, ctx->full_jid, sizeof(r->creator_jid) - 1);
+
+                r->creator_jid[sizeof(r->creator_jid) - 1] = '\0';
+
+                /* Strip resource → bare JID (RFC 6120 §2.1) */
+                char *slash = strchr(r->creator_jid, '/');
+
+                if (slash) {
+                    *slash = '\0';
+                }
+
+                /* XEP-0045 §7.2.3 — default anonymity type is semi-anonymous.
+                 * Real JIDs are only visible to moderators/admins/owners.
+                 * A future room-config IQ (XEP-0045 §10.2) can set this to 0
+                 * for a non-anonymous room where all occupants see real JIDs. */
+                r->semi_anon = 1;
                 is_new_room = 1;
 
                 break;
@@ -1386,8 +1947,115 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         return; /* Room pool exhausted */
     }
 
-    /* TODO: XEP-0045 §7.2.8 — nick conflict check before adding user.
-     * Iterate r->users[], compare nick; if taken send presence error. */
+    /* ------------------------------------------------------------------
+     * Handle room exit: type='unavailable' directed at conference domain.
+     * XEP-0045 §7.14 — Exiting a Room
+     *   Client sends: <presence type='unavailable' to='room@service/nick'/>
+     *   Server MUST:
+     *     1. Broadcast type='unavailable' from room/nick to all other occupants.
+     *     2. Send self-departure with <status code='110'/> to the leaving user.
+     *     3. Remove the user from the room's participant list.
+     *     4. Deactivate the room if it becomes empty.
+     *   https://xmpp.org/extensions/xep-0045.html#exit
+     * ------------------------------------------------------------------ */
+    if (stanza->type == XMPP_PRESENCE_UNAVAILABLE) {
+        char response[512];
+
+        for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+            if (!r->users[i].active) {
+                continue;
+            }
+
+            if (strcmp(r->users[i].nick, nick) != 0) {
+                continue;
+            }
+
+            /* SEND to all other occupants: departure presence */
+            for (int j = 0; j < MAX_USERS_PER_ROOM; j++) {
+                if (!r->users[j].active || j == i) {
+                    continue;
+                }
+
+                xmpp_client_ctx_t target_ctx;
+                target_ctx.pcb = r->users[j].pcb;
+
+                snprintf(response, sizeof(response),
+                    "<presence type='unavailable' from='%s/%s' to='%s'>"
+                      "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                        "<item affiliation='member' role='none'/>"
+                      "</x>"
+                    "</presence>",
+                    bare_jid, nick, r->users[j].jid);
+
+                send_raw(&target_ctx, response);
+            }
+
+            /* SEND self-departure with code 110 */
+            snprintf(response, sizeof(response),
+                "<presence type='unavailable' from='%s/%s' to='%s'>"
+                  "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                    "<item affiliation='member' role='none'/>"
+                    "<status code='110'/>"
+                  "</x>"
+                "</presence>",
+                bare_jid, nick, ctx->full_jid);
+
+            send_raw(ctx, response);
+
+            /* Remove user from room */
+            memset(&r->users[i], 0, sizeof(participant_t));
+
+            /* Deactivate room if now empty */
+            int occupied = 0;
+
+            for (int j = 0; j < MAX_USERS_PER_ROOM; j++) {
+                if (r->users[j].active) { 
+                    occupied = 1;
+
+                    break; 
+                }
+            }
+            if (!occupied) {
+                r->active = 0;
+
+                memset(r->name, 0, sizeof(r->name));
+
+                memset(r->creator_jid, 0, sizeof(r->creator_jid));
+            }
+
+            return; /* Exit handling complete */
+        }
+
+        /* Nick not found in room — silently ignore */
+        return;
+    }
+
+    /* ------------------------------------------------------------------
+     * Nick conflict check (XEP-0045 §7.2.8).
+     * Before adding the user, verify that no active participant already
+     * holds the requested nick.  If the nick is taken:
+     *   Send <presence type='error' ...><error code='409'>
+     *         <conflict xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error>
+     *   </presence>  and return without modifying the room.
+     *   https://xmpp.org/extensions/xep-0045.html#enter-conflict
+     * ------------------------------------------------------------------ */
+    for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+        if (r->users[i].active && strcmp(r->users[i].nick, nick) == 0) {
+            char conflict[512];
+
+            snprintf(conflict, sizeof(conflict),
+                "<presence type='error' from='%s/%s' to='%s'>"
+                  "<error type='cancel' code='409'>"
+                    "<conflict xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                  "</error>"
+                "</presence>",
+                bare_jid, nick, ctx->full_jid);
+
+            send_raw(ctx, conflict);
+
+            return;
+        }
+    }
 
     /* Add joining user to the room */
     for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
@@ -1405,7 +2073,29 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
     char response[512];
 
-    /* SEND 1: XEP-0045 §7.2 — existing occupants → new user */
+    /* Determine whether the new user is the room owner (creator).
+     * Owners are always permitted to see real JIDs regardless of
+     * the room's anonymity setting (XEP-0045 §7.2.3). */
+    char bare_self[64] = {0};
+
+    strncpy(bare_self, ctx->full_jid, sizeof(bare_self) - 1);
+
+    {
+        char *sl = strchr(bare_self, '/');
+
+        if (sl) {
+            *sl = '\0';
+        }
+    }
+
+    int self_is_owner = (strcmp(bare_self, r->creator_jid) == 0);
+
+    /* SEND 1: XEP-0045 §7.2 — existing occupants → new user
+     *
+     * Fix (§5): XEP-0045 §7.2.3 — real JID exposure in <item jid='...'/>.
+     *   semi_anon == 1: include jid= only if the new user is an owner/mod.
+     *   semi_anon == 0: always include jid= (non-anonymous room).
+     *   https://xmpp.org/extensions/xep-0045.html#enter-pres */
     for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
         if (!r->users[i].active) {
             continue;
@@ -1415,18 +2105,39 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             continue;
         }
 
-        snprintf(response, sizeof(response),
-            "<presence from='%s/%s' to='%s'>"
-              "<x xmlns='http://jabber.org/protocol/muc#user'>"
-                "<item affiliation='member' role='participant' jid='%s'/>"
-              "</x>"
-            "</presence>",
-            bare_jid, r->users[i].nick, ctx->full_jid, r->users[i].jid);
+        /* Expose the existing occupant's real JID only if:
+         *   (a) the room is non-anonymous, OR
+         *   (b) the receiving user (new joiner) is owner/moderator. */
+        int expose_jid = (!r->semi_anon || self_is_owner);
+
+        if (expose_jid) {
+            snprintf(response, sizeof(response),
+                "<presence from='%s/%s' to='%s'>"
+                  "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                    "<item affiliation='member' role='participant' jid='%s'/>"
+                  "</x>"
+                "</presence>",
+                bare_jid, r->users[i].nick, ctx->full_jid, r->users[i].jid);
+        }
+        else {
+            /* Semi-anonymous: omit jid= for regular members */
+            snprintf(response, sizeof(response),
+                "<presence from='%s/%s' to='%s'>"
+                  "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                    "<item affiliation='member' role='participant'/>"
+                  "</x>"
+                "</presence>",
+                bare_jid, r->users[i].nick, ctx->full_jid);
+        }
 
         send_raw(ctx, response);
     }
 
-    /* SEND 2: XEP-0045 §7.2 — new user's presence → all existing occupants */
+    /* SEND 2: XEP-0045 §7.2 — new user's presence → all existing occupants
+     *
+     * Fix (§5): XEP-0045 §7.2.3 — expose new user's real JID only to
+     *   owners/moderators in semi-anonymous rooms; to all in non-anonymous.
+     *   https://xmpp.org/extensions/xep-0045.html#enter-pres */
     for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
         if (!r->users[i].active) {
             continue;
@@ -1439,13 +2150,31 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         xmpp_client_ctx_t target_ctx; /* only pcb is used by send_raw() */
         target_ctx.pcb = r->users[i].pcb;
 
-        snprintf(response, sizeof(response),
-            "<presence from='%s/%s' to='%s'>"
-              "<x xmlns='http://jabber.org/protocol/muc#user'>"
-                "<item affiliation='member' role='participant' jid='%s'/>"
-              "</x>"
-            "</presence>",
-            bare_jid, nick, r->users[i].jid, ctx->full_jid);
+        /* Expose the new joiner's real JID only if:
+         *   (a) the room is non-anonymous, OR
+         *   (b) the receiving existing occupant is the room owner. */
+        int recipient_is_owner = (strcmp(r->users[i].jid, r->creator_jid) == 0);
+        int expose_jid2 = (!r->semi_anon || recipient_is_owner);
+
+        if (expose_jid2) {
+            snprintf(response, sizeof(response),
+                "<presence from='%s/%s' to='%s'>"
+                  "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                    "<item affiliation='member' role='participant' jid='%s'/>"
+                  "</x>"
+                "</presence>",
+                bare_jid, nick, r->users[i].jid, ctx->full_jid);
+        }
+        else {
+            /* Semi-anonymous: omit jid= for regular members */
+            snprintf(response, sizeof(response),
+                "<presence from='%s/%s' to='%s'>"
+                  "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                    "<item affiliation='member' role='participant'/>"
+                  "</x>"
+                "</presence>",
+                bare_jid, nick, r->users[i].jid);
+        }
 
         send_raw(&target_ctx, response);
     }
@@ -1617,9 +2346,22 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
     else {
         /* --- Direct message: RFC 6121 §5.1 ---
-         * FIX (§3 HIGH): from/to corrected; was stanza->to / ctx->full_jid.
-         * TODO: look up stanza->to in a global ctx registry and route there.
-         * For offline users: XEP-0160 — Message Offline Storage. */
+         *
+         * FIX (§4 ⚠ Partial — direct message routing):
+         * Route to the addressed recipient by searching client_registry
+         * for a matching JID (full or bare). Bare JID matching is needed
+         * because the sender may address user@domain without a resource.
+         *
+         * RFC 6121 §5.1 — "the server MUST deliver the stanza to the
+         * intended recipient."
+         *   https://datatracker.ietf.org/doc/html/rfc6121#section-5.1
+         *
+         * RFC 6120 §8.1.2 — from= is stamped as ctx->full_jid (the
+         * authenticated sender), not taken from the stanza to prevent
+         * JID spoofing.
+         *
+         * For offline users: XEP-0160 — Message Offline Storage.
+         * Not implemented; service-unavailable is returned instead. */
         if (already_wrapped) {
             snprintf(response, sizeof(response),
                 "<message from='%s' to='%s' type='chat'>%s</message>",
@@ -1633,7 +2375,64 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 ctx->full_jid, stanza->to, stanza->payload);
         }
 
-        send_raw(ctx, response);
+        /* Build the bare target JID for matching */
+        char bare_target[64] = {0};
+
+        strncpy(bare_target, stanza->to, sizeof(bare_target) - 1);
+
+        char *target_slash = strchr(bare_target, '/');
+
+        if (target_slash) {
+            *target_slash = '\0';
+        }
+
+        int delivered = 0;
+
+        for (int i = 0; i < MAX_USERS; i++) {
+            if (client_registry[i].pcb == NULL) {
+                continue;
+            }
+
+            if (client_registry[i].state < STATE_SESSION) {
+                continue;
+            }
+
+            /* Match on bare JID (localpart@domain) */
+            char bare_reg[64] = {0};
+
+            strncpy(bare_reg, client_registry[i].full_jid, sizeof(bare_reg) - 1);
+
+            char *reg_slash = strchr(bare_reg, '/');
+
+            if (reg_slash) {
+                *reg_slash = '\0';
+            }
+
+            if (strcmp(bare_target, bare_reg) == 0) {
+                send_raw(&client_registry[i], response);
+
+                delivered = 1;
+                /* Continue iterating: deliver to all resources of this user */
+            }
+        }
+
+        if (!delivered) {
+            /* RFC 6121 §8.5.2.1 — recipient not available.
+             * Send service-unavailable error back to sender.
+             * TODO: XEP-0160 — store for offline delivery. */
+            char err[512];
+
+            snprintf(err, sizeof(err),
+                "<message type='error' from='%s' to='%s'>"
+                  "<error type='cancel' code='503'>"
+                    "<service-unavailable"
+                      " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                  "</error>"
+                "</message>",
+                stanza->to, ctx->full_jid);
+
+            send_raw(ctx, err);
+        }
     }
 }
 
@@ -1673,10 +2472,8 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   RFC 6121 §3.1.4 — 'subscribed'/'unsubscribed': update the roster.
  *   https://datatracker.ietf.org/doc/html/rfc6121#section-3.1
  *
- * TODO — presence probing (session log: "use only when I get 4.3.1 done"):
- *   RFC 6121 §4.3.1 — on initial presence, probe each subscribed contact.
- *   RFC 6121 §4.3.2 / §4.4 — handle probe responses.
- *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3.1
+ * NOTE — presence probing: implemented in handle_initial_presence()
+ *   RFC 6121 §4.3.1 — probe sent after initial presence broadcast.
  *
  * TODO — XEP reviews noted in session log:
  *   XEP-0115 (Entity Capabilities), XEP-0153 (vCard avatar),
@@ -1693,22 +2490,93 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         ctx->state = STATE_READY;
     }
 
+    /* ------------------------------------------------------------------
+     * Subscription stanza forwarding.
+     * RFC 6121 §3.1.3 — subscribe/subscribed/unsubscribe/unsubscribed
+     * presence types must be delivered to the addressed user.
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-3.1.3
+     *
+     * We locate the target by bare JID matching in client_registry.
+     * The stanza is re-stamped with from=ctx->full_jid (bare) to prevent
+     * spoofing (RFC 6120 §8.1.2).
+     * ------------------------------------------------------------------ */
+    if (stanza->type == XMPP_PRESENCE_SUBSCRIBE || stanza->type == XMPP_PRESENCE_SUBSCRIBED || stanza->type == XMPP_PRESENCE_UNSUBSCRIBE || stanza->type == XMPP_PRESENCE_UNSUBSCRIBED) {
+        const char *ptype = (stanza->type == XMPP_PRESENCE_SUBSCRIBE) ? "subscribe" :
+                            (stanza->type == XMPP_PRESENCE_SUBSCRIBED) ? "subscribed" :
+                            (stanza->type == XMPP_PRESENCE_UNSUBSCRIBE) ? "unsubscribe" : "unsubscribed";
+
+        /* Build bare sender JID (RFC 6120 §2.1) */
+        char bare_from[64] = {0};
+
+        strncpy(bare_from, ctx->full_jid, sizeof(bare_from) - 1);
+
+        char *slash = strchr(bare_from, '/');
+
+        if (slash) {
+            *slash = '\0';
+        }
+
+        /* Build bare target JID for matching */
+        char bare_target[64] = {0};
+
+        strncpy(bare_target, stanza->to, sizeof(bare_target) - 1);
+
+        slash = strchr(bare_target, '/');
+
+        if (slash) {
+            *slash = '\0';
+        }
+
+        char relay[512];
+
+        snprintf(relay, sizeof(relay),
+            "<presence type='%s' from='%s' to='%%s'/>",
+            ptype, bare_from);
+
+        for (int i = 0; i < MAX_USERS; i++) {
+            if (client_registry[i].pcb == NULL) {
+                continue;
+            }
+            if (client_registry[i].state < STATE_SESSION) {
+                continue;
+            }
+
+            char bare_reg[64] = {0};
+
+            strncpy(bare_reg, client_registry[i].full_jid, sizeof(bare_reg) - 1);
+
+            slash = strchr(bare_reg, '/');
+
+            if (slash) {
+                *slash = '\0';
+            }
+
+            if (strcmp(bare_target, bare_reg) == 0) {
+                char msg[512];
+                
+                snprintf(msg, sizeof(msg), relay, client_registry[i].full_jid);
+
+                send_raw(&client_registry[i], msg);
+            }
+        }
+        return;
+    }
+
     char response[512];
 
-    /* RFC 6121 §4.2.2 — broadcast presence update to every connected
+    /* ------------------------------------------------------------------
+     * RFC 6121 §4.2.2 — broadcast presence update to every connected
      * client that has completed session establishment.
      *
-     * 'type' is forwarded verbatim so that 'unavailable', 'away', etc.
-     * are correctly reflected to all peers.  An empty type means the
-     * user is available (RFC 6121 §4.2 — initial/available presence).
+     * FIX (§4 ⚠ Partial — unavailable presence):
+     * stanza->type is now XMPP_PRESENCE_UNAVAILABLE when the client sent
+     * type='unavailable'. Previously this was detected via strstr() on
+     * stanza->payload, which is the INNER content and does not contain
+     * the outer 'type' attribute — making the check silently incorrect.
+     * Using stanza->type is both correct and cheaper.
      *
-     * Slots with pcb == NULL or state < STATE_SESSION are skipped for
-     * the same reasons as in handle_initial_presence(). */
-    const char *ptype = stanza->type == XMPP_PRESENCE ? "" : "unavailable";
-    /* Determine whether the sender is going unavailable so we can
-     * carry the correct type attribute in the broadcast. */
-    int is_unavailable = (strstr(stanza->payload, "type='unavailable'") != NULL ||
-                          strstr(stanza->payload, "type=\"unavailable\"") != NULL);
+     * Slots with pcb == NULL or state < STATE_SESSION are skipped. */
+    int is_unavailable = (stanza->type == XMPP_PRESENCE_UNAVAILABLE);
 
     for (int i = 0; i < MAX_USERS; i++) {
         if (client_registry[i].pcb == NULL) {
@@ -1724,7 +2592,8 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                   "<status>Offline</status>"
                 "</presence>",
                 ctx->full_jid, client_registry[i].full_jid);
-        } else {
+        }
+        else {
             snprintf(response, sizeof(response),
                 "<presence from='%s' to='%s' id='%s'>"
                   "<status>Online</status>"
