@@ -237,6 +237,33 @@ typedef struct {
      * (XEP-0045 §10.2) can set this to 0.
      *   https://xmpp.org/extensions/xep-0045.html#enter-pres */
     int semi_anon;
+    /* locked — XEP-0045 §10.1 locked-room state.
+     *
+     * A newly created room MUST be placed in the locked state immediately
+     * after creation and MUST remain locked until the owner either:
+     *   (a) submits a configuration form  (XEP-0045 §10.1.3), or
+     *   (b) submits an instant-room request (XEP-0045 §10.1.2).
+     *
+     * While locked == 1, any user other than the room creator who sends
+     * a join presence MUST receive:
+     *   <presence type='error' from='room@service/nick' to='user'>
+     *     <error type='cancel' code='404'>
+     *       <item-not-found xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>
+     *     </error>
+     *   </presence>
+     *
+     * The creator is identified by comparing the joining user's bare JID
+     * against room_t.creator_jid (set at room creation time in
+     * handle_muc_presence()).  The creator may re-enter the locked room
+     * freely (e.g. after a reconnect) while the room is being configured.
+     *
+     * Unlocked (set to 0) by handle_muc_owner() when the owner submits
+     * a config-form IQ-set or an instant-room IQ-set.
+     *
+     *   XEP-0045 §10.1   https://xmpp.org/extensions/xep-0045.html#createroom
+     *   XEP-0045 §10.1.2 https://xmpp.org/extensions/xep-0045.html#createroom-instant
+     *   XEP-0045 §10.1.3 https://xmpp.org/extensions/xep-0045.html#createroom-reserved */
+    int locked;
     int active;
 } room_t;
 

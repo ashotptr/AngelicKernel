@@ -1211,6 +1211,21 @@ void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     /* RFC 6120 §2.1 — full JID = localpart@domainpart/resourcepart */
     snprintf(ctx->full_jid, sizeof(ctx->full_jid), "%s@%s/Unikernel-%d", ctx->username, XMPP_DOMAIN, resource_id);
 
+    /* Evict any stale slot holding the same bare JID */
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (&client_registry[i] == ctx) {
+            continue;
+        }
+
+        if (client_registry[i].pcb == NULL) {
+            continue;
+        }
+        
+        if (strcmp(client_registry[i].username, ctx->username) == 0) {
+            memset(&client_registry[i], 0, sizeof(xmpp_client_ctx_t));
+        }
+    }
+
     char response[512];
 
     /* RFC 6120 §7.7 — bind result containing the full JID */
@@ -1296,18 +1311,49 @@ void handle_core_session(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   XEP-0045 §10.2 — acknowledge with an empty IQ result.
  *
  * NOTE — locked room (XEP-0045 §10.1):
- *   A newly created room MUST be in a "locked" state until the owner
- *   submits this config form. We create the room immediately active
- *   inside handle_muc_presence(), so the locked state is skipped.
- *   Acceptable for embedded single-room use; document as a known
- *   deviation.
+ *   A newly created room is placed in the locked state immediately after
+ *   the creator joins (handle_muc_presence sets room_t.locked = 1).
+ *   The room is unlocked here — in handle_muc_owner — when the owner
+ *   submits the configuration form (§10.1.3) or an instant-room IQ-set
+ *   (§10.1.2).  Until then, any non-creator join attempt is rejected with
+ *   <item-not-found/> (code 404) by the locked-room gate in
+ *   handle_muc_presence().
  *   https://xmpp.org/extensions/xep-0045.html#createroom
  * ------------------------------------------------------------------ */
 void handle_muc_owner(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     char response[1024];
 
     if (stanza->type == XMPP_IQ_SET || strstr(stanza->payload, "type='submit'") || strstr(stanza->payload, "type=\"submit\"")) {
-        /* XEP-0045 §10.2 / §10.1.2 — instant room config accepted */
+        /* XEP-0045 §10.2 / §10.1.2 — instant room config accepted.
+         *
+         * Unlock the room: find it by the localpart of stanza->to, then
+         * clear the locked flag so other users may now enter.
+         *
+         * XEP-0045 §10.1.2 — instant room (empty form submit):
+         *   https://xmpp.org/extensions/xep-0045.html#createroom-instant
+         * XEP-0045 §10.1.3 — reserved room (filled form submit):
+         *   https://xmpp.org/extensions/xep-0045.html#createroom-reserved */
+        char room_name[MAX_ROOM_NAME_LEN] = {0};
+        char *at = strchr(stanza->to, '@');
+
+        if (at) {
+            int name_len = (int)(at - stanza->to);
+
+            if (name_len >= MAX_ROOM_NAME_LEN) {
+                name_len = MAX_ROOM_NAME_LEN - 1;
+            }
+
+            strncpy(room_name, stanza->to, name_len);
+        }
+
+        for (int i = 0; i < MAX_ROOMS; i++) {
+            if (rooms[i].active && strcmp(rooms[i].name, room_name) == 0) {
+                rooms[i].locked = 0; /* XEP-0045 §10.1 — unlock */
+
+                break;
+            }
+        }
+
         snprintf(response, sizeof(response),
             "<iq type='result' id='%s' to='%s' from='%s'/>",
             stanza->id, ctx->full_jid, stanza->to);
@@ -1532,7 +1578,8 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 /* ------------------------------------------------------------------
  * handle_sasl
  *
- * Processes the SASL <auth> element and grants access.
+ * Processes the SASL <auth> element; authenticates PLAIN clients against
+ * the compile-time credential table and grants ANONYMOUS clients unconditionally.
  *
  * RECEIVE:
  *   RFC 6120 §6.4.2 — SASL negotiation, client sends:
@@ -1546,54 +1593,51 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  * PLAIN payload format:
  *   RFC 4616 §2 — [authzid] NUL authcid NUL passwd
  *     authzid — authorization identity (optional; often empty → first NUL)
- *     authcid — authentication identity = username
- *     passwd  — password (read but not verified)
+ *     authcid — authentication identity = username, stored in ctx->username
+ *     passwd  — password, verified against xmpp_credentials[]
  *   https://datatracker.ietf.org/doc/html/rfc4616#section-2
  *   Decoded "AHVzZXIxAGFzZGY=" → "\x00user1\x00asdf"
- *   The code correctly skips authzid and reads authcid.
  *
  * ANONYMOUS mechanism:
  *   RFC 4505 — empty payload; len ≤ 1, username defaults to "user".
+ *   No credential check is performed (RFC 4505 §3).
  *   https://datatracker.ietf.org/doc/html/rfc4505
  *
- * SEND:
- *   RFC 6120 §6.4.6 — on success:
- *     <success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>
+ * CREDENTIAL VERIFICATION (PLAIN):
+ *   xmpp_credentials[] (defined at top of this file) is a compile-time
+ *   table of { username, password } pairs. The decoded authcid and passwd
+ *   are compared against every entry. On mismatch:
+ *     RFC 6120 §6.5 — <failure><not-authorized/></failure> is sent and
+ *     the function returns without advancing state, leaving the stream open
+ *     for the client to retry with correct credentials or a different
+ *     mechanism.
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.5
+ *
+ * BASE64 VALIDATION:
+ *   RFC 6120 §13.9.1 — b64decode() returns -1 on any invalid character;
+ *   <failure><incorrect-encoding/></failure> is sent in that case.
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-13.9.1
+ *
+ * MECHANISM VALIDATION:
+ *   RFC 6120 §6.5.7 — any mechanism name other than PLAIN or ANONYMOUS
+ *   (the two we advertised) results in <failure><invalid-mechanism/></failure>.
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5.7
+ *
+ * SASL ABORT:
+ *   RFC 6120 §6.4.4 — <abort/> is detected before parsing in
+ *   xmpp_recv_callback() and answered with <failure><aborted/></failure>.
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.4
+ *
+ * SEND (success):
+ *   RFC 6120 §6.4.6 — <success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>
  *   Client MUST then open a new XML stream.
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.6
  *
- * NOTE — code duplication:
- *   The tcp_write / state-update block here duplicates handle_sasl_success()
- *   in xmpp_server.c. TODO: refactor to call handle_sasl_success(ctx).
- *
- * SECURITY ISSUES:
- *
- *   1. No credential verification:
- *      We always succeed. For PLAIN, password is decoded but ignored.
- *      RFC 6120 §6.5 — on bad credentials MUST send:
- *        <failure><not-authorized/></failure>
- *        https://datatracker.ietf.org/doc/html/rfc6120#section-6.5
- *
- *   2. No Base64 validation:
- *      RFC 6120 §13.9.1 — MUST verify encoding; see b64decode() note.
- *      (Session log: "on importance of checking base64 format in the request"
- *       — https://datatracker.ietf.org/doc/html/rfc6120#section-13.9.1)
- *
- *   3. PLAIN over cleartext:
- *      RFC 6120 §13.8.4 — PLAIN MUST NOT be used without TLS.
- *      Acceptable for closed LAN only.
- *      https://datatracker.ietf.org/doc/html/rfc6120#section-13.8.4
- *      (Session log: "https://datatracker.ietf.org/doc/html/rfc6120#section-13.8")
- *
- *   4. No <abort/> handling:
- *      RFC 6120 §6.5 — client may send <abort/>; server MUST reply
- *        <failure><aborted/></failure>.
- *
- *   5. No invalid-mechanism handling:
- *      RFC 6120 §6.5.5 — mechanism not in offered list MUST reply
- *        <failure><invalid-mechanism/></failure>.
- *      (Noted in xmpp_server.c receive callback comment)
- *      https://datatracker.ietf.org/doc/html/rfc6120#section-6.5
+ * KNOWN LIMITATION:
+ *   RFC 6120 §13.8.4 — PLAIN MUST NOT be used without TLS.
+ *   This server offers no TLS (RFC 6120 §5). PLAIN is acceptable only on
+ *   a trusted, isolated LAN. Do not expose on a public network.
+ *   https://datatracker.ietf.org/doc/html/rfc6120#section-13.8.4
  *
  *   RFC 6120 §6.3.7 — simple user name / realm rules (both optional):
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.3.7
@@ -1628,9 +1672,11 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     unsigned char decoded[128] = {0};
 
     /* RFC 4616 §2 / RFC 6120 §6.4.2 — decode Base64 PLAIN payload.
-     * RFC 6120 §6.5.5 — b64decode() returns -1 on invalid characters;
-     * MUST respond with <failure><incorrect-encoding/></failure>.
-     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5.5 */
+     * RFC 6120 §6.5.5 — b64decode() returns -1 on any invalid character;
+     * we MUST respond with <failure><incorrect-encoding/></failure> and
+     * leave state unchanged so the client may retry.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5.5
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-13.9.1 */
     int len = b64decode(stanza->payload, decoded, sizeof(decoded) - 1);
 
     if (len < 0) {
@@ -1675,26 +1721,29 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
 
     /* ------------------------------------------------------------------
-     * Fix (§5): RFC 6120 §6.5 — credential verification for PLAIN.
+     * RFC 6120 §6.5 — credential verification for PLAIN.
      *
-     * Verify the decoded authcid/password pair against the compile-time
-     * credential table (xmpp_credentials[] defined at the top of this
-     * file).  On mismatch, send <failure><not-authorized/></failure> and
-     * return without advancing state, leaving the stream open so the
-     * client may retry with a different mechanism.
+     * All three NUL-delimited fields of the PLAIN payload (RFC 4616 §2)
+     * have already been decoded into `decoded[]` above:
+     *   field 0 — authzid  (ignored per RFC 4616 §2 for simple servers)
+     *   field 1 — authcid  (stored in ctx->username above)
+     *   field 2 — passwd   (extracted below and checked here)
      *
-     * ANONYMOUS mechanism skips verification per RFC 4505 §3.
-     *   https://datatracker.ietf.org/doc/html/rfc4505#section-3
+     * Re-scan from the start of decoded[] rather than relying on the
+     * index `i` left by the authcid extraction loop above, to keep
+     * the two passes independent and easy to audit.
      *
-     * Note: the server already decoded the PLAIN payload above and
-     * stored the password in decoded[] starting at offset (i) after the
-     * second NUL separator.  We re-read from that position here.
+     * On mismatch: <failure><not-authorized/></failure> is sent and we
+     * return WITHOUT advancing ctx->state, so the stream stays open and
+     * the client may retry (RFC 6120 §6.5 permits multiple attempts).
      *
+     * ANONYMOUS mechanism bypasses this block entirely per RFC 4505 §3.
      *   RFC 6120 §6.5   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5
      *   RFC 4616 §2     https://datatracker.ietf.org/doc/html/rfc4616#section-2
      * ------------------------------------------------------------------ */
     if (strcmp(stanza->mechanism, "PLAIN") == 0) {
-        /* Extract password: the third NUL-delimited field in decoded[]. */
+        /* Extract password: the third NUL-delimited field in decoded[].
+         * Walk past authzid and authcid to reach it. */
         char password[64] = {0};
 
         /* Skip authzid (first field) */
@@ -1734,7 +1783,11 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         }
 
         if (!authorized) {
-            /* RFC 6120 §6.5 — send <not-authorized/> failure */
+            /* RFC 6120 §6.5 — credentials did not match any entry in the
+             * credential table; send <not-authorized/> and return without
+             * advancing state. The stream stays open: the client may retry
+             * with correct credentials or switch to ANONYMOUS.
+             *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5 */
             const char *not_auth =
                 "<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
                   "<not-authorized/>"
@@ -1746,7 +1799,6 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
             tcp_output(ctx->pcb);
 
-            /* Do NOT advance state — client may retry with valid credentials */
             return;
         }
     }
@@ -1909,7 +1961,10 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
 
     if (!r) {
-        /* XEP-0045 §10.1 — create room; ideally mark as locked here */
+        /* XEP-0045 §10.1 — create room and immediately lock it.
+         * The room stays locked until the owner submits the configuration
+         * form or an instant-room IQ-set (handle_muc_owner sets locked=0).
+         *   https://xmpp.org/extensions/xep-0045.html#createroom */
         for (int i = 0; i < MAX_ROOMS; i++) {
             if (!rooms[i].active) {
                 r = &rooms[i];
@@ -1936,6 +1991,9 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                  * A future room-config IQ (XEP-0045 §10.2) can set this to 0
                  * for a non-anonymous room where all occupants see real JIDs. */
                 r->semi_anon = 1;
+
+                /* XEP-0045 §10.1 — new rooms are locked until configured. */
+                r->locked = 1;
                 is_new_room = 1;
 
                 break;
@@ -1945,6 +2003,60 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
     if (!r) {
         return; /* Room pool exhausted */
+    }
+
+    /* ------------------------------------------------------------------
+     * XEP-0045 §10.1 — Locked room gate.
+     *
+     * If the room is locked (newly created, awaiting owner configuration),
+     * only the room creator is allowed to join.  Any other user receives
+     * a <presence type='error'> with <item-not-found/> (code 404), making
+     * the room effectively invisible to non-owners until it is configured.
+     *
+     * The creator is identified by comparing the joining user's bare JID
+     * against room_t.creator_jid.  This check is intentionally applied to
+     * XMPP_PRESENCE_UNAVAILABLE as well: there is nothing to exit from if
+     * the user was never admitted, so the exit path below will find no
+     * matching nick and silently return anyway, but rejecting here is
+     * cleaner and avoids unnecessary room-deactivation logic running on an
+     * empty room while it is still being set up.
+     *
+     *   XEP-0045 §10.1
+     *   https://xmpp.org/extensions/xep-0045.html#createroom
+     * ------------------------------------------------------------------ */
+    if (r->locked) {
+        /* Compute the joining user's bare JID */
+        char joiner_bare[64] = {0};
+
+        strncpy(joiner_bare, ctx->full_jid, sizeof(joiner_bare) - 1);
+
+        char *joiner_slash = strchr(joiner_bare, '/');
+
+        if (joiner_slash) {
+            *joiner_slash = '\0';
+        }
+
+        if (strcmp(joiner_bare, r->creator_jid) != 0) {
+            /* Non-owner tried to enter a locked room.
+             * XEP-0045 §10.1 — server MUST return <item-not-found/>.
+             *   https://xmpp.org/extensions/xep-0045.html#createroom */
+            char locked_err[512];
+
+            snprintf(locked_err, sizeof(locked_err),
+                "<presence type='error' from='%s/%s' to='%s'>"
+                  "<error type='cancel' code='404'>"
+                    "<item-not-found"
+                      " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                  "</error>"
+                "</presence>",
+                bare_jid, nick, ctx->full_jid);
+
+            send_raw(ctx, locked_err);
+
+            return;
+        }
+        /* Creator is allowed through; they will complete room setup via
+         * the muc#owner config IQ that follows joining. */
     }
 
     /* ------------------------------------------------------------------
