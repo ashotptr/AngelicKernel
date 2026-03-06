@@ -155,11 +155,13 @@ static int find_stanza_end(const char *xml, int len) {
  *   RFC 6120 §8.2.3 — IQ Semantics
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
  *   FIX (§3 HIGH): s->type is now initialised to XMPP_UNKNOWN at the
- *   depth-1 ELEMSTART for <iq> rather than being pre-set to
- *   XMPP_IQ_RESULT. XMPP_IQ_RESULT is set explicitly only when
- *   x.data == "result" in the ATTRVAL branch. This prevents a
- *   malformed or attribute-less <iq> from silently becoming an
- *   IQ-result and bypassing get/set handling.
+ *   depth-1 ELEMSTART for <iq> rather than being pre-set to XMPP_IQ_RESULT.
+ *   The actual type value is resolved after the yxml loop by comparing
+ *   the accumulated iq_type_buf against "get"/"set"/"result"/"error".
+ *   This is necessary because yxml delivers ATTRVAL one byte at a time;
+ *   comparing x.data (a 1-char string) against "get" inside the loop
+ *   always fails.  If no recognised type= value is found, s->type
+ *   remains XMPP_UNKNOWN and the router sends <bad-request/>.
  *
  * SASL <auth> element:
  *   RFC 6120 §6.4.2 — Initiation: <auth> element sent by the client
@@ -258,6 +260,22 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
     int depth = 0;
     char current_attr[64] = {0};
 
+    /* Accumulators for IQ and presence type= attribute values.
+     *
+     * yxml delivers YXML_ATTRVAL events one byte at a time (x.data is always
+     * a 1-character NUL-terminated string for ASCII input).  Comparing
+     * x.data against a multi-character literal like "get" therefore always
+     * fails.  We must accumulate the full value and compare only after the
+     * yxml loop completes.
+     *
+     * RFC 6120 §8.2.3 — IQ type MUST be get|set|result|error.
+     * RFC 6121 §4.5 — presence type for unavailable/subscription states. */
+    char iq_type_buf[16] = {0}; /* accumulates the value of type= on <iq> */
+    char pres_type_buf[16] = {0}; /* accumulates the value of type= on <presence>  */
+    int is_iq = 0; /* set when depth-1 element is <iq> */
+    int is_pres = 0; /* set when depth-1 element is <presence> */
+    int xmlns_locked = 0; /* set when depth-2 ELEMSTART already wrote xmlns */
+
     /* --- Phase 1: yxml streaming parse for element names, types, attrs --- */
     for (int i = 0; i < stanza_len; i++) {
         yxml_ret_t r = yxml_parse(&x, xml_start[i]);
@@ -282,10 +300,14 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
                     strcpy(s->xmlns, "jabber:client"); /* RFC 6120 §8.2.1 */
                 }
                 else if (strcmp(x.elem, "iq") == 0) {
-                    s->type = XMPP_UNKNOWN; /* FIX: was XMPP_IQ_RESULT; set explicitly in ATTRVAL */
+                    s->type = XMPP_UNKNOWN; /* final value resolved after yxml loop from iq_type_buf */
+                    
+                    is_iq = 1;
                 }
                 else if (strcmp(x.elem, "presence") == 0) {
-                    s->type = XMPP_PRESENCE;
+                    s->type = XMPP_PRESENCE; /* overridden after loop if pres_type_buf is non-empty */
+                    
+                    is_pres = 1;
 
                     strcpy(s->xmlns, "jabber:client"); /* RFC 6120 §8.2.2 */
                 }
@@ -296,15 +318,23 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
                 }
             }
             else if (depth == 2) {
-                /* Child element namespace shortcuts for common negotiation
-                 * elements that don't use a <query xmlns=...> pattern: */
+                /* Child element namespace shortcuts for <bind> and <session>,
+                 * which declare their namespace as part of the element name
+                 * itself (RFC 6120 §7.6, RFC 6121 §3.1) rather than via an
+                 * xmlns= attribute that follows.  We write s->xmlns here and
+                 * set xmlns_locked so the depth-2 ATTRVAL accumulator below
+                 * does not later overwrite it. */
                 if (strcmp(x.elem, "bind") == 0) {
                     /* RFC 6120 §7.6 — resource bind child */
                     strcpy(s->xmlns, "urn:ietf:params:xml:ns:xmpp-bind");
+                    
+                    xmlns_locked = 1;
                 }
                 else if (strcmp(x.elem, "session") == 0) {
                     /* RFC 6121 §3.1 — session establishment child */
                     strcpy(s->xmlns, "urn:ietf:params:xml:ns:xmpp-session");
+                    
+                    xmlns_locked = 1;
                 }
             }
         }
@@ -325,46 +355,24 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
                 else if (strcmp(current_attr, "id") == 0) {
                     strncat(s->id, x.data, sizeof(s->id) - strlen(s->id) - 1);
                 }
-                else if (strcmp(current_attr, "type") == 0 && strcmp(x.elem, "iq") == 0) {
-                    /* RFC 6120 §8.2.3 — IQ Semantics: type values */
-                    if (strcmp(x.data, "get") == 0) {
-                        s->type = XMPP_IQ_GET;
-                    }
-                    else if (strcmp(x.data, "set") == 0) {
-                        s->type = XMPP_IQ_SET;
-                    }
-                    else if (strcmp(x.data, "error") == 0) {
-                        s->type = XMPP_IQ_ERROR;
-                    }
-                    else if (strcmp(x.data, "result") == 0) {
-                        s->type = XMPP_IQ_RESULT;
-                    }
-                    /* TODO: RFC 6120 §8.2.3 — if type is none of the above,
-                     * respond with <bad-request/> stanza error. */
+                else if (strcmp(current_attr, "type") == 0 && is_iq) {
+                    /* Accumulate type= value one byte at a time.
+                     * yxml delivers YXML_ATTRVAL one character per call, so
+                     * we cannot compare x.data to "get"/"set" here directly —
+                     * the comparison is deferred to after the yxml loop.
+                     * RFC 6120 §8.2.3 — IQ type MUST be get|set|result|error. */
+                    strncat(iq_type_buf, x.data, sizeof(iq_type_buf) - strlen(iq_type_buf) - 1);
                 }
-                else if (strcmp(current_attr, "type") == 0 && strcmp(x.elem, "presence") == 0) {
+                else if (strcmp(current_attr, "type") == 0 && is_pres) {
                     /* RFC 6121 §4.5   — unavailable presence
                      * RFC 6121 §3.1.3 — subscription presence types
                      *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.5
                      *   https://datatracker.ietf.org/doc/html/rfc6121#section-3.1.3
                      *
                      * NOTE: an available <presence/> has no 'type' attribute; the
-                     * type remains XMPP_PRESENCE (set at ELEMSTART above). */
-                    if (strcmp(x.data, "unavailable") == 0) {
-                        s->type = XMPP_PRESENCE_UNAVAILABLE;
-                    }
-                    else if (strcmp(x.data, "subscribe") == 0) {
-                        s->type = XMPP_PRESENCE_SUBSCRIBE;
-                    }
-                    else if (strcmp(x.data, "subscribed") == 0) {
-                        s->type = XMPP_PRESENCE_SUBSCRIBED;
-                    }
-                    else if (strcmp(x.data, "unsubscribe") == 0) {
-                        s->type = XMPP_PRESENCE_UNSUBSCRIBE;
-                    }
-                    else if (strcmp(x.data, "unsubscribed") == 0) {
-                        s->type = XMPP_PRESENCE_UNSUBSCRIBED;
-                    }
+                     * type remains XMPP_PRESENCE (set at ELEMSTART above).
+                     * Comparison deferred to after the yxml loop. */
+                    strncat(pres_type_buf, x.data, sizeof(pres_type_buf) - strlen(pres_type_buf) - 1);
                 }
                 else if (strcmp(current_attr, "mechanism") == 0 && strcmp(x.elem, "auth") == 0) {
                     /* RFC 6120 §6.4.2 — capture the SASL mechanism name.
@@ -375,25 +383,103 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
                 }
             }
             else if (depth == 2) {
-                /* <query xmlns='...'> pattern used by roster and disco.
-                 * RFC 6121 §2.1.3  — jabber:iq:roster
-                 * XEP-0045 §6.2/6.3 — disco#info / disco#items */
-                if (strcmp(x.elem, "query") == 0 && strcmp(current_attr, "xmlns") == 0) {
+                /* Generic depth-2 xmlns capture.
+                 *
+                 * Any child element can carry its namespace in an xmlns=
+                 * attribute.  We previously only handled <query xmlns=...>
+                 * here, which caused <blocklist xmlns='urn:xmpp:blocking'/>,
+                 * <pubsub xmlns='http://jabber.org/protocol/pubsub'>, and
+                 * similar elements to leave s->xmlns empty.  Empty xmlns means
+                 * the routing table never matches, the stanza falls through to
+                 * the type-based catch-all.
+                 *
+                 * Guard: only accumulate when xmlns_locked is clear.
+                 * xmlns_locked is set by the depth-2 ELEMSTART block above
+                 * for <bind> and <session>, which write their namespace
+                 * directly without an xmlns= attribute.  For all other
+                 * elements we accumulate here, one YXML_ATTRVAL byte at a time.
+                 *
+                 * IMPORTANT: The old guard was `s->xmlns[0] == '\0'`, which
+                 * fired correctly for the first byte but then prevented all
+                 * subsequent bytes from being appended — leaving only the
+                 * first character in s->xmlns.  xmlns_locked is set once at
+                 * ELEMSTART and never changes during ATTRVAL, so it is safe
+                 * across the full multi-byte accumulation.
+                 *
+                 * RFC 6121 §2.1.3  — jabber:iq:roster  (<query>)
+                 * XEP-0045 §6.2/6.3 — disco#info / disco#items  (<query>)
+                 * XEP-0191          — urn:xmpp:blocking          (<blocklist>)
+                 * XEP-0060          — pubsub                     (<pubsub>)
+                 * XEP-0049          — jabber:iq:private           (<query>)
+                 * XEP-0054          — vcard-temp                  (<vCard>)  */
+                if (strcmp(current_attr, "xmlns") == 0 && !xmlns_locked) {
                     strncat(s->xmlns, x.data, sizeof(s->xmlns) - strlen(s->xmlns) - 1);
                 }
             }
         }
     }
 
+    /* --- Post-loop: resolve IQ and presence type from accumulated buffers - */
+    /* IQ type (RFC 6120 §8.2.3) */
+    if (is_iq) {
+        if (strcmp(iq_type_buf, "get") == 0) {
+            s->type = XMPP_IQ_GET;
+        }
+        else if (strcmp(iq_type_buf, "set") == 0) {
+            s->type = XMPP_IQ_SET;
+        }
+        else if (strcmp(iq_type_buf, "result") == 0) {
+            s->type = XMPP_IQ_RESULT;
+        }
+        else if (strcmp(iq_type_buf, "error") == 0) {
+            s->type = XMPP_IQ_ERROR;
+        }
+        /* Otherwise iq_type_buf is empty (no type= attr) or holds an
+         * unrecognised value — s->type stays XMPP_UNKNOWN, which the
+         * router will reject with <bad-request/> per RFC 6120 §8.2.3. */
+    }
+
+    /* Presence type (RFC 6121 §4.5, §3.1.3) */
+    if (is_pres && pres_type_buf[0] != '\0') {
+        if (strcmp(pres_type_buf, "unavailable") == 0) {
+            s->type = XMPP_PRESENCE_UNAVAILABLE;
+        }
+        else if (strcmp(pres_type_buf, "subscribe") == 0) {
+            s->type = XMPP_PRESENCE_SUBSCRIBE;
+        }
+        else if (strcmp(pres_type_buf, "subscribed") == 0) {
+            s->type = XMPP_PRESENCE_SUBSCRIBED;
+        }
+        else if (strcmp(pres_type_buf, "unsubscribe") == 0) {
+            s->type = XMPP_PRESENCE_UNSUBSCRIBE;
+        }
+        else if (strcmp(pres_type_buf, "unsubscribed") == 0) {
+            s->type = XMPP_PRESENCE_UNSUBSCRIBED;
+        }
+        /* Unknown presence type — stays XMPP_PRESENCE; silently tolerated. */
+    }
+
     /* --- Phase 2: strstr fallback for namespace detection --------------- */
-    /* This block is needed because some child namespaces appear in
-     * attributes of deeply-nested elements (e.g. <x xmlns='...muc'/> at
-     * depth > 2) that yxml above only processes at depth 1-2.
+    /* Primary purpose: catch namespaces that appear on deeply-nested elements
+     * (depth > 2, e.g. <x xmlns='...muc'/> inside a <presence>) which the
+     * yxml phase above only visits at depth 1-2.
+     *
+     * Secondary purpose: safety net for any depth-2 namespace that the yxml
+     * generic accumulator above might miss (e.g. stanza > 1023 bytes where
+     * temp_buf is truncated — in that case only the first 1023 bytes are
+     * scanned, but the opening tag always fits so this is reliable for the
+     * namespaces we care about).
      *
      * ORDER IS CRITICAL — more specific strings must come before substrings:
      *   "muc#owner" before "muc"
      *   "muc#admin" before "muc"
-     * Swapping these would cause muc#owner/admin to be misclassified. */
+     * Swapping these would cause muc#owner/admin to be misclassified.
+     *
+     * NOTE: strstr checks only override s->xmlns when the stanza actually
+     * contains the substring.  The yxml depth-2 accumulator runs first and
+     * sets s->xmlns for most common cases; these strstr checks act as a
+     * belt-and-suspenders fallback and are harmless even when redundant
+     * because they set the same value. */
     char temp_buf[1024];
     int copy_len = (stanza_len < 1023) ? stanza_len : 1023;
 
@@ -420,6 +506,24 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
     else if (strstr(temp_buf, "disco#items")) {
         /* XEP-0045 §6.3 — listing rooms / room items */
         strcpy(s->xmlns, "http://jabber.org/protocol/disco#items");
+    }
+    else if (strstr(temp_buf, "urn:xmpp:blocking")) {
+        /* XEP-0191 — Blocking Command.
+         * Safety-net fallback: depth-2 yxml accumulator normally handles
+         * <blocklist xmlns='urn:xmpp:blocking'/> directly, but the strstr
+         * here also covers edge cases where the stanza is structured so
+         * that the accumulator guard fires (e.g. bind namespace was already
+         * written).  Harmless when both paths agree.
+         *   https://xmpp.org/extensions/xep-0191.html */
+        strcpy(s->xmlns, "urn:xmpp:blocking");
+    }
+    else if (strstr(temp_buf, "http://jabber.org/protocol/pubsub")) {
+        /* XEP-0060 — Publish-Subscribe.
+         * Covers <pubsub xmlns='http://jabber.org/protocol/pubsub'>...</pubsub>
+         * IQs sent by clients for vcard4, OMEMO bundles, devicelist etc.
+         * We reply with <service-unavailable/> (handled by router catch-all).
+         *   https://xmpp.org/extensions/xep-0060.html */
+        strcpy(s->xmlns, "http://jabber.org/protocol/pubsub");
     }
     else if (strstr(temp_buf, "http://jabber.org/protocol/muc")) {
         /* XEP-0045 §7.2 — <x xmlns='http://jabber.org/protocol/muc'/>

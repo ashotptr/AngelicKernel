@@ -123,11 +123,10 @@ static struct route_entry router[] = {
  *   RFC 6120 §8.2.3 — unrecognised IQ get/set MUST receive an error.
  *   We send <service-unavailable/> (RFC 6120 §8.3.3.19) which is
  *   correct for an unsupported namespace/feature.
- *   NOTE: We only send this if stanza->id is non-empty. RFC 6120
- *   §8.1.3 says the 'id' attribute is RECOMMENDED on IQ stanzas;
- *   technically a server MUST still reply even without an id.
- *   TODO: send the error even when id is empty (omit the 'id' attr
- *   from the response in that case).
+ *   NOTE: We reply even when stanza->id is absent — in that case the
+ *   'id' attribute is omitted from the response (not echoed as an empty
+ *   string) so the client can still correlate by stream position.
+ *   Both branches are implemented in the IQ fallback block below.
  * ------------------------------------------------------------------ */
 void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     /* ------------------------------------------------------------------
@@ -176,9 +175,48 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     for (int i = 0; router[i].xmlns != NULL; i++) {
         if (strcmp(stanza->xmlns, router[i].xmlns) == 0) {
             if (ctx->state < router[i].min_state) {
-                /* RFC 6120 §8.2.3 — for IQ stanzas we SHOULD reply with
-                 * an error rather than silently dropping.
-                 * TODO: send <not-allowed/> or <unexpected-request/> here. */
+                /* RFC 6120 §8.2.3 — MUST reply to every IQ get/set with a result
+                 * or error; silently dropping is a protocol violation.
+                 * RFC 6120 §8.3.3.20 — <unexpected-request/>: used when the server
+                 * receives a request that cannot be processed at this stage of the
+                 * negotiation (e.g. bind IQ arriving before SASL completes).
+                 *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.3.3.20
+                 *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
+                 *
+                 * For non-IQ stanzas (message, presence) silently dropping is
+                 * acceptable since the stream is not yet ready for stanza exchange.
+                 * We include the id= attribute only when it is present on the
+                 * inbound stanza, as required by RFC 6120 §8.1.3. */
+                if (stanza->type == XMPP_IQ_GET || stanza->type == XMPP_IQ_SET) {
+                    char err[512];
+                    const char *from_jid = (stanza->to[0] != '\0') ? stanza->to : XMPP_DOMAIN;
+                    const char *to_jid = (ctx->full_jid[0] != '\0') ? ctx->full_jid : "unknown";
+
+                    if (stanza->id[0] != '\0') {
+                        snprintf(err, sizeof(err),
+                            "<iq type='error' from='%s' to='%s' id='%s'>"
+                              "<error type='wait'>"
+                                "<unexpected-request "
+                                  "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                              "</error>"
+                            "</iq>",
+                            from_jid, to_jid, stanza->id);
+                    }
+                    else {
+                        /* id absent — omit id= attribute per RFC 6120 §8.1.3 */
+                        snprintf(err, sizeof(err),
+                            "<iq type='error' from='%s' to='%s'>"
+                              "<error type='wait'>"
+                                "<unexpected-request "
+                                  "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                              "</error>"
+                            "</iq>",
+                            from_jid, to_jid);
+                    }
+
+                    send_raw(ctx, err);
+                }
+
                 return;
             }
 
@@ -239,6 +277,13 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             {
                 char response[512];
 
+                /* RFC 6120 §8.1.1.1 — 'from' on an error reply must be the
+                 * JID to which the original IQ was addressed.  IQs with no
+                 * 'to' attribute are implicitly sent to the server domain.
+                 * Use XMPP_DOMAIN as the fallback (same pattern as the
+                 * xmlns-routing block above). */
+                const char *from_jid = (stanza->to[0] != '\0') ? stanza->to : XMPP_DOMAIN;
+
                 if (strlen(stanza->id) > 0) {
                     snprintf(response, sizeof(response),
                         "<iq type='error' from='%s' to='%s' id='%s'>"
@@ -247,7 +292,7 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                               "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
                           "</error>"
                         "</iq>",
-                        stanza->to, ctx->full_jid, stanza->id);
+                        from_jid, ctx->full_jid, stanza->id);
                 }
                 else {
                     /* id absent — omit id= attribute per RFC 6120 §8.2.3 */
@@ -258,11 +303,50 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                               "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
                           "</error>"
                         "</iq>",
-                        stanza->to, ctx->full_jid);
+                        from_jid, ctx->full_jid);
                 }
 
                 send_raw(ctx, response);
             }
         }
+    }
+
+    /* ------------------------------------------------------------------
+     * RFC 6120 §8.2.3 / §8.3.3.2 — <bad-request/>: detect <iq> stanzas
+     * whose type= attribute is absent or not one of get|set|result|error.
+     *
+     * The parser (xmpp_parser.c) initialises s->type to XMPP_UNKNOWN for
+     * an <iq> element and only overrides it to XMPP_IQ_{GET,SET,RESULT,ERROR}
+     * when it finds a recognised type= value.  If type= is missing or holds
+     * an unrecognised value, s->type remains XMPP_UNKNOWN after parsing.
+     *
+     * We distinguish this from other XMPP_UNKNOWN stanzas (e.g. a stream-level
+     * element that slipped through) by requiring stanza->id to be non-empty:
+     * RFC 6120 §8.1.3 RECOMMENDS that <iq> stanzas carry an id= attribute, and
+     * in practice every XMPP client sends one.  An XMPP_UNKNOWN stanza without
+     * an id is unlikely to be a malformed IQ and is silently dropped.
+     *
+     * The check is gated on STATE_AUTHENTICATED rather than STATE_SESSION so
+     * that a bind IQ arriving with a bad type attribute (in STATE_AUTHENTICATED)
+     * still receives an error reply rather than being dropped silently.
+     *
+     *   RFC 6120 §8.2.3   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
+     *   RFC 6120 §8.3.3.2  https://datatracker.ietf.org/doc/html/rfc6120#section-8.3.3.2
+     * ------------------------------------------------------------------ */
+    if (stanza->type == XMPP_UNKNOWN && stanza->id[0] != '\0' && ctx->state >= STATE_AUTHENTICATED) {
+        char response[512];
+        const char *from_jid = (stanza->to[0]      != '\0') ? stanza->to      : XMPP_DOMAIN;
+        const char *to_jid   = (ctx->full_jid[0]   != '\0') ? ctx->full_jid   : "unknown";
+
+        snprintf(response, sizeof(response),
+            "<iq type='error' from='%s' to='%s' id='%s'>"
+              "<error type='modify'>"
+                "<bad-request "
+                  "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+              "</e>"
+            "</iq>",
+            from_jid, to_jid, stanza->id);
+
+        send_raw(ctx, response);
     }
 }
