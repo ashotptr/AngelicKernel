@@ -45,6 +45,126 @@ const xmpp_credential_t xmpp_credentials[] = {
     { "user2",  "pass2"  },
     /* Add more { "username", "password" } entries as needed */
 };
+
+/* ===========================================================================
+ * Pending Subscription Store
+ *
+ * RFC 6121 §4.3 — On initial presence, the server SHOULD deliver any
+ * subscription requests that arrived while the target user was offline.
+ * https://datatracker.ietf.org/doc/html/rfc6121#section-4.3
+ *
+ * Implementation:
+ *   When handle_broadcast_presence() cannot deliver a subscription stanza
+ *   (subscribe / subscribed / unsubscribe / unsubscribed) because the
+ *   target user has no active session, the stanza is queued here keyed by
+ *   the target's username.  When handle_initial_presence() fires for that
+ *   user, all queued entries are drained and delivered.
+ *
+ * Capacity: MAX_PENDING_SUBS = 32.  Duplicate (type, from, to_user)
+ * triples are silently dropped.  If the queue is full, the oldest entry
+ * for the same recipient is recycled; failing that the lowest-index
+ * active slot is overwritten so the most-recent intent is preserved.
+ * =========================================================================== */
+#define MAX_PENDING_SUBS 32
+
+typedef struct {
+    char type[16]; /* subscribe|subscribed|unsubscribe|unsubscribed */
+    char from[64]; /* bare JID of the initiating party */
+    char to_user[32]; /* username of the intended recipient */
+    int active;
+} pending_sub_t;
+
+static pending_sub_t pending_subs[MAX_PENDING_SUBS];
+
+
+/* ------------------------------------------------------------------
+ * pending_sub_enqueue
+ *
+ * Adds (type, from, to_user) to the pending queue for offline delivery.
+ * Deduplicates: an identical triple already in the queue is a no-op.
+ * ------------------------------------------------------------------ */
+static void pending_sub_enqueue(const char *type, const char *from, const char *to_user){
+    /* Deduplication pass */
+    for (int i = 0; i < MAX_PENDING_SUBS; i++) {
+        if (!pending_subs[i].active) {
+            continue;
+        }
+
+        if (strcmp(pending_subs[i].type, type) == 0 && strcmp(pending_subs[i].from, from) == 0 && strcmp(pending_subs[i].to_user, to_user) == 0) {
+            return; /* exact duplicate -- ignore */
+        }
+    }
+
+    /* Find a free slot */
+    int slot = -1;
+    
+    for (int i = 0; i < MAX_PENDING_SUBS; i++) {
+        if (!pending_subs[i].active) { 
+            slot = i; 
+            
+            break; 
+        }
+    }
+
+    /* If full: recycle same-recipient slot, then fall back to slot 0 */
+    if (slot < 0) {
+        for (int i = 0; i < MAX_PENDING_SUBS; i++) {
+            if (strcmp(pending_subs[i].to_user, to_user) == 0) { 
+                slot = i;
+            
+                break; 
+            }
+        }
+    }
+
+    if (slot < 0) {
+        slot = 0;
+    }
+
+    strncpy(pending_subs[slot].type, type, sizeof(pending_subs[slot].type) - 1);
+    strncpy(pending_subs[slot].from, from, sizeof(pending_subs[slot].from) - 1);
+    strncpy(pending_subs[slot].to_user, to_user, sizeof(pending_subs[slot].to_user) - 1);
+    
+    pending_subs[slot].type[sizeof(pending_subs[slot].type) - 1] = '\0';
+    pending_subs[slot].from[sizeof(pending_subs[slot].from) - 1] = '\0';
+    pending_subs[slot].to_user[sizeof(pending_subs[slot].to_user) - 1] = '\0';
+    pending_subs[slot].active = 1;
+}
+
+
+/* ------------------------------------------------------------------
+ * pending_sub_drain
+ *
+ * Delivers all queued subscription stanzas for ctx->username to the
+ * newly-available client, then clears those entries.
+ *
+ * Called from handle_initial_presence() after the presence broadcast.
+ * RFC 6121 §4.3 — https://datatracker.ietf.org/doc/html/rfc6121#section-4.3
+ * ------------------------------------------------------------------ */
+static void pending_sub_drain(xmpp_client_ctx_t *ctx){
+    char stanza[256];
+
+    for (int i = 0; i < MAX_PENDING_SUBS; i++) {
+        if (!pending_subs[i].active) {
+            continue;
+        }
+        
+        if (strcmp(pending_subs[i].to_user, ctx->username) != 0) {
+            continue;
+        }
+
+        snprintf(stanza, sizeof(stanza),
+            "<presence type='%s' from='%s' to='%s'/>",
+            pending_subs[i].type,
+            pending_subs[i].from,
+            ctx->full_jid);
+
+        send_raw(ctx, stanza);
+
+        pending_subs[i].active = 0;
+    }
+}
+
 const int xmpp_credential_count = (int)(sizeof(xmpp_credentials) / sizeof(xmpp_credentials[0]));
 
 
@@ -292,17 +412,18 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   resource SHOULD NOT receive messages addressed to the bare JID.
  *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.7.2.3
  *
- * TODO — entity capabilities (session log: "deal with <c tag"):
- *   The client's presence includes
- *     <c xmlns='http://jabber.org/protocol/caps' hash='sha-1'
- *        node='https://gajim.org' ver='...'/>
- *   XEP-0115 — Entity Capabilities. Handling it lets us reply correctly
- *   to disco#info queries addressed to the client JID.
+ * Entity capabilities (XEP-0115):
+ *   Clients include <c xmlns='http://jabber.org/protocol/caps' hash='sha-1'
+ *   node='...' ver='...'/> in their presence stanzas.  We store the
+ *   <c> element as opaque data for now; disco#info queries addressed to
+ *   a user JID with a node= parameter are forwarded to that user's
+ *   TCP connection by handle_disco_info() (implemented there).
  *   https://xmpp.org/extensions/xep-0115.html
  *
- * TODO — pending subscription delivery:
- *   RFC 6121 §4.3 — on initial presence, server SHOULD deliver any
- *   pending subscription requests that arrived while offline.
+ * Pending subscription delivery (RFC 6121 §4.3):
+ *   Any subscription stanzas that could not be delivered while this user
+ *   was offline are stored in pending_subs[] by handle_broadcast_presence()
+ *   and drained by pending_sub_drain() at the end of this function.
  *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3
  *
  * Presence probing (Fix §5):
@@ -410,6 +531,12 @@ void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
          * which routes through handle_broadcast_presence() back to us. */
         send_raw(&client_registry[i], response);
     }
+
+    /* RFC 6121 §4.3 — drain any subscription stanzas that were queued
+     * while this user was offline.  pending_sub_drain() iterates
+     * pending_subs[] and delivers all entries matching ctx->username,
+     * then marks them inactive so they are not delivered again. */
+    pending_sub_drain(ctx);
 }
 
 
@@ -1654,8 +1781,95 @@ void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
     else if (at && !strstr(stanza->to, "conference")) {
         /* CASE 3a: user JID (has '@' but not conference subdomain).
+         *
+         * XEP-0115 §4 — Entity Capabilities verification:
+         *   Clients send disco#info to a peer's full JID with a node=
+         *   parameter (e.g. node='https://gajim.org#ver') to verify the
+         *   capabilities hash they saw in a <c/> presence element.
+         *   We forward such queries directly to the addressed user's TCP
+         *   connection; that client replies from its own XMPP stack and
+         *   the reply reaches the original requester via the network.
+         *   If the target has no active session we respond with
+         *   <service-unavailable/> (RFC 6120 §8.3.3.19).
+         *   https://xmpp.org/extensions/xep-0115.html
+         *
          * FIX (§3 LOW): Return category='account' type='registered'
          * per XEP-0030 §4; server identity only correct on bare domain. */
+
+        /* XEP-0115: if the query carries a node= attribute it is a
+         * capabilities verification request directed at a specific user. */
+        if (strstr(stanza->payload, "node=") != NULL) {
+            /* Forward the whole IQ stanza verbatim to the addressed user.
+             * Match on bare JID so any resource of that user receives it. */
+            char bare_target_caps[64] = {0};
+            
+            strncpy(bare_target_caps, stanza->to, sizeof(bare_target_caps) - 1);
+            
+            char *caps_slash = strchr(bare_target_caps, '/');
+            
+            if (caps_slash) {
+                *caps_slash = '\0';
+            }
+
+            int forwarded = 0;
+            
+            for (int i = 0; i < MAX_USERS; i++) {
+                if (client_registry[i].pcb == NULL) {
+                    continue;
+                }
+
+                if (client_registry[i].state < STATE_SESSION) {
+                    continue;
+                }
+
+                char bare_reg[64] = {0};
+                
+                strncpy(bare_reg, client_registry[i].full_jid, sizeof(bare_reg) - 1);
+                
+                char *reg_sl = strchr(bare_reg, '/');
+                
+                if (reg_sl) {
+                    *reg_sl = '\0';
+                }
+
+                if (strcmp(bare_target_caps, bare_reg) == 0) {
+                    /* Re-address the IQ to the actual full JID and forward */
+                    char fwd[1024];
+
+                    snprintf(fwd, sizeof(fwd),
+                        "<iq type='get' from='%s' to='%s' id='%s'>"
+                          "<query xmlns='http://jabber.org/protocol/disco#info'"
+                                 " %s/>"
+                        "</iq>",
+                        ctx->full_jid, client_registry[i].full_jid, stanza->id,
+                        stanza->payload[0] == '<' ? "" : stanza->payload);
+
+                    send_raw(&client_registry[i], fwd);
+
+                    forwarded = 1;
+
+                    break;
+                }
+            }
+
+            if (!forwarded) {
+                /* Target not online — service-unavailable (RFC 6120 §8.3.3.19) */
+                snprintf(response, sizeof(response),
+                    "<iq type='error' from='%s' to='%s' id='%s'>"
+                      "<error type='cancel' code='503'>"
+                        "<service-unavailable"
+                          " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                      "</e>"
+                    "</iq>",
+                    stanza->to, ctx->full_jid, stanza->id);
+
+                send_raw(ctx, response);
+            }
+
+            return;
+        }
+
+        /* Plain user-JID disco#info — return account identity */
         snprintf(response, sizeof(response),
             "<iq type='result' from='%s' to='%s' id='%s'>"
               "<query xmlns='http://jabber.org/protocol/disco#info'>"
@@ -2533,12 +2747,13 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   with from='room@service/sender-nick'.
  *   (Session log: message reflected back with correct from occupant JID)
  *
- *   TODO — RFC 6121 §5.2.5: <thread> element for conversation threading.
- *     (Session log: "for thread stanza, but I do not handle it for now")
+ *   Thread element (RFC 6121 §5.2.5) and XHTML-IM (XEP-0071):
+ *     When stanza->payload[0] == '<', the payload is already wrapped XML
+ *     and is reflected verbatim via the already_wrapped path below.  This
+ *     means <thread>, <html>, <origin-id>, <markable>, <active> (chat
+ *     states), and any other child elements are transparently forwarded
+ *     to all recipients without special handling.
  *     https://datatracker.ietf.org/doc/html/rfc6121#section-5.2.5
- *
- *   TODO — RFC 6121 §5.3 / XEP-0071: XHTML-IM body formatting.
- *     (Session log: "for xhtml")
  *     https://datatracker.ietf.org/doc/html/rfc6121#section-5.3
  *
  * --- DIRECT MESSAGE PATH ---
@@ -2706,7 +2921,9 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         if (!delivered) {
             /* RFC 6121 §8.5.2.1 — recipient not available.
              * Send service-unavailable error back to sender.
-             * TODO: XEP-0160 — store for offline delivery. */
+             * NOTE (future work): XEP-0160 offline message storage is
+            * not implemented; service-unavailable is the correct
+            * RFC 6121 §8.5.2.1 response for an unavailable recipient. */
             char err[512];
 
             snprintf(err, sizeof(err),
@@ -2819,6 +3036,8 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             "<presence type='%s' from='%s' to='%%s'/>",
             ptype, bare_from);
 
+        int delivered = 0;
+
         for (int i = 0; i < MAX_USERS; i++) {
             if (client_registry[i].pcb == NULL) {
                 continue;
@@ -2839,12 +3058,37 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
             if (strcmp(bare_target, bare_reg) == 0) {
                 char msg[512];
-                
+
                 snprintf(msg, sizeof(msg), relay, client_registry[i].full_jid);
 
                 send_raw(&client_registry[i], msg);
+                delivered = 1;
             }
         }
+
+        /* RFC 6121 §4.3 — if the target has no active session, queue
+         * the stanza for delivery when they next send initial presence.
+         * Extract the localpart (username) from bare_target for keying. */
+        if (!delivered) {
+            char to_user[32] = {0};
+            const char *at = strchr(bare_target, '@');
+            
+            if (at) {
+                int ulen = (int)(at - bare_target);
+                
+                if (ulen >= (int)sizeof(to_user)) {
+                    ulen = (int)sizeof(to_user) - 1;
+                }
+
+                strncpy(to_user, bare_target, ulen);
+            }
+            else {
+                strncpy(to_user, bare_target, sizeof(to_user) - 1);
+            }
+
+            pending_sub_enqueue(ptype, bare_from, to_user);
+        }
+
         return;
     }
 

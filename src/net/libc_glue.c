@@ -496,8 +496,23 @@ int snprintf(char *str, size_t size, const char *format, ...) {
 __attribute__((weak))
 int hw_trng_read(uint32_t *out) {
     (void)out;
-    /* No hardware TRNG wired up yet.
-     * TODO: override this function in your BSP with a real TRNG read. */
+    /* Weak stub -- signals no hardware TRNG so secure_random_u32()
+     * activates its xorshift64* CSPRNG fallback (with a seed warning).
+     *
+     * To provide real entropy, define a non-weak hw_trng_read() in your
+     * BSP that reads from the MCU TRNG peripheral, e.g. (STM32 RNG):
+     *
+     *   int hw_trng_read(uint32_t *out) {
+     *       while (!(RNG->SR & RNG_SR_DRDY));
+     *       *out = RNG->DR;
+     *       return 1;
+     *   }
+     *
+     * On x86-64 / QEMU, rdrand is available:
+     *   int hw_trng_read(uint32_t *out) {
+     *       return __builtin_ia32_rdrand32_step(out);
+     *   }
+     */
     return 0;
 }
 

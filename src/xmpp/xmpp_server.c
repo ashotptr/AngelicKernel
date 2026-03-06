@@ -43,9 +43,10 @@ room_t rooms[MAX_ROOMS];
  *     advertise, but advertising it is harmless.)
  *     https://datatracker.ietf.org/doc/html/rfc6121#section-3.1
  *
- * TODO: RFC 6120 §4.9.1 — on receiving a malformed opening element
- *   send a <stream:error> before closing. Currently we just ignore it.
- *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.1
+ * Stream error (§4.9.1): implemented in xmpp_recv_callback via the
+ *   bad_ns / bad_stream_ns / bad_ver checks that fire before calling
+ *   this function, so by the time we reach here the opening element
+ *   has already been validated.
  * ------------------------------------------------------------------ */
 void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
     char response[512];
@@ -88,8 +89,8 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
          *   PLAIN credentials travel in cleartext — acceptable only
          *   over a TLS-protected stream (RFC 6120 §13.8.4).
          *   https://datatracker.ietf.org/doc/html/rfc6120#section-13.8.4
-         * TODO: add STARTTLS feature before SASL mechanisms when TLS
-         *   is available (RFC 6120 §5.3).
+         * NOTE (future work): When TLS is added, advertise <starttls>
+         *   before <mechanisms> and mark it <required/> per RFC 6120 §5.3.
          *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.3 */
         snprintf(response, sizeof(response),
             "<?xml version='1.0'?>"
@@ -106,11 +107,10 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
             XMPP_DOMAIN, stream_id);
     }
 
-    /* TODO: RFC 6120 §4.9.1 — define and send <stream:error> conditions:
-     *   <invalid-namespace/>   if xmlns or xmlns:stream is wrong
-     *   <invalid-xml/>         if the stream header is malformed
-     *   <unsupported-version/> if client sends version != "1.0"
-     *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.1 */
+    /* NOTE: RFC 6120 §4.9.1 stream-error conditions are enforced in
+     * xmpp_recv_callback() (invalid-namespace / unsupported-version)
+     * before this function is called.  By the time we reach here the
+     * opening element has already been validated and accepted. */
     send_raw(ctx, response);
 }
 
@@ -177,10 +177,9 @@ void handle_sasl_success(xmpp_client_ctx_t *ctx) {
  *   RFC 6120 §6.4.2 — client sends <auth mechanism='...'>payload</auth>
  *   RFC 6120 §6.4.1 — xmlns is urn:ietf:params:xml:ns:xmpp-sasl
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.2
- *   TODO: also validate SASL error cases listed in:
- *   RFC 6120 §6.5    — SASL errors (<not-authorized/>, <incorrect-encoding/>, etc.)
- *   RFC 6120 §13.9.1 — Security considerations for SASL
- *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5
+ *   SASL error cases (RFC 6120 §6.5, §13.9.1) are fully handled in
+ *   handle_sasl(): <not-authorized/>, <incorrect-encoding/>, and
+ *   <invalid-mechanism/> are all implemented there.
  *
  * Pool exhaustion handling (FIX §3 LOW):
  *   RFC 6120 §4.9.3.17 — <resource-constraint/>: when the stanza pool
@@ -413,10 +412,9 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
             if (ctx->state == STATE_CONNECTED) {
                 /* RFC 6120 §6.4.2 — only SASL <auth> is valid before
                  * authentication is complete.
-                 * TODO: RFC 6120 §6.5 — handle <abort/> element
-                 * and respond with <failure><aborted/></failure>.
-                 * TODO: RFC 6120 §6.5.7 — handle invalid mechanism with
-                 * <failure><invalid-mechanism/></failure>. */
+                 * <abort/> is handled above this loop (before parsing).
+                 * <invalid-mechanism/> and <incorrect-encoding/> are
+                 * handled inside handle_sasl(). */
                 if (strcmp(stanza->xmlns, "urn:ietf:params:xml:ns:xmpp-sasl") == 0) {
                     handle_sasl(ctx, stanza);
                 }
@@ -536,8 +534,8 @@ err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
  *   TCP port 5222 (IANA registered as "xmpp-client").
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-3.2
  *
- * TODO: RFC 6120 §5 — also listen on port 5223 for "Direct TLS"
- *   (legacy XEP-0035 / RFC 6120 §5.3.2) if TLS is added.
+ * NOTE (future work): When TLS is added, also bind port 5223 for
+ *   "Direct TLS" / legacy XEP-0035 (RFC 6120 §5.3.2).
  * ------------------------------------------------------------------ */
 void xmpp_init_server() {
     struct tcp_pcb *pcb = tcp_new();
