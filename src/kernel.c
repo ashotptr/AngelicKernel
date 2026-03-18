@@ -2,6 +2,7 @@
 #include <efilib.h>
 #include "drivers/e1000.h"
 #include "drivers/pci.h"
+#include "drivers/disk.h"
 #include "net/lwip_glue.h"
 #include "lwip/init.h"
 #include "lwip/tcp.h"
@@ -21,7 +22,7 @@ uint64_t global_mmio_base = 0;
 extern void mpk_enable();
 extern void vmm_protect_driver();
 
-void xmpp_init_server(void);
+void xmpp_init_server();
 
 void init_idt();
 
@@ -72,6 +73,22 @@ static void enable_sse(void) {
     
     // 8. Write back CR4
     __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
+}
+
+void serial_print_mac(uint8_t *mac) {
+    const char hex[] = "0123456789ABCDEF";
+
+    for (int i = 0; i < 6; i++) {
+        char buf[3] = { hex[(mac[i] >> 4) & 0xF], hex[mac[i] & 0xF], '\0' };
+        
+        serial_print(buf);
+        
+        if (i < 5) {
+            serial_print(":");
+        } 
+    }
+
+    serial_print("\n");
 }
 
 void serial_print_hex(uint64_t n) {
@@ -179,6 +196,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     init_idt();
     
     e1000_init(global_mmio_base, mac);
+
+    /* Initialise the storage backend.
+     * disk_init() tries AHCI first (PCI scan), then falls back to ATA PIO
+     * on the primary IDE channel (0x1F0).  Either way it prints the drive
+     * model / backend choice to the serial console.  The selected backend
+     * is then used transparently by xmpp_persist_load_all(). */
+    disk_init();
     
     serial_print("MAC Address: ");
 
@@ -189,7 +213,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
             serial_print(":");
         }
     }
+
+    serial_print("\n");
     
+    serial_print_mac(mac);
+
     serial_print("\n");
 
     serial_print("--- DEBUG INFO ---\n");

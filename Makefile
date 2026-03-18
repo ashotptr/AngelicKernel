@@ -2,7 +2,7 @@ CC = gcc
 NASM = nasm
 
 # maybe add but are for c++: -fno-exceptions -fno-rtti, also reviwew fno-stack-protector, -mcmodel=large
-CFLAGS = -I. -Iinclude -Isrc/lwip/src/include \
+CFLAGS = -I. -Iinclude -Isrc -Isrc/lwip/src/include \
 	-I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol \
 	-fno-stack-protector -ffreestanding -fpic -fshort-wchar -mno-red-zone \
 	-mno-mmx -mno-sse -mno-avx \
@@ -46,6 +46,9 @@ LWIP_SRCS = $(LWIP_CORE) $(LWIP_IPV4) $(LWIP_NETIF)
 OBJS = src/kernel.o \
 	src/drivers/e1000.o \
 	src/drivers/pci.o \
+	src/drivers/ata.o \
+	src/drivers/ahci.o \
+	src/drivers/disk.o \
 	src/net/lwip_glue.o \
 	src/net/libc_glue.o \
 	$(LWIP_SRCS:.c=.o) \
@@ -58,6 +61,8 @@ OBJS = src/kernel.o \
 	src/xmpp/xmpp_parser.o \
 	src/xmpp/xmpp_router.o \
 	src/xmpp/xmpp_handlers.o \
+	src/xmpp/xmpp_store.o \
+	src/xmpp/xmpp_persist.o \
 	src/xmpp/xmpp_log.o \
 	src/xmpp/xmpp_memory.o\
     src/xmpp/yxml.o
@@ -74,8 +79,9 @@ unikernel.efi: unikernel.so
 
 # /usr/lib/elf_x86_64_efi.lds
 # --no-undefined
+# -z muldefs
 unikernel.so: $(OBJS)
-	ld -shared -Bsymbolic -nostdlib -znocombreloc -z muldefs -L/usr/lib --no-undefined -L/usr/lib64 -T linker.ld \
+	ld -shared -Bsymbolic -nostdlib -znocombreloc -L/usr/lib --no-undefined -L/usr/lib64 -T linker.ld \
 		/usr/lib/crt0-efi-x86_64.o $(OBJS) -o $@ -lefi -lgnuefi
 
 %.o: %.c

@@ -464,3 +464,12 @@ https://www.msweet.org/mxml/
 libexpat
 https://github.com/libexpat/libexpat
 https://github.com/libexpat/libexpat/releases
+
+119)
+Current PIO (IDE mode)~16 MB/s Done
+IDE DMA (BusMaster)~100 MB/s Medium — ~200 lines
+AHCI (native SATA)~300-600 MB/s Hard — ~700 lines
+
+120) Primary and Secondary ATA buses are almost always controlled by IO ports 0x1F0 through 0x1F7, and 0x170 through 0x177
+The suggestion is to read the Status register FIFTEEN TIMES, and only pay attention to the value returned by the last one -- after selecting a new master or slave device
+The point being that you can assume an IO port read takes at least 30ns, so doing the first fourteen creates a 420ns delay -- which allows the drive time to push the correct voltages onto the bus

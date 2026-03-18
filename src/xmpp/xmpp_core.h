@@ -365,6 +365,11 @@ void handle_general_success(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
 void xmpp_log(const char *direction, const char *data, int len);
 void send_raw(xmpp_client_ctx_t *ctx, const char *data);
 
+/* xmpp_server.c — TCP network layer */
+err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err);
+err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err);
+void xmpp_init_server();
+
 /* libc_glue.c — cryptographically unpredictable random word.
  * Use this (never rand()) for stream IDs and resource IDs.
  * RFC 6120 §4.7.3 — stream 'id' MUST be hard to predict.
@@ -395,6 +400,79 @@ typedef struct {
 
 /* Defined in xmpp_handlers.c; declared here for shared visibility. */
 extern const xmpp_credential_t xmpp_credentials[];
-extern const int                xmpp_credential_count;
+extern const int xmpp_credential_count;
+
+/* ------------------------------------------------------------------
+ * xmpp_store.c / xmpp_persist.c — shared store types & declarations
+ *
+ * Keeping types here avoids circular includes between xmpp_store.c,
+ * xmpp_handlers.c, and xmpp_persist.c.
+ * ------------------------------------------------------------------ */
+
+/* ---- XEP-0049 Private XML Storage (defined in xmpp_handlers.c) -- */
+#define PRIVATE_STORAGE_SLOTS 20
+#define PRIVATE_NS_MAX 128   /* must match xmpp_stanza_t.xmlns  */
+#define PRIVATE_XML_MAX 900   /* conservative inner-xml ceiling   */
+
+typedef struct {
+    char username[32];
+    char ns[PRIVATE_NS_MAX];
+    char xml[PRIVATE_XML_MAX];
+    int active;
+} private_store_entry_t;
+
+/* Defined in xmpp_handlers.c; non-static so xmpp_persist.c can save it. */
+extern private_store_entry_t private_store[PRIVATE_STORAGE_SLOTS];
+
+/* ---- RFC 6121 Roster Store (defined in xmpp_store.c) ------------ */
+#define MAX_ROSTER_ENTRIES 80
+#define ROSTER_ITEM_MAX_LEN 256
+
+typedef struct {
+    char username[32];
+    char jid[64];
+    char item_xml[ROSTER_ITEM_MAX_LEN];
+    int active;
+} roster_entry_t;
+
+/* Defined in xmpp_store.c; non-static so xmpp_persist.c can save it. */
+extern roster_entry_t roster_store[MAX_ROSTER_ENTRIES];
+
+/* ------------------------------------------------------------------
+ * xmpp_persist.c — ATA disk persistence for XMPP stores
+ *
+ * Replaces EFI NVRAM with direct ATA PIO sector I/O to a dedicated
+ * raw data disk (data.img, IDE slave, primary channel 0x1F0).
+ * Works after ExitBootServices — no UEFI protocols required.
+ *
+ * Disk layout on data.img (1 MB, ATA_DATA_DRIVE = slave):
+ *   LBA  0       : persist_header_t (magic 0xA6E71C3D + CRC32)
+ *   LBA  1..42   : private_store[]  (XEP-0049)
+ *   LBA 43..98   : roster_store[]   (RFC 6121)
+ *   LBA 99..2047 : reserved
+ *
+ * xmpp_persist_load_all     — called once from xmpp_init_server().
+ * xmpp_persist_save_private — write-through after every XEP-0049 set.
+ * xmpp_persist_save_roster  — write-through after every roster change.
+ * xmpp_persist_save_rooms   — called after room created or configured.
+ * ------------------------------------------------------------------ */
+void xmpp_persist_load_all();
+void xmpp_persist_save_private();
+void xmpp_persist_save_roster();
+void xmpp_persist_save_rooms();
+
+/* ------------------------------------------------------------------
+ * xmpp_store.c — in-memory stores (offline queue + roster)
+ * ------------------------------------------------------------------ */
+
+/* XEP-0160 Offline Message Queue */
+int offline_msg_enqueue(const char *to_bare, const char *from_jid, const char *msg_id,  const char *payload);
+void offline_msg_drain(xmpp_client_ctx_t *ctx);
+int offline_msg_is_full(const char *to_user);
+
+/* RFC 6121 §2 Roster Store */
+int roster_store_upsert_item (const char *username, const char *item_xml);
+void roster_store_set_from_payload(const char *username, const char *payload);
+int roster_store_get_items (const char *username, char *buf, int buf_len);
 
 #endif

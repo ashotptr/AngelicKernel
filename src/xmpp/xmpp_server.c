@@ -538,6 +538,8 @@ err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
  *   "Direct TLS" / legacy XEP-0035 (RFC 6120 §5.3.2).
  * ------------------------------------------------------------------ */
 void xmpp_init_server() {
+    xmpp_persist_load_all();
+    
     struct tcp_pcb *pcb = tcp_new();
 
     tcp_bind(pcb, IP_ADDR_ANY, 5222); /* RFC 6120 §3.2 — XMPP client port */

@@ -10,6 +10,7 @@ src/net/*.o
 *.debug
 *.fd
 *.log
+data.img
 
 internal-fs/EFI/BOOT/BOOTX64.EFI
 internal-fs/NvVars
@@ -17,3 +18,4 @@ internal-fs/NvVars
 xmpp_understanding.txt
 *.pdf
 ejabberd
+other_servers

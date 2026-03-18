@@ -302,6 +302,13 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
      *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.1.6
      * ------------------------------------------------------------------ */
     if (stanza->type == XMPP_IQ_SET) {
+        /* RFC 6121 §2.1.5 — persist the new/updated/removed roster items.
+         * roster_store_set_from_payload() scans the <query> payload for
+         * every <item/> element and calls roster_store_upsert_item() for
+         * each one.  An item with subscription='remove' is deleted.
+         *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.1.5 */
+        roster_store_set_from_payload(ctx->username, stanza->payload);
+
         /* Acknowledge the set — RFC 6121 §2.1.5 result is an empty IQ */
         snprintf(response, sizeof(response),
             "<iq type='result' id='%s' to='%s'/>",
@@ -353,34 +360,50 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
 
     /* ------------------------------------------------------------------
-     * RFC 6121 §2.1.3 / §2.1.4 — Roster Get: return an empty roster.
+     * RFC 6121 §2.1.3 / §2.1.4 — Roster Get: return stored roster.
      *
-     * RFC 6121 §2.6 — Roster Versioning: if the client included a 'ver'
-     * attribute in its get request, we SHOULD include a 'ver' attribute
-     * in the result. Since we have no persistent roster, we always return
-     * the same empty roster and echo a static ver="0" token.
+     * roster_store_get_items() retrieves all <item/> elements previously
+     * submitted by this user via IQ-set and stored in roster_store[].
+     * If no items exist the query body is empty (valid per RFC 6121 §2.1.4).
+     *
+     * RFC 6121 §2.6 — Roster Versioning: include ver= in result when the
+     * client sent a 'ver' attribute in its get request.  We return a static
+     * ver="0" token; computing a real version hash requires a persistent
+     * generation counter which we add as future work.
      *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.6
      * ------------------------------------------------------------------ */
     int has_ver = (strstr(stanza->payload, "ver=") != NULL || strstr(stanza->payload, "ver ") != NULL);
 
+    /* Build the roster items XML.
+     * Buffer ceiling: MAX_ROSTER_ENTRIES / MAX_USERS × ROSTER_ITEM_MAX_LEN
+     *   ≈ 8 × 256 = 2048 bytes per user → 2048-byte buffer is correct. */
+    char roster_items[2048] = {0};
+
+    roster_store_get_items(ctx->username, roster_items, sizeof(roster_items));
+
+    /* Outer IQ response buffer.
+     * IQ wrapper  ≈ 100 chars + id(64) + to(64) + roster_items(≤2048)
+     * → 2300-byte buffer is safe.                                       */
+    char big_response[2300];
+
     if (has_ver) {
         /* RFC 6121 §2.6 — include ver= in result */
-        snprintf(response, sizeof(response),
+        snprintf(big_response, sizeof(big_response),
             "<iq type='result' id='%s' to='%s'>"
-              "<query xmlns='jabber:iq:roster' ver='0'/>"
+              "<query xmlns='jabber:iq:roster' ver='0'>%s</query>"
             "</iq>",
-            stanza->id, ctx->full_jid);
+            stanza->id, ctx->full_jid, roster_items);
     }
     else {
-        /* RFC 6121 §2.1.4 — empty roster result */
-        snprintf(response, sizeof(response),
+        /* RFC 6121 §2.1.4 — roster result */
+        snprintf(big_response, sizeof(big_response),
             "<iq type='result' id='%s' to='%s'>"
-              "<query xmlns='jabber:iq:roster'/>"
+              "<query xmlns='jabber:iq:roster'>%s</query>"
             "</iq>",
-            stanza->id, ctx->full_jid);
+            stanza->id, ctx->full_jid, roster_items);
     }
 
-    send_raw(ctx, response);
+    send_raw(ctx, big_response);
 }
 
 
@@ -537,6 +560,14 @@ void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
      * pending_subs[] and delivers all entries matching ctx->username,
      * then marks them inactive so they are not delivered again. */
     pending_sub_drain(ctx);
+
+    /* XEP-0160 §2 step 4 — deliver any messages that were stored while
+     * this user had no available resource.  offline_msg_drain() appends
+     * a XEP-0203 <delay/> element to each delivered message so the
+     * client can distinguish stored messages from live traffic.
+     *   https://xmpp.org/extensions/xep-0160.html
+     *   https://xmpp.org/extensions/xep-0203.html */
+    offline_msg_drain(ctx);
 }
 
 
@@ -549,31 +580,17 @@ void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  * element extracted from the <query> body (everything between the closing
  * '>' of <query ...> and the opening '<' of </query>).
  *
- * Sizing rationale (all bounds derived from xmpp_core.h / xmpp_stanza_t):
+ * Types and constants (PRIVATE_STORAGE_SLOTS, PRIVATE_NS_MAX,
+ * PRIVATE_XML_MAX, private_store_entry_t) are defined in xmpp_core.h
+ * so that xmpp_persist.c can access the array for NV save/load.
  *
- *   username  — xmpp_client_ctx_t.username[32]  → 32 bytes
- *   namespace — xmpp_stanza_t.xmlns[128]         → 128 bytes (PRIVATE_NS_MAX)
- *   inner xml — stanza->payload[1024] minus the
- *               <query xmlns='jabber:iq:private'> wrapper (~38 chars)
- *               and </query> (8 chars) ≈ 978 chars usable;
- *               capped at 900 to leave headroom.   → PRIVATE_XML_MAX
- *
- *   PRIVATE_STORAGE_SLOTS — MAX_USERS(10) × ~2 namespaces per user.
- *   Increase if more namespaces per user are needed.
+ * private_store is non-static so xmpp_persist.c can reference it via
+ * the extern declaration in xmpp_core.h.
  * =========================================================================== */
-#define PRIVATE_STORAGE_SLOTS  20
-#define PRIVATE_NS_MAX        128   /* must match xmpp_stanza_t.xmlns[128]  */
-#define PRIVATE_XML_MAX       900   /* conservative inner-xml ceiling        */
 
-typedef struct {
-    char username[32];              /* matches xmpp_client_ctx_t.username   */
-    char ns[PRIVATE_NS_MAX];
-    char xml[PRIVATE_XML_MAX];
-    int  active;
-} private_store_entry_t;
-
-/* File-scope store — zero-initialised at startup; no heap needed. */
-static private_store_entry_t private_store[PRIVATE_STORAGE_SLOTS];
+/* File-scope store — zero-initialised at startup; no heap needed.
+ * Non-static: xmpp_persist.c saves this to the ATA data disk on each write. */
+private_store_entry_t private_store[PRIVATE_STORAGE_SLOTS];
 
 
 /* ------------------------------------------------------------------
@@ -812,6 +829,7 @@ void handle_private_storage(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza)
                 if (private_store_upsert(ctx->username, inner_ns,
                                          xml_start, xml_len) != 0) {
                     /* Store is full — RFC 6120 §4.9.3.17 resource-constraint */
+                    /* (no persist call — nothing was written) */
                     char err[512];
                     snprintf(err, sizeof(err),
                         "<iq type='error' id='%s' to='%s'>"
@@ -824,6 +842,9 @@ void handle_private_storage(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza)
                     send_raw(ctx, err);
                     return;
                 }
+
+                /* Write-through: commit to ATA data disk immediately */
+                xmpp_persist_save_private();
             }
         }
 
@@ -1478,6 +1499,9 @@ void handle_muc_owner(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             if (rooms[i].active && strcmp(rooms[i].name, room_name) == 0) {
                 rooms[i].locked = 0; /* XEP-0045 §10.1 — unlock */
 
+                /* Persist the updated lock state. */
+                xmpp_persist_save_rooms();
+
                 break;
             }
         }
@@ -1880,12 +1904,17 @@ void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
     else {
         /* CASE 3b: server domain — XEP-0030 §4. */
+        /* XEP-0160 §4 — Service Discovery: a server that supports offline
+         * message storage SHOULD include "msgoffline" in its disco#info
+         * feature list so clients can discover the capability.
+         *   https://xmpp.org/extensions/xep-0160.html#disco */
         snprintf(response, sizeof(response),
             "<iq type='result' from='%s' to='%s' id='%s'>"
               "<query xmlns='http://jabber.org/protocol/disco#info'>"
                 "<identity category='server' type='im' name='Unikernel XMPP'/>"
                 "<feature var='http://jabber.org/protocol/muc'/>"
                 "<feature var='jabber:iq:register'/>"
+                "<feature var='msgoffline'/>"
               "</query>"
             "</iq>",
             stanza->to, ctx->full_jid, stanza->id);
@@ -2384,6 +2413,9 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 /* XEP-0045 §10.1 — new rooms are locked until configured. */
                 r->locked = 1;
                 is_new_room = 1;
+
+                /* Persist the new room immediately so it survives restart. */
+                xmpp_persist_save_rooms();
 
                 break;
             }
@@ -2919,23 +2951,36 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         }
 
         if (!delivered) {
-            /* RFC 6121 §8.5.2.1 — recipient not available.
-             * Send service-unavailable error back to sender.
-             * NOTE (future work): XEP-0160 offline message storage is
-            * not implemented; service-unavailable is the correct
-            * RFC 6121 §8.5.2.1 response for an unavailable recipient. */
-            char err[512];
+            /* XEP-0160 §2 — store message for offline delivery.
+             *
+             * XEP-0160 §3 — message type filtering:
+             *   We are in the direct (non-conference) message path, so the
+             *   stanza is type='chat'.  chat messages SHOULD be stored offline.
+             *
+             * offline_msg_enqueue() stores the inner payload; offline_msg_drain()
+             * in handle_initial_presence() reconstructs and delivers the full
+             * <message> stanza with a XEP-0203 <delay/> stamp.
+             *
+             * Queue-full policy (XEP-0160 §2): if we cannot store the message,
+             * return <service-unavailable/> to the sender.
+             *   https://xmpp.org/extensions/xep-0160.html */
+            if (offline_msg_enqueue(bare_target, ctx->full_jid, stanza->id, stanza->payload) != 0) {
+                /* XEP-0160 §2 / RFC 6121 §8.5.2.1 — queue full */
+                char err[512];
 
-            snprintf(err, sizeof(err),
-                "<message type='error' from='%s' to='%s'>"
-                  "<error type='cancel' code='503'>"
-                    "<service-unavailable"
-                      " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
-                  "</error>"
-                "</message>",
-                stanza->to, ctx->full_jid);
+                snprintf(err, sizeof(err),
+                    "<message type='error' from='%s' to='%s'>"
+                      "<error type='cancel' code='503'>"
+                        "<service-unavailable"
+                          " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                      "</error>"
+                    "</message>",
+                    stanza->to, ctx->full_jid);
 
-            send_raw(ctx, err);
+                send_raw(ctx, err);
+            }
+            /* On successful enqueue: no response to sender.
+             * Delivery occurs when recipient next sends initial presence. */
         }
     }
 }
