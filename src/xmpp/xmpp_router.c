@@ -237,7 +237,14 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
             return;
         }
-        else if (stanza->type == XMPP_PRESENCE || stanza->type == XMPP_PRESENCE_UNAVAILABLE || stanza->type == XMPP_PRESENCE_SUBSCRIBE || stanza->type == XMPP_PRESENCE_SUBSCRIBED || stanza->type == XMPP_PRESENCE_UNSUBSCRIBE || stanza->type == XMPP_PRESENCE_UNSUBSCRIBED) {
+        else if (stanza->type == XMPP_PRESENCE || stanza->type == XMPP_PRESENCE_UNAVAILABLE || stanza->type == XMPP_PRESENCE_SUBSCRIBE || stanza->type == XMPP_PRESENCE_SUBSCRIBED || stanza->type == XMPP_PRESENCE_UNSUBSCRIBE || stanza->type == XMPP_PRESENCE_UNSUBSCRIBED
+              /* FIX Bug 13 — XMPP_PRESENCE_PROBE must reach
+               * handle_broadcast_presence() so the probe branch there
+               * can respond with the probed user's current presence per
+               * RFC 6121 §4.3.1.  Without this, probe stanzas fell
+               * through all conditions and were silently dropped.
+               *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3.1 */
+              || stanza->type == XMPP_PRESENCE_PROBE) {
             if (strstr(stanza->to, "conference.angelic.local")) {
                 /* Presence directed at the MUC service subdomain.
                  * XEP-0045 §7.2  — entering a room

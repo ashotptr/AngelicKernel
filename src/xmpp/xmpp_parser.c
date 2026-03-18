@@ -3,45 +3,14 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ------------------------------------------------------------------
- * extract_attribute  (static helper)
+/* extract_attribute — REMOVED (Bug 16 fix)
  *
- * Extracts a named attribute value from a raw XML tag string.
- * Used as a fallback when yxml's streaming callback model is
- * inconvenient for one-shot attribute reads.
- *
- * NOTE: This is not used in the current parse_xml_stream() —
- * attribute extraction there is done via yxml callbacks.
- * ------------------------------------------------------------------ */
-static void extract_attribute(const char *tag, const char *key, char *dest, int max_len) {
-    const char *p = tag;
-    int key_len = strlen(key);
-
-    while (*p) {
-        if (strncmp(p, key, key_len) == 0) {
-            char after = p[key_len];
-            if (after == '=' || after == ' ' || after == '\t') {
-                p += key_len;
-                while (*p == ' ' || *p == '\t' || *p == '=') p++;
-
-                char quote = *p;
-                if (quote == '"' || quote == '\'') {
-                    p++;
-                    int i = 0;
-
-                    while (*p && *p != quote && i < max_len - 1) {
-                        dest[i++] = *p++;
-                    }
-
-                    dest[i] = '\0';
-
-                    return;
-                }
-            }
-        }
-        p++;
-    }
-}
+ * This static helper was never called from parse_xml_stream() or
+ * anywhere else in the codebase.  Attribute extraction inside the
+ * parser is performed entirely through yxml ATTRVAL callbacks.
+ * Keeping the function caused a -Wunused-function compiler warning
+ * and was misleading (readers might assume it was part of the parse
+ * path).  Removed entirely. */
 
 /* ------------------------------------------------------------------
  * find_stanza_end  (static helper)
@@ -456,30 +425,50 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
         else if (strcmp(pres_type_buf, "unsubscribed") == 0) {
             s->type = XMPP_PRESENCE_UNSUBSCRIBED;
         }
+        /* FIX Bug 13 — resolve type="probe" to XMPP_PRESENCE_PROBE.
+         *
+         * Previously there was no case for "probe" so a probe stanza
+         * fell through with s->type == XMPP_PRESENCE (set at ELEMSTART)
+         * and was broadcast as an availability update, which is wrong.
+         * RFC 6121 §4.3.1 — the server SHOULD respond with the probed
+         * user's current presence, not re-broadcast the probe.
+         * handle_broadcast_presence() has a dedicated probe branch that
+         * handles this correctly and returns early.
+         *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3.1 */
+        else if (strcmp(pres_type_buf, "probe") == 0) {
+            s->type = XMPP_PRESENCE_PROBE;
+        }
         /* Unknown presence type — stays XMPP_PRESENCE; silently tolerated. */
     }
 
     /* --- Phase 2: strstr fallback for namespace detection --------------- */
-    /* Primary purpose: catch namespaces that appear on deeply-nested elements
+    /* FIX Bug 11 — the old code ran every strstr check unconditionally,
+     * overwriting whatever yxml correctly populated in s->xmlns during
+     * Phase 1.  This caused a <message> stanza whose <body> happened to
+     * contain the substring "muc#owner" to be misrouted to
+     * handle_muc_owner() instead of handle_chat_message().
+     *
+     * The correct approach:
+     *   A) If yxml found a xmlns (s->xmlns is non-empty), trust it —
+     *      EXCEPT for MUC presence stanzas (see B below).
+     *   B) MUC join/exit presence stanzas carry
+     *        <x xmlns='http://jabber.org/protocol/muc'/>
+     *      at depth > 2, which the yxml depth-2 accumulator never visits.
+     *      For XMPP_PRESENCE stanzas only, we apply the strstr checks
+     *      even when yxml already wrote something, so the MUC namespace
+     *      is not missed.  The more-specific "muc#owner"/"muc#admin"
+     *      strings are checked before "muc" to avoid misclassification.
+     *   C) When yxml found nothing (s->xmlns is empty), the full strstr
+     *      fallback is applied unconditionally — this catches namespaces
+     *      on elements that sit deeper than depth 2 in non-presence stanzas
+     *      (e.g. XEP-0191 blocklist, XEP-0060 pubsub).
+     *
+     * ORDER IS CRITICAL — more-specific strings must precede substrings:
+     *   "muc#owner" before "muc", "muc#admin" before "muc".
+     *
+     * Primary purpose: catch namespaces that appear on deeply-nested elements
      * (depth > 2, e.g. <x xmlns='...muc'/> inside a <presence>) which the
-     * yxml phase above only visits at depth 1-2.
-     *
-     * Secondary purpose: safety net for any depth-2 namespace that the yxml
-     * generic accumulator above might miss (e.g. stanza > 1023 bytes where
-     * temp_buf is truncated — in that case only the first 1023 bytes are
-     * scanned, but the opening tag always fits so this is reliable for the
-     * namespaces we care about).
-     *
-     * ORDER IS CRITICAL — more specific strings must come before substrings:
-     *   "muc#owner" before "muc"
-     *   "muc#admin" before "muc"
-     * Swapping these would cause muc#owner/admin to be misclassified.
-     *
-     * NOTE: strstr checks only override s->xmlns when the stanza actually
-     * contains the substring.  The yxml depth-2 accumulator runs first and
-     * sets s->xmlns for most common cases; these strstr checks act as a
-     * belt-and-suspenders fallback and are harmless even when redundant
-     * because they set the same value. */
+     * yxml phase above only visits at depth 1-2. */
     char temp_buf[1024];
     int copy_len = (stanza_len < 1023) ? stanza_len : 1023;
 
@@ -487,49 +476,60 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
 
     temp_buf[copy_len] = '\0';
 
-    if (strstr(temp_buf, "jabber:iq:roster")) {
-        /* RFC 6121 §2.1.3 */
-        strcpy(s->xmlns, "jabber:iq:roster");
+    if (s->xmlns[0] == '\0') {
+        /* Case C — yxml found nothing: apply full strstr fallback. */
+        if (strstr(temp_buf, "jabber:iq:roster")) {
+            /* RFC 6121 §2.1.3 */
+            strcpy(s->xmlns, "jabber:iq:roster");
+        }
+        else if (strstr(temp_buf, "muc#owner")) {
+            /* XEP-0045 §10 — owner use cases */
+            strcpy(s->xmlns, "http://jabber.org/protocol/muc#owner");
+        }
+        else if (strstr(temp_buf, "muc#admin")) {
+            /* XEP-0045 §9 — admin use cases */
+            strcpy(s->xmlns, "http://jabber.org/protocol/muc#admin");
+        }
+        else if (strstr(temp_buf, "disco#info")) {
+            /* XEP-0045 §6.2 — service/room feature discovery */
+            strcpy(s->xmlns, "http://jabber.org/protocol/disco#info");
+        }
+        else if (strstr(temp_buf, "disco#items")) {
+            /* XEP-0045 §6.3 — listing rooms / room items */
+            strcpy(s->xmlns, "http://jabber.org/protocol/disco#items");
+        }
+        else if (strstr(temp_buf, "urn:xmpp:blocking")) {
+            /* XEP-0191 — Blocking Command */
+            strcpy(s->xmlns, "urn:xmpp:blocking");
+        }
+        else if (strstr(temp_buf, "http://jabber.org/protocol/pubsub")) {
+            /* XEP-0060 — Publish-Subscribe */
+            strcpy(s->xmlns, "http://jabber.org/protocol/pubsub");
+        }
+        else if (strstr(temp_buf, "http://jabber.org/protocol/muc")) {
+            /* XEP-0045 §7.2 — <x xmlns='http://jabber.org/protocol/muc'/>
+             * embedded in a <presence> stanza to enter a room */
+            strcpy(s->xmlns, "http://jabber.org/protocol/muc");
+        }
     }
-    else if (strstr(temp_buf, "muc#owner")) {
-        /* XEP-0045 §10 — owner use cases */
-        strcpy(s->xmlns, "http://jabber.org/protocol/muc#owner");
+    else if (s->type == XMPP_PRESENCE || s->type == XMPP_PRESENCE_UNAVAILABLE) {
+        /* Case B — MUC presence xmlns is at depth > 2 so yxml misses it.
+         * Override only for presence stanzas where a MUC join/exit is
+         * signalled via <x xmlns='http://jabber.org/protocol/muc[#owner|#admin]'/>
+         * Check more-specific strings first to avoid misclassification. */
+        if (strstr(temp_buf, "muc#owner")) {
+            strcpy(s->xmlns, "http://jabber.org/protocol/muc#owner");
+        }
+        else if (strstr(temp_buf, "muc#admin")) {
+            strcpy(s->xmlns, "http://jabber.org/protocol/muc#admin");
+        }
+        else if (strstr(temp_buf, "http://jabber.org/protocol/muc")) {
+            strcpy(s->xmlns, "http://jabber.org/protocol/muc");
+        }
+        /* else: leave whatever yxml found (e.g. jabber:client) intact */
     }
-    else if (strstr(temp_buf, "muc#admin")) {
-        /* XEP-0045 §9 — admin use cases */
-        strcpy(s->xmlns, "http://jabber.org/protocol/muc#admin");
-    }
-    else if (strstr(temp_buf, "disco#info")) {
-        /* XEP-0045 §6.2 — service/room feature discovery */
-        strcpy(s->xmlns, "http://jabber.org/protocol/disco#info");
-    }
-    else if (strstr(temp_buf, "disco#items")) {
-        /* XEP-0045 §6.3 — listing rooms / room items */
-        strcpy(s->xmlns, "http://jabber.org/protocol/disco#items");
-    }
-    else if (strstr(temp_buf, "urn:xmpp:blocking")) {
-        /* XEP-0191 — Blocking Command.
-         * Safety-net fallback: depth-2 yxml accumulator normally handles
-         * <blocklist xmlns='urn:xmpp:blocking'/> directly, but the strstr
-         * here also covers edge cases where the stanza is structured so
-         * that the accumulator guard fires (e.g. bind namespace was already
-         * written).  Harmless when both paths agree.
-         *   https://xmpp.org/extensions/xep-0191.html */
-        strcpy(s->xmlns, "urn:xmpp:blocking");
-    }
-    else if (strstr(temp_buf, "http://jabber.org/protocol/pubsub")) {
-        /* XEP-0060 — Publish-Subscribe.
-         * Covers <pubsub xmlns='http://jabber.org/protocol/pubsub'>...</pubsub>
-         * IQs sent by clients for vcard4, OMEMO bundles, devicelist etc.
-         * We reply with <service-unavailable/> (handled by router catch-all).
-         *   https://xmpp.org/extensions/xep-0060.html */
-        strcpy(s->xmlns, "http://jabber.org/protocol/pubsub");
-    }
-    else if (strstr(temp_buf, "http://jabber.org/protocol/muc")) {
-        /* XEP-0045 §7.2 — <x xmlns='http://jabber.org/protocol/muc'/>
-         * embedded in a <presence> stanza to enter a room */
-        strcpy(s->xmlns, "http://jabber.org/protocol/muc");
-    }
+    /* Case A — yxml found a xmlns and this is not a presence stanza:
+     * trust yxml completely; do not apply strstr checks. */
 
     /* --- Phase 3: payload extraction ----------------------------------- */
     /* Extract inner XML (child elements / text) from the stanza.

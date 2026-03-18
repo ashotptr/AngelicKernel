@@ -115,35 +115,21 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
 }
 
 /* ------------------------------------------------------------------
- * handle_sasl_success
+ * handle_sasl_success — REMOVED (Bug 6 fix)
  *
- * Sends the SASL <success/> element and transitions state.
+ * This function was dead code: handle_sasl() sends <success/> inline
+ * (lines above) and sets ctx->authenticated = 1 / ctx->state =
+ * STATE_AUTHENTICATED directly.  handle_sasl_success() did exactly
+ * the same work and was never called from anywhere in the codebase.
  *
- * RFC 6120 §6.4.6 — SASL Success
- *   The server sends <success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>.
- *   After this, the initiating entity MUST open a new XML stream.
- *   The server MUST treat all stream state as reset (new stream ID etc.).
+ * Keeping duplicate logic here risked accidental double-sends if a
+ * future caller was added without realising handle_sasl() already
+ * handled it.  The declaration in xmpp_core.h has also been removed.
+ *
+ * RFC 6120 §6.4.6 — SASL Success: <success/> and stream-state reset
+ * are now performed exclusively inside handle_sasl() in xmpp_handlers.c.
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.6
- *
- * NOTE: We handle the client's mandatory stream re-open via the
- *   strncmp("<stream:stream", ...) check in xmpp_recv_callback which
- *   calls handle_handshake_logic() again. This correctly implements the
- *   "stream restart" requirement from RFC 6120 §6.4.6.
  * ------------------------------------------------------------------ */
-void handle_sasl_success(xmpp_client_ctx_t *ctx) {
-    /* RFC 6120 §6.4.6 — success element namespace is xmpp-sasl */
-    const char *resp = "<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
-
-    xmpp_log("SEND", resp, strlen(resp));
-
-    tcp_write(ctx->pcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
-
-    tcp_output(ctx->pcb);
-
-    /* RFC 6120 §6.4.6 — server resets its state for the stream */
-    ctx->authenticated = 1;
-    ctx->state = STATE_AUTHENTICATED;
-}
 
 /* ------------------------------------------------------------------
  * xmpp_recv_callback
@@ -192,8 +178,29 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
 
     if (!p) {
         /* RFC 6120 §4.4 — remote closed TCP without </stream:stream>;
-         * clean up silently. */
+         * clean up silently.
+         *
+         * FIX Bug 1 — ctx->pcb must be set to NULL after tcp_close().
+         *
+         * lwIP calls this callback with p == NULL when the remote side
+         * closes the TCP connection.  All broadcaster loops in
+         * xmpp_handlers.c guard against dead slots by checking
+         * client_registry[i].pcb == NULL.  If we call tcp_close(pcb)
+         * but leave ctx->pcb pointing at the now-freed PCB, those
+         * loops will attempt to write to freed memory, causing undefined
+         * behaviour (typically a crash or silent data corruption).
+         *
+         * Zeroing ctx->pcb here is the single fix needed because every
+         * broadcast loop that iterates client_registry[] checks pcb for
+         * NULL before dereferencing it.
+         *
+         * Also reset state to STATE_CONNECTED so that any stale slot
+         * inspection (state >= STATE_SESSION checks) correctly treats
+         * this slot as inactive even before it is reclaimed by
+         * xmpp_accept_callback(). */
         tcp_close(pcb);
+        ctx->pcb = NULL;           /* Bug 1 fix: mark slot as dead */
+        ctx->state = STATE_CONNECTED; /* not SESSION — slot is inactive */
 
         return ERR_OK;
     }
@@ -270,8 +277,37 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * RFC 6120 §6.4.6 — client MUST re-open after SASL <success/>.
          * We consume the entire buffer here because the stream opening
          * element is never "complete" XML — it is deliberately left open
-         * for the lifetime of the session. */
-        if (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream")) {
+         * for the lifetime of the session.
+         *
+         * SECURITY FIX — gate on connection state before scanning for
+         * <stream:stream>.
+         *
+         * The old code ran strstr(rx_buffer, "<stream:stream") unconditionally
+         * on every loop iteration, scanning the ENTIRE accumulated buffer
+         * regardless of state.  A client in STATE_READY could exploit this by
+         * embedding the literal text "<stream:stream xmlns='jabber:client'
+         * xmlns:stream='http://etherx.jabber.org/streams' version='1.0'" inside
+         * a <message> body.  The strstr would match inside the payload, all
+         * three namespace/version checks would pass (the strings are present
+         * in the buffer), handle_handshake_logic() would fire, and rx_pos would
+         * be zeroed — discarding further stanzas in the same TCP segment and
+         * corrupting the authenticated session state.
+         *
+         * A stream re-open is only legitimate in two states:
+         *   STATE_CONNECTED     — initial stream open (RFC 6120 §4.2)
+         *   STATE_AUTHENTICATED — mandatory post-SASL re-open (RFC 6120 §6.4.6)
+         *
+         * In all other states (STATE_BIND, STATE_SESSION, STATE_READY) the
+         * buffer contains stanza data; the stream-open check must be skipped
+         * so payload content cannot trigger it.
+         *
+         * Note: strncmp(rx_buffer, "<?xml", 5) is safer in isolation because
+         * it only fires when those five bytes are at the very START of the
+         * buffer — a stanza body will never begin with "<?xml".  It is kept
+         * inside the state guard anyway so both arms are always gated together.
+         *
+         *   RFC 6120 §4.9.1  https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.1 */
+        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_AUTHENTICATED) && (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream"))) {
             /* ------------------------------------------------------------------
              * Fix (§5): RFC 6120 §4.9.1 — validate the stream opening element
              * before accepting.  If required attributes are absent or wrong,

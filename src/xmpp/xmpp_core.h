@@ -73,7 +73,25 @@ typedef enum {
     XMPP_PRESENCE_SUBSCRIBE,      /* RFC 6121 §3.1.3 — type="subscribe"               */
     XMPP_PRESENCE_SUBSCRIBED,     /* RFC 6121 §3.1.3 — type="subscribed"              */
     XMPP_PRESENCE_UNSUBSCRIBE,    /* RFC 6121 §3.1.3 — type="unsubscribe"             */
-    XMPP_PRESENCE_UNSUBSCRIBED    /* RFC 6121 §3.1.3 — type="unsubscribed"            */
+    XMPP_PRESENCE_UNSUBSCRIBED,   /* RFC 6121 §3.1.3 — type="unsubscribed"            */
+
+    /* FIX Bug 13 — type="probe" was unhandled.
+     *
+     * RFC 6121 §4.3.1 defines the presence probe: a server receiving a
+     * probe from a client SHOULD respond with the probed user's current
+     * presence.  Without a distinct enum value the parser left probes
+     * typed as XMPP_PRESENCE, causing them to be re-broadcast as an
+     * availability update, which is wrong.
+     *
+     * The parser (xmpp_parser.c) now resolves type="probe" into this
+     * value in the post-loop presence-type block.  The router
+     * (xmpp_router.c) includes it in the presence fallback dispatch so
+     * it reaches handle_broadcast_presence(), which handles it first and
+     * returns early via the probe branch.
+     *
+     *   RFC 6121 §4.3.1
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3.1 */
+    XMPP_PRESENCE_PROBE           /* RFC 6121 §4.3.1 — type="probe"                   */
 } stanza_type_t;
 
 /* ------------------------------------------------------------------

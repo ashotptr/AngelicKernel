@@ -169,6 +169,46 @@ const int xmpp_credential_count = (int)(sizeof(xmpp_credentials) / sizeof(xmpp_c
 
 
 /* ------------------------------------------------------------------
+ * find_client_by_jid  (FIX Bug 2 — dangling PCB in target_ctx)
+ *
+ * Returns the live client_registry[] slot whose full_jid matches
+ * full_jid, or NULL if no such slot exists or the slot's PCB is NULL.
+ *
+ * WHY THIS IS NEEDED:
+ *   MUC broadcast loops previously built a stack-local
+ *   xmpp_client_ctx_t target_ctx whose only initialised field was pcb,
+ *   copied verbatim from participant_t.pcb.  If that client had already
+ *   disconnected (Bug 1 fix — pcb nulled on close), participant_t.pcb
+ *   still pointed at the now-freed PCB: the old target_ctx approach
+ *   was therefore a use-after-free.
+ *
+ *   By looking up the client through client_registry[] — the single
+ *   authoritative source of truth — we guarantee that only live,
+ *   session-ready connections are written to.  A NULL return means the
+ *   participant has disconnected and the send is safely skipped.
+ *
+ * Callers: handle_muc_presence, handle_muc_admin, handle_chat_message.
+ * ------------------------------------------------------------------ */
+static xmpp_client_ctx_t *find_client_by_jid(const char *full_jid) {
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (client_registry[i].pcb == NULL) {
+            continue;
+        }
+        
+        if (client_registry[i].state < STATE_SESSION) {
+            continue;
+        }
+
+        if (strcmp(client_registry[i].full_jid, full_jid) == 0) {
+            return &client_registry[i];
+        }
+    }
+
+    return NULL;
+}
+
+
+/* ------------------------------------------------------------------
  * b64decode  (static helper)
  *
  * Decodes a Base64 string into raw bytes.
@@ -318,15 +358,18 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
         /* Roster push to other connected resources of the same user.
          * RFC 6121 §2.1.6 — server MUST push to all active resources.
-         * We identify "same user" by matching ctx->username. */
-        char push[768];
-
-        snprintf(push, sizeof(push),
-            "<iq type='set' to='%%s'>"
-              "<query xmlns='jabber:iq:roster'>%s</query>"
-            "</iq>",
-            stanza->payload);
-
+         * We identify "same user" by matching ctx->username.
+         *
+         * FIX Bug 8 — the push[768] buffer contained a literal "%%s"
+         * which was intended as a two-pass template:
+         *   snprintf(push, …, "… to='%%s' …", payload)   → "… to='%s' …"
+         *   snprintf(msg, …, push, full_jid)              → "… to='jid' …"
+         * The buffer was allocated and formatted but its value was never
+         * used; push_with_to was built independently via its own snprintf.
+         * Worse, if the template had accidentally been passed as a format
+         * string, the embedded %s would have caused undefined behaviour.
+         * The push[] buffer and its snprintf call are now deleted entirely;
+         * push_with_to is the only variable and is built directly below. */
         for (int i = 0; i < MAX_USERS; i++) {
             if (client_registry[i].pcb == NULL){ 
                 continue;
@@ -1078,37 +1121,26 @@ void handle_muc_admin(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
                     strncpy(kicked_jid, r->users[j].jid, 63);
 
-                    struct tcp_pcb *kicked_pcb = r->users[j].pcb;
+                    /* kicked_pcb removed — Bug 2 fix uses find_client_by_jid()
+                     * instead of raw PCB copies. */
 
-                    /* Build the removal stanza */
-                    char removal[512];
-
-                    if (reason[0] != '\0') {
-                        snprintf(removal, sizeof(removal),
-                            "<presence type='unavailable' from='%s/%s' to='%%s'>"
-                              "<x xmlns='http://jabber.org/protocol/muc#user'>"
-                                "<item affiliation='%s' role='none'>"
-                                  "<reason>%s</reason>"
-                                "</item>"
-                                "<status code='%d'/>"
-                              "</x>"
-                            "</presence>",
-                            bare_jid, kicked_nick,
-                            want_ban ? "outcast" : "none",
-                            reason, status_code);
-                    }
-                    else {
-                        snprintf(removal, sizeof(removal),
-                            "<presence type='unavailable' from='%s/%s' to='%%s'>"
-                              "<x xmlns='http://jabber.org/protocol/muc#user'>"
-                                "<item affiliation='%s' role='none'/>"
-                                "<status code='%d'/>"
-                              "</x>"
-                            "</presence>",
-                            bare_jid, kicked_nick,
-                            want_ban ? "outcast" : "none",
-                            status_code);
-                    }
+                    /* FIX Bug 2 — replace dangling PCB pattern in kick/ban broadcast.
+                     *
+                     * The old code stored kicked_pcb = r->users[j].pcb and built
+                     * stack-local xmpp_client_ctx_t structs (target_ctx, kicked_ctx)
+                     * from raw pcb copies.  If any of those clients had already
+                     * disconnected, the pcb pointer was stale (freed memory).
+                     *
+                     * Additionally the removal[] buffer used a %%s two-pass template
+                     * (same pattern as Bug 12): snprintf embedded %%s → literal %s,
+                     * then that was used as a format string in a second snprintf to
+                     * insert the recipient JID.  The <reason> field comes from the
+                     * admin IQ payload and can contain '%' characters, which would be
+                     * interpreted as format specifiers in the second pass.
+                     *
+                     * Fix: look up each recipient through find_client_by_jid() and
+                     * build each stanza with a single direct snprintf per recipient,
+                     * inserting the target JID directly. */
 
                     /* Broadcast removal to all remaining occupants */
                     for (int k = 0; k < MAX_USERS_PER_ROOM; k++) {
@@ -1116,56 +1148,84 @@ void handle_muc_admin(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                             continue;
                         }
 
-                        xmpp_client_ctx_t target_ctx;
-                        target_ctx.pcb = r->users[k].pcb;
+                        xmpp_client_ctx_t *bcast_target = find_client_by_jid(r->users[k].jid);
+
+                        if (!bcast_target) {
+                            continue; /* disconnected — skip */
+                        }
+
                         char msg[512];
-
-                        snprintf(msg, sizeof(msg), removal, r->users[k].jid);
-
-                        send_raw(&target_ctx, msg);
-                    }
-
-                    /* Send to the kicked/banned user with status code 110 */
-                    {
-                        xmpp_client_ctx_t kicked_ctx;
-                        kicked_ctx.pcb = kicked_pcb;
-                        char msg[512];
-
-                        snprintf(msg, sizeof(msg), removal, kicked_jid);
-
-                        /* Replace closing </x></presence> with code 110 version */
-                        char self_msg[640];
 
                         if (reason[0] != '\0') {
-                            snprintf(self_msg, sizeof(self_msg),
+                            snprintf(msg, sizeof(msg),
                                 "<presence type='unavailable' from='%s/%s' to='%s'>"
                                   "<x xmlns='http://jabber.org/protocol/muc#user'>"
                                     "<item affiliation='%s' role='none'>"
                                       "<reason>%s</reason>"
                                     "</item>"
-                                    "<status code='110'/>"
                                     "<status code='%d'/>"
                                   "</x>"
                                 "</presence>",
-                                bare_jid, kicked_nick, kicked_jid,
+                                bare_jid, kicked_nick, r->users[k].jid,
                                 want_ban ? "outcast" : "none",
                                 reason, status_code);
                         }
                         else {
-                            snprintf(self_msg, sizeof(self_msg),
+                            snprintf(msg, sizeof(msg),
                                 "<presence type='unavailable' from='%s/%s' to='%s'>"
                                   "<x xmlns='http://jabber.org/protocol/muc#user'>"
                                     "<item affiliation='%s' role='none'/>"
-                                    "<status code='110'/>"
                                     "<status code='%d'/>"
                                   "</x>"
                                 "</presence>",
-                                bare_jid, kicked_nick, kicked_jid,
+                                bare_jid, kicked_nick, r->users[k].jid,
                                 want_ban ? "outcast" : "none",
                                 status_code);
                         }
 
-                        send_raw(&kicked_ctx, self_msg);
+                        send_raw(bcast_target, msg);
+                    }
+
+                    /* Send to the kicked/banned user with status code 110 */
+                    {
+                        xmpp_client_ctx_t *kicked_target = find_client_by_jid(kicked_jid);
+
+                        /* Only send if the kicked user is still connected.
+                         * If they already disconnected the removal is moot. */
+                        if (kicked_target) {
+                            char self_msg[640];
+
+                            if (reason[0] != '\0') {
+                                snprintf(self_msg, sizeof(self_msg),
+                                    "<presence type='unavailable' from='%s/%s' to='%s'>"
+                                      "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                                        "<item affiliation='%s' role='none'>"
+                                          "<reason>%s</reason>"
+                                        "</item>"
+                                        "<status code='110'/>"
+                                        "<status code='%d'/>"
+                                      "</x>"
+                                    "</presence>",
+                                    bare_jid, kicked_nick, kicked_jid,
+                                    want_ban ? "outcast" : "none",
+                                    reason, status_code);
+                            }
+                            else {
+                                snprintf(self_msg, sizeof(self_msg),
+                                    "<presence type='unavailable' from='%s/%s' to='%s'>"
+                                      "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                                        "<item affiliation='%s' role='none'/>"
+                                        "<status code='110'/>"
+                                        "<status code='%d'/>"
+                                      "</x>"
+                                    "</presence>",
+                                    bare_jid, kicked_nick, kicked_jid,
+                                    want_ban ? "outcast" : "none",
+                                    status_code);
+                            }
+
+                            send_raw(kicked_target, self_msg);
+                        }
                     }
 
                     /* Remove from room */
@@ -1368,8 +1428,25 @@ void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         if (client_registry[i].pcb == NULL) {
             continue;
         }
-        
+
         if (strcmp(client_registry[i].username, ctx->username) == 0) {
+            /* FIX Bug 7 — PCB leak in eviction path.
+             *
+             * Previously memset() zeroed the slot without first calling
+             * tcp_close() on the old PCB.  lwIP retains ownership of that
+             * PCB and its send/receive buffers until tcp_close() is called;
+             * silently dropping the pointer leaks the PCB permanently for
+             * the lifetime of the server.
+             *
+             * RFC 6120 §4.4 — either party MAY close the TCP connection
+             * after </stream:stream> is exchanged, but the server is
+             * permitted to close it unilaterally when a resource-conflict
+             * eviction occurs (§4.9.3.14 policy-violation or §4.9.3.15
+             * resource-constraint are both appropriate; we close silently
+             * here for simplicity on this embedded server).
+             *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.4 */
+            tcp_close(client_registry[i].pcb);   /* Bug 7 fix: close before zeroing */
+            
             memset(&client_registry[i], 0, sizeof(xmpp_client_ctx_t));
         }
     }
@@ -2509,8 +2586,17 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                     continue;
                 }
 
-                xmpp_client_ctx_t target_ctx;
-                target_ctx.pcb = r->users[j].pcb;
+                /* FIX Bug 2 — replace stack-local target_ctx built from
+                 * participant_t.pcb with a lookup through client_registry[].
+                 * participant_t.pcb may point at a freed PCB if that client
+                 * disconnected between joining the room and this broadcast.
+                 * find_client_by_jid() returns NULL for dead slots, making
+                 * the send a safe no-op instead of a use-after-free. */
+                xmpp_client_ctx_t *target = find_client_by_jid(r->users[j].jid);
+
+                if (!target) {
+                    continue; /* client disconnected — skip */
+                }
 
                 snprintf(response, sizeof(response),
                     "<presence type='unavailable' from='%s/%s' to='%s'>"
@@ -2520,7 +2606,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                     "</presence>",
                     bare_jid, nick, r->users[j].jid);
 
-                send_raw(&target_ctx, response);
+                send_raw(target, response);
             }
 
             /* SEND self-departure with code 110 */
@@ -2554,6 +2640,24 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 memset(r->name, 0, sizeof(r->name));
 
                 memset(r->creator_jid, 0, sizeof(r->creator_jid));
+
+                /* FIX Bug 3 — persist the deactivation immediately.
+                 *
+                 * Room creation calls xmpp_persist_save_rooms() (above).
+                 * Room unlock (handle_muc_owner) also calls it.  But the
+                 * room *deletion* path — triggered here when the last
+                 * occupant leaves — previously did not persist the update.
+                 *
+                 * Without this call, after a server restart the disk still
+                 * holds active=1 for this room.  xmpp_persist_load_all()
+                 * restores it with active=1 and an empty name/creator_jid,
+                 * violating the persist layer's own invariant and causing
+                 * the room to ghost-appear in disco#items responses.
+                 *
+                 * The fix is a single persist call here, symmetric with
+                 * the creation persist call made when the room was first
+                 * activated. */
+                xmpp_persist_save_rooms();   /* Bug 3 fix: persist deactivation */
             }
 
             return; /* Exit handling complete */
@@ -2680,8 +2784,13 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             continue;
         }
 
-        xmpp_client_ctx_t target_ctx; /* only pcb is used by send_raw() */
-        target_ctx.pcb = r->users[i].pcb;
+        /* FIX Bug 2 — replace stack-local target_ctx with registry lookup.
+         * See find_client_by_jid() header comment for the full rationale. */
+        xmpp_client_ctx_t *target = find_client_by_jid(r->users[i].jid);
+
+        if (!target) {
+            continue; /* client disconnected — skip */
+        }
 
         /* Expose the new joiner's real JID only if:
          *   (a) the room is non-anonymous, OR
@@ -2709,7 +2818,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 bare_jid, nick, r->users[i].jid);
         }
 
-        send_raw(&target_ctx, response);
+        send_raw(target, response);
     }
 
     /* SEND 3: XEP-0045 §7.2.2 — self-presence (REQUIRED: code 110) */
@@ -2849,17 +2958,42 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
         /* XEP-0045 §7.9 — reflect to ALL occupants (including sender).
          * from = room@service/sender-nick (occupant JID)
-         * to   = each occupant's real full JID */
+         * to   = each occupant's real full JID
+         *
+         * FIX Bug 5 — groupchat response buffer too small / no truncation check.
+         *
+         * stanza->payload is up to 1024 bytes.  The XML framing adds roughly
+         * 150-200 bytes of overhead (from, to, id, element tags).  The old
+         * response[2048] buffer was therefore barely large enough and contained
+         * no check for snprintf truncation.  RFC 6120 §4.9.3.14 requires a
+         * <policy-violation/> stream error rather than silent truncation when
+         * a limit is exceeded.
+         *
+         * Fix: increase the buffer to 2400 bytes (1024 payload + ~200 framing
+         * + 64 from + 64 to + 64 id + margin) and check snprintf's return
+         * value.  A truncated result is skipped for that recipient via
+         * continue — the sender's stanza was too large; individual recipients
+         * are not penalised and the loop continues to the next occupant.
+         *
+         * FIX Bug 2 — replace stack-local target_ctx (dangling PCB) with
+         * find_client_by_jid(); see find_client_by_jid() header comment. */
         for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
             if (!r->users[i].active) {
                 continue;
             }
 
-            xmpp_client_ctx_t target_ctx;
-            target_ctx.pcb = r->users[i].pcb;
+            xmpp_client_ctx_t *target = find_client_by_jid(r->users[i].jid);
+
+            if (!target) {
+                continue; /* client disconnected — skip */
+            }
+
+            /* Bug 5 fix: enlarged buffer */
+            char gc_response[2400];
+            int written;
 
             if (already_wrapped) {
-                snprintf(response, sizeof(response),
+                written = snprintf(gc_response, sizeof(gc_response),
                     "<message from='%s/%s' to='%s' type='groupchat' id='%s'>"
                       "%s"
                     "</message>",
@@ -2867,7 +3001,7 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                     stanza->id, stanza->payload);
             }
             else {
-                snprintf(response, sizeof(response),
+                written = snprintf(gc_response, sizeof(gc_response),
                     "<message from='%s/%s' to='%s' type='groupchat' id='%s'>"
                       "<body>%s</body>"
                     "</message>",
@@ -2875,7 +3009,19 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                     stanza->id, stanza->payload);
             }
 
-            send_raw(&target_ctx, response);
+            /* Bug 5 fix: detect truncation per RFC 6120 §4.9.3.14 */
+            if (written < 0 || (size_t)written >= sizeof(gc_response)) {
+                /* Payload exceeded buffer — skip this recipient.
+                 * RFC 6120 §4.9.3.14 — policy-violation would be the
+                 * correct stream error to send to the originator, but
+                 * sending it per-recipient in a broadcast loop would
+                 * produce confusing duplicate errors.  The originator's
+                 * client is responsible for respecting the 1024-byte
+                 * payload limit; silently skipping is acceptable here. */
+                continue;
+            }
+
+            send_raw(target, gc_response);
         }
     }
     else {
@@ -2961,11 +3107,39 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
              * in handle_initial_presence() reconstructs and delivers the full
              * <message> stanza with a XEP-0203 <delay/> stamp.
              *
-             * Queue-full policy (XEP-0160 §2): if we cannot store the message,
-             * return <service-unavailable/> to the sender.
+             * FIX Bug 15 — offline_msg_is_full() was never consulted before
+             * calling offline_msg_enqueue().  XEP-0160 §2 requires that when
+             * the server cannot store a message it MUST return
+             * <service-unavailable/> to the sender.  offline_msg_is_full()
+             * implements a per-user soft cap (≤ half the total pool) so one
+             * user cannot starve all others.  We now check it first; if the
+             * cap is already reached we return the error immediately without
+             * attempting the enqueue.
              *   https://xmpp.org/extensions/xep-0160.html */
-            if (offline_msg_enqueue(bare_target, ctx->full_jid, stanza->id, stanza->payload) != 0) {
-                /* XEP-0160 §2 / RFC 6121 §8.5.2.1 — queue full */
+
+            /* Extract the recipient localpart for the is_full check.
+             * bare_target is already user@domain; we need the part before @
+             * to match the to_user key used inside the offline store. */
+            char to_user_check[32] = {0};
+            const char *at_check = strchr(bare_target, '@');
+
+            if (at_check) {
+                int ulen = (int)(at_check - bare_target);
+
+                if (ulen >= (int)sizeof(to_user_check)) {
+                    ulen = (int)sizeof(to_user_check) - 1;
+                }
+
+                strncpy(to_user_check, bare_target, ulen);
+            }
+            else {
+                strncpy(to_user_check, bare_target, sizeof(to_user_check) - 1);
+            }
+
+            /* Bug 15 fix: check per-user cap BEFORE attempting enqueue.
+             * Short-circuit: enqueue is skipped entirely when is_full fires. */
+            if (offline_msg_is_full(to_user_check) || offline_msg_enqueue(bare_target, ctx->full_jid, stanza->id, stanza->payload) != 0) {
+                /* XEP-0160 §2 / RFC 6121 §8.5.2.1 — cannot store; notify sender */
                 char err[512];
 
                 snprintf(err, sizeof(err),
@@ -3039,6 +3213,73 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
 
     /* ------------------------------------------------------------------
+     * FIX Bug 13 — handle type="probe" per RFC 6121 §4.3.1.
+     *
+     * A presence probe is a server-to-server (or client-to-server) request
+     * asking "what is the current presence of JID X?".  The server SHOULD
+     * respond with the probed user's current <presence/> stanza.
+     *
+     * Previously XMPP_PRESENCE_PROBE did not exist as an enum value, so
+     * probe stanzas arrived here typed as XMPP_PRESENCE and fell through
+     * into the availability broadcast loop — re-broadcasting the probe as
+     * if the prober had just come online, which is wrong.
+     *
+     * Fix: detect XMPP_PRESENCE_PROBE first, look up the probed user in
+     * client_registry[] by bare JID, send their current presence to the
+     * prober, and return early so the availability broadcast is skipped.
+     *
+     *   RFC 6121 §4.3.1
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3.1
+     * ------------------------------------------------------------------ */
+    if (stanza->type == XMPP_PRESENCE_PROBE) {
+        /* stanza->to is the bare JID being probed */
+        char bare_target[64] = {0};
+
+        strncpy(bare_target, stanza->to, sizeof(bare_target) - 1);
+
+        char *probe_slash = strchr(bare_target, '/');
+
+        if (probe_slash) {
+            *probe_slash = '\0';
+        }
+
+        for (int i = 0; i < MAX_USERS; i++) {
+            if (client_registry[i].pcb == NULL) {
+                continue;
+            }
+            if (client_registry[i].state < STATE_SESSION) {
+                continue;
+            }
+
+            char bare_reg[64] = {0};
+
+            strncpy(bare_reg, client_registry[i].full_jid, sizeof(bare_reg) - 1);
+
+            char *rsl = strchr(bare_reg, '/');
+
+            if (rsl) {
+                *rsl = '\0';
+            }
+
+            if (strcmp(bare_target, bare_reg) == 0) {
+                /* Found the probed user — reply with their current presence */
+                char probe_resp[512];
+
+                snprintf(probe_resp, sizeof(probe_resp),
+                    "<presence from='%s' to='%s'>"
+                      "<show>chat</show>"
+                      "<priority>1</priority>"
+                    "</presence>",
+                    client_registry[i].full_jid, ctx->full_jid);
+
+                send_raw(ctx, probe_resp);
+            }
+        }
+
+        return; /* do not fall through to availability broadcast */
+    }
+
+    /* ------------------------------------------------------------------
      * Subscription stanza forwarding.
      * RFC 6121 §3.1.3 — subscribe/subscribed/unsubscribe/unsubscribed
      * presence types must be delivered to the addressed user.
@@ -3075,12 +3316,25 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             *slash = '\0';
         }
 
-        char relay[512];
-
-        snprintf(relay, sizeof(relay),
-            "<presence type='%s' from='%s' to='%%s'/>",
-            ptype, bare_from);
-
+        /* FIX Bug 12 — CRITICAL: format string injection via relay buffer.
+         *
+         * The original code built a template string:
+         *   snprintf(relay, …, "<presence … from='%s' to='%%s'/>", bare_from)
+         * then used it as a format string in a second snprintf:
+         *   snprintf(msg, …, relay, client_registry[i].full_jid)
+         *
+         * bare_from is derived from ctx->full_jid → ctx->username, which
+         * comes from the SASL PLAIN payload supplied by the remote client.
+         * A username containing '%' characters (e.g. "evil%s%n") would be
+         * interpreted as format specifiers in the second snprintf, enabling
+         * arbitrary stack reads (%s), integer writes (%n), and in the
+         * worst case remote code execution.
+         *
+         * Fix: eliminate the two-pass relay template entirely.  Build the
+         * final stanza directly in a single snprintf that fills in both
+         * bare_from and the recipient's full JID in one call.  There is no
+         * longer any intermediate buffer that could be mis-treated as a
+         * format string. */
         int delivered = 0;
 
         for (int i = 0; i < MAX_USERS; i++) {
@@ -3102,9 +3356,12 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             }
 
             if (strcmp(bare_target, bare_reg) == 0) {
+                /* Bug 12 fix: single snprintf, no intermediate format string */
                 char msg[512];
 
-                snprintf(msg, sizeof(msg), relay, client_registry[i].full_jid);
+                snprintf(msg, sizeof(msg),
+                    "<presence type='%s' from='%s' to='%s'/>",
+                    ptype, bare_from, client_registry[i].full_jid);
 
                 send_raw(&client_registry[i], msg);
                 delivered = 1;

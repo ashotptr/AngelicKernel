@@ -16,6 +16,7 @@ internal-fs/EFI/BOOT/BOOTX64.EFI
 internal-fs/NvVars
 
 xmpp_understanding.txt
+notes.txt
 *.pdf
 ejabberd
 other_servers
