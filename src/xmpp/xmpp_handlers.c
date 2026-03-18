@@ -65,16 +65,10 @@ const xmpp_credential_t xmpp_credentials[] = {
  * for the same recipient is recycled; failing that the lowest-index
  * active slot is overwritten so the most-recent intent is preserved.
  * =========================================================================== */
-#define MAX_PENDING_SUBS 32
-
-typedef struct {
-    char type[16]; /* subscribe|subscribed|unsubscribe|unsubscribed */
-    char from[64]; /* bare JID of the initiating party */
-    char to_user[32]; /* username of the intended recipient */
-    int active;
-} pending_sub_t;
-
-static pending_sub_t pending_subs[MAX_PENDING_SUBS];
+/* MAX_PENDING_SUBS and pending_sub_t are defined in xmpp_core.h so that
+ * xmpp_persist.c can access this array via the extern declared there.
+ * Non-static: xmpp_persist.c saves and restores this array at boot. */
+pending_sub_t pending_subs[MAX_PENDING_SUBS];
 
 
 /* ------------------------------------------------------------------
@@ -129,6 +123,10 @@ static void pending_sub_enqueue(const char *type, const char *from, const char *
     pending_subs[slot].from[sizeof(pending_subs[slot].from) - 1] = '\0';
     pending_subs[slot].to_user[sizeof(pending_subs[slot].to_user) - 1] = '\0';
     pending_subs[slot].active = 1;
+
+    /* Write-through: persist immediately so subscription intents survive
+     * a server restart (RFC 6121 §4.3 requires offline delivery). */
+    xmpp_persist_save_pending_subs();
 }
 
 
@@ -163,6 +161,10 @@ static void pending_sub_drain(xmpp_client_ctx_t *ctx){
 
         pending_subs[i].active = 0;
     }
+
+    /* Persist once after the full drain loop so delivered entries are
+     * not replayed after a restart (RFC 6121 §4.3). */
+    xmpp_persist_save_pending_subs();
 }
 
 const int xmpp_credential_count = (int)(sizeof(xmpp_credentials) / sizeof(xmpp_credentials[0]));
@@ -194,16 +196,13 @@ static xmpp_client_ctx_t *find_client_by_jid(const char *full_jid) {
         if (client_registry[i].pcb == NULL) {
             continue;
         }
-        
         if (client_registry[i].state < STATE_SESSION) {
             continue;
         }
-
         if (strcmp(client_registry[i].full_jid, full_jid) == 0) {
             return &client_registry[i];
         }
     }
-
     return NULL;
 }
 
@@ -1446,7 +1445,6 @@ void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
              * here for simplicity on this embedded server).
              *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.4 */
             tcp_close(client_registry[i].pcb);   /* Bug 7 fix: close before zeroing */
-            
             memset(&client_registry[i], 0, sizeof(xmpp_client_ctx_t));
         }
     }
@@ -1960,7 +1958,7 @@ void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                       "<error type='cancel' code='503'>"
                         "<service-unavailable"
                           " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
-                      "</e>"
+                      "</error>"
                     "</iq>",
                     stanza->to, ctx->full_jid, stanza->id);
 
@@ -3138,7 +3136,9 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
             /* Bug 15 fix: check per-user cap BEFORE attempting enqueue.
              * Short-circuit: enqueue is skipped entirely when is_full fires. */
-            if (offline_msg_is_full(to_user_check) || offline_msg_enqueue(bare_target, ctx->full_jid, stanza->id, stanza->payload) != 0) {
+            if (offline_msg_is_full(to_user_check)
+                || offline_msg_enqueue(bare_target, ctx->full_jid,
+                                       stanza->id, stanza->payload) != 0) {
                 /* XEP-0160 §2 / RFC 6121 §8.5.2.1 — cannot store; notify sender */
                 char err[512];
 
@@ -3358,7 +3358,6 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             if (strcmp(bare_target, bare_reg) == 0) {
                 /* Bug 12 fix: single snprintf, no intermediate format string */
                 char msg[512];
-
                 snprintf(msg, sizeof(msg),
                     "<presence type='%s' from='%s' to='%s'/>",
                     ptype, bare_from, client_registry[i].full_jid);

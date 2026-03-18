@@ -350,7 +350,7 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
               "<error type='modify'>"
                 "<bad-request "
                   "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
-              "</e>"
+              "</error>"
             "</iq>",
             from_jid, to_jid, stanza->id);
 

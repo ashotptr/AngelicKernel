@@ -54,18 +54,10 @@
  *      queued messages (each with XEP-0203 <delay/> stamp).
  * ============================================================ */
 
-#define MAX_OFFLINE_MSGS  32
-
-typedef struct {
-    char from[64];        /* sender full JID (RFC 6120 §2.1)            */
-    char to_bare[64];     /* recipient bare JID — used in delivery       */
-    char to_user[32];     /* recipient localpart — index key for drain   */
-    char id[64];          /* message id — echoed in delivered stanza     */
-    char payload[1024];   /* inner XML (verbatim from xmpp_stanza_t)     */
-    int  active;
-} offline_msg_t;
-
-static offline_msg_t offline_store[MAX_OFFLINE_MSGS];
+/* MAX_OFFLINE_MSGS and offline_msg_t are defined in xmpp_core.h so that
+ * xmpp_persist.c can access this array via the extern declared there.
+ * Non-static: xmpp_persist.c saves and restores this array at boot. */
+offline_msg_t offline_store[MAX_OFFLINE_MSGS];
 
 
 /* ------------------------------------------------------------------
@@ -122,6 +114,10 @@ int offline_msg_enqueue(const char *to_bare, const char *from_jid, const char *m
         offline_store[i].payload[sizeof(offline_store[i].payload) - 1] = '\0';
 
         offline_store[i].active = 1;
+
+        /* Write-through: persist immediately so queued messages survive
+         * a server restart (XEP-0160 §2 — storage is server-side). */
+        xmpp_persist_save_offline();
 
         return 0;
     }
@@ -214,6 +210,11 @@ void offline_msg_drain(xmpp_client_ctx_t *ctx) {
 
         offline_store[i].active = 0;
     }
+
+    /* Persist the updated store once after the entire drain loop.
+     * Calling save per-message would be wasteful; the entire array
+     * state is written atomically here instead. */
+    xmpp_persist_save_offline();
 }
 
 

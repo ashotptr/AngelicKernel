@@ -4,6 +4,7 @@
 #include "lwip/tcp.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 
 typedef enum {
     PARSE_INCOMPLETE,   // wait for more data — do nothing
@@ -427,6 +428,58 @@ extern const int xmpp_credential_count;
  * xmpp_handlers.c, and xmpp_persist.c.
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------
+ * XEP-0160 Offline Message Queue (defined in xmpp_store.c)
+ *
+ * XEP-0160 §2 — messages addressed to users with no active session
+ * are held here and delivered with a XEP-0203 <delay/> stamp the
+ * next time that user sends initial presence.
+ *
+ * Capacity: MAX_OFFLINE_MSGS slots shared across all users.
+ * Per-slot size: 64+64+32+64+1024+4 = 1252 bytes
+ * Total BSS: 32 × 1252 ≈ 40 KB
+ *
+ * Persisted to disk so queued messages survive a server restart.
+ * ------------------------------------------------------------------ */
+#define MAX_OFFLINE_MSGS  32
+
+typedef struct {
+    char    from[64];       /* sender full JID (RFC 6120 §2.1)          */
+    char    to_bare[64];    /* recipient bare JID — used in delivery     */
+    char    to_user[32];    /* recipient localpart — key for drain       */
+    char    id[64];         /* message id — echoed in delivered stanza   */
+    char    payload[1024];  /* inner XML (verbatim from xmpp_stanza_t)   */
+    int32_t active;
+} offline_msg_t;
+
+/* Defined in xmpp_store.c; non-static so xmpp_persist.c can save it. */
+extern offline_msg_t offline_store[MAX_OFFLINE_MSGS];
+
+/* ------------------------------------------------------------------
+ * RFC 6121 §4.3 Pending Subscription Queue (defined in xmpp_handlers.c)
+ *
+ * Subscription stanzas (subscribe/subscribed/unsubscribe/unsubscribed)
+ * that could not be delivered because the target had no active session
+ * are queued here and drained when the target next sends initial presence.
+ *
+ * Capacity: MAX_PENDING_SUBS = 32 entries.
+ * Per-slot size: 16+64+32+4 = 116 bytes
+ * Total BSS: 32 × 116 ≈ 4 KB
+ *
+ * Persisted to disk so queued subscription intents survive a restart.
+ * ------------------------------------------------------------------ */
+#define MAX_PENDING_SUBS  32
+
+typedef struct {
+    char    type[16];    /* subscribe|subscribed|unsubscribe|unsubscribed */
+    char    from[64];    /* bare JID of the initiating party              */
+    char    to_user[32]; /* username of the intended recipient            */
+    int32_t active;
+} pending_sub_t;
+
+/* Defined in xmpp_handlers.c; non-static so xmpp_persist.c can save it. */
+extern pending_sub_t pending_subs[MAX_PENDING_SUBS];
+
 /* ---- XEP-0049 Private XML Storage (defined in xmpp_handlers.c) -- */
 #define PRIVATE_STORAGE_SLOTS 20
 #define PRIVATE_NS_MAX 128   /* must match xmpp_stanza_t.xmlns  */
@@ -478,6 +531,8 @@ void xmpp_persist_load_all();
 void xmpp_persist_save_private();
 void xmpp_persist_save_roster();
 void xmpp_persist_save_rooms();
+void xmpp_persist_save_offline();      /* XEP-0160 offline queue    */
+void xmpp_persist_save_pending_subs(); /* RFC 6121 §4.3 sub queue   */
 
 /* ------------------------------------------------------------------
  * xmpp_store.c — in-memory stores (offline queue + roster)

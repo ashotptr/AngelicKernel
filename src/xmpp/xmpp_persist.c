@@ -8,7 +8,7 @@
  *
  *   LBA  0        (1 sector  =  512 B)  persist_header_t
  *                                         magic:   0xA6E71C3D
- *                                         version: 2
+ *                                         version: 3
  *                                         crc32:   covers all payload sectors
  *
  *   LBA  1..42   (42 sectors = 21504 B)  private_store[PRIVATE_STORAGE_SLOTS]
@@ -25,15 +25,32 @@
  *                                         are NOT persisted — users rejoin after
  *                                         restart, but the room itself survives.
  *
- *   LBA 100..2047  reserved for future use
+ *   LBA 100..178 (79 sectors = 40448 B)  offline_store[MAX_OFFLINE_MSGS]
+ *                                         actual payload: 32 x 1252 = 40064 B
+ *                                         stores: from, to_bare, to_user, id,
+ *                                                 payload, active
+ *                                         XEP-0160 §2 — messages queued for
+ *                                         users with no active session survive
+ *                                         a server restart and are delivered
+ *                                         on next initial presence.
+ *
+ *   LBA 179..186  (8 sectors =  4096 B)  pending_subs[MAX_PENDING_SUBS]
+ *                                         actual payload: 32 x 116  =  3712 B
+ *                                         stores: type, from, to_user, active
+ *                                         RFC 6121 §4.3 — subscription stanzas
+ *                                         queued for offline users survive a
+ *                                         restart and are drained on next login.
+ *
+ *   LBA 187..2047  reserved for future use
  *
  * INTEGRITY:
- *   CRC32 (IEEE 802.3) over private_store + roster_store + rooms payloads.
+ *   CRC32 (IEEE 802.3) over all five payload regions.
  *   Mismatch on load = power-loss recovery: zero all stores, write clean header.
  *
  * VERSION HISTORY:
  *   1 — private_store + roster_store
  *   2 — added rooms[] persistence (LBA 99)
+ *   3 — added offline_store (LBA 100..178) + pending_subs (LBA 179..186)
  * =========================================================================== */
 
 #include "xmpp_core.h"
@@ -48,7 +65,7 @@ extern void serial_print_hex(uint64_t n);
  * Disk layout constants
  * ------------------------------------------------------------------ */
 #define PERSIST_MAGIC 0xA6E71C3Du
-#define PERSIST_VERSION 2u
+#define PERSIST_VERSION 3u
 
 #define LBA_HEADER 0u
 #define LBA_PRIVATE_START 1u
@@ -57,6 +74,10 @@ extern void serial_print_hex(uint64_t n);
 #define LBA_ROSTER_SECTORS 56u
 #define LBA_ROOMS_START 99u
 #define LBA_ROOMS_SECTORS 1u
+#define LBA_OFFLINE_START 100u
+#define LBA_OFFLINE_SECTORS 79u   /* 32 x 1252 B = 40064 B, ceil to 79 sectors */
+#define LBA_PENDING_SUBS_START 179u
+#define LBA_PENDING_SUBS_SECTORS 8u    /* 32 x 116 B  =  3712 B, ceil to  8 sectors */
 
 /* ------------------------------------------------------------------
  * On-disk header — exactly 512 bytes (one sector)
@@ -94,11 +115,57 @@ _Static_assert(sizeof(persist_room_entry_t) == 128, "persist_room_entry_t must b
 _Static_assert(sizeof(persist_room_entry_t) * MAX_ROOMS <= LBA_ROOMS_SECTORS * 512, "rooms do not fit in allocated sectors");
 
 /* ------------------------------------------------------------------
+ * persist_offline_entry_t — on-disk representation of one offline message.
+ *
+ * Mirrors offline_msg_t (xmpp_core.h) exactly, but uses int32_t for
+ * the active flag to guarantee the same wire size on all platforms.
+ *
+ * XEP-0160 §2 — queued messages must survive a server restart.
+ * ------------------------------------------------------------------ */
+typedef struct {
+    char    from[64];
+    char    to_bare[64];
+    char    to_user[32];
+    char    id[64];
+    char    payload[1024];
+    int32_t active;
+} __attribute__((packed)) persist_offline_entry_t;
+
+_Static_assert(sizeof(persist_offline_entry_t) == 1252,
+    "persist_offline_entry_t size mismatch");
+_Static_assert(sizeof(persist_offline_entry_t) * MAX_OFFLINE_MSGS
+               <= LBA_OFFLINE_SECTORS * 512,
+    "offline_store does not fit in allocated sectors");
+
+/* ------------------------------------------------------------------
+ * persist_pending_sub_entry_t — on-disk representation of one pending
+ * subscription stanza.
+ *
+ * Mirrors pending_sub_t (xmpp_core.h) with int32_t active.
+ *
+ * RFC 6121 §4.3 — queued subscription stanzas must survive a restart.
+ * ------------------------------------------------------------------ */
+typedef struct {
+    char    type[16];
+    char    from[64];
+    char    to_user[32];
+    int32_t active;
+} __attribute__((packed)) persist_pending_sub_entry_t;
+
+_Static_assert(sizeof(persist_pending_sub_entry_t) == 116,
+    "persist_pending_sub_entry_t size mismatch");
+_Static_assert(sizeof(persist_pending_sub_entry_t) * MAX_PENDING_SUBS
+               <= LBA_PENDING_SUBS_SECTORS * 512,
+    "pending_subs does not fit in allocated sectors");
+
+/* ------------------------------------------------------------------
  * Sector-aligned staging buffers (static = no heap needed)
  * ------------------------------------------------------------------ */
 static uint8_t private_buf[LBA_PRIVATE_SECTORS * 512];
 static uint8_t roster_buf [LBA_ROSTER_SECTORS * 512];
-static uint8_t rooms_buf [LBA_ROOMS_SECTORS * 512];
+static uint8_t rooms_buf        [LBA_ROOMS_SECTORS * 512];
+static uint8_t offline_buf      [LBA_OFFLINE_SECTORS * 512];
+static uint8_t pending_subs_buf [LBA_PENDING_SUBS_SECTORS * 512];
 
 /* ------------------------------------------------------------------
  * compute_full_crc — CRC32 (IEEE 802.3) over all three live stores
@@ -156,6 +223,32 @@ static uint32_t compute_full_crc(void) {
                 uint32_t mask = -(crc & 1u);
                 crc = (crc >> 1) ^ (0xEDB88320u & mask);
             }
+        }
+    }
+
+    /* CRC over offline_store — written verbatim (no pointer fields). */
+    p = (const uint8_t *)offline_store;
+    len = (uint32_t)(sizeof(persist_offline_entry_t) * MAX_OFFLINE_MSGS);
+
+    while (len--) {
+        crc ^= *p++;
+
+        for (int i = 0; i < 8; i++) {
+            uint32_t mask = -(crc & 1u);
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+        }
+    }
+
+    /* CRC over pending_subs — written verbatim (no pointer fields). */
+    p = (const uint8_t *)pending_subs;
+    len = (uint32_t)(sizeof(persist_pending_sub_entry_t) * MAX_PENDING_SUBS);
+
+    while (len--) {
+        crc ^= *p++;
+
+        for (int i = 0; i < 8; i++) {
+            uint32_t mask = -(crc & 1u);
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
         }
     }
 
@@ -251,6 +344,67 @@ void xmpp_persist_save_rooms(void) {
     serial_print("[PERSIST] rooms saved to disk\n");
 }
 
+/* ===========================================================================
+ * xmpp_persist_save_offline
+ *
+ * Serialises offline_store[] to LBA 100..178.
+ * Called by offline_msg_enqueue() (write-through on each new message) and
+ * by offline_msg_drain() once after delivering all queued messages.
+ *
+ * XEP-0160 §2 — the server MUST store messages for offline recipients;
+ * persisting to disk ensures they survive a server restart.
+ *   https://xmpp.org/extensions/xep-0160.html
+ * =========================================================================== */
+void xmpp_persist_save_offline(void) {
+    memset(offline_buf, 0, sizeof(offline_buf));
+
+    /* offline_msg_t and persist_offline_entry_t are layout-compatible
+     * (same field order, same sizes, packed) so a direct memcpy is safe. */
+    memcpy(offline_buf, offline_store,
+           sizeof(persist_offline_entry_t) * MAX_OFFLINE_MSGS);
+
+    if (disk_write_sectors(LBA_OFFLINE_START, LBA_OFFLINE_SECTORS,
+                           offline_buf) != 0) {
+        serial_print("[PERSIST] ERROR: offline_store write failed\n");
+
+        return;
+    }
+
+    write_header();
+
+    serial_print("[PERSIST] offline_store saved to disk\n");
+}
+
+/* ===========================================================================
+ * xmpp_persist_save_pending_subs
+ *
+ * Serialises pending_subs[] to LBA 179..186.
+ * Called by pending_sub_enqueue() (write-through on each new entry) and
+ * by pending_sub_drain() once after all entries for a user are cleared.
+ *
+ * RFC 6121 §4.3 — the server SHOULD deliver queued subscription stanzas
+ * when the target user next sends initial presence; persisting to disk
+ * ensures those intents survive a server restart.
+ *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3
+ * =========================================================================== */
+void xmpp_persist_save_pending_subs(void) {
+    memset(pending_subs_buf, 0, sizeof(pending_subs_buf));
+
+    memcpy(pending_subs_buf, pending_subs,
+           sizeof(persist_pending_sub_entry_t) * MAX_PENDING_SUBS);
+
+    if (disk_write_sectors(LBA_PENDING_SUBS_START, LBA_PENDING_SUBS_SECTORS,
+                           pending_subs_buf) != 0) {
+        serial_print("[PERSIST] ERROR: pending_subs write failed\n");
+
+        return;
+    }
+
+    write_header();
+
+    serial_print("[PERSIST] pending_subs saved to disk\n");
+}
+
 /* ------------------------------------------------------------------
  * fresh_start — zero all stores and write a clean disk image
  *
@@ -262,18 +416,25 @@ void xmpp_persist_save_rooms(void) {
  * ------------------------------------------------------------------ */
 static void fresh_start(void) {
     memset(private_store, 0, sizeof(private_store_entry_t) * PRIVATE_STORAGE_SLOTS);
-    memset(roster_store, 0, sizeof(roster_entry_t) * MAX_ROSTER_ENTRIES);
-    memset(rooms, 0, sizeof(room_t) * MAX_ROOMS);
-    memset(private_buf, 0, sizeof(private_buf));
-    memset(roster_buf, 0, sizeof(roster_buf));
-    memset(rooms_buf, 0, sizeof(rooms_buf));
+    memset(roster_store,  0, sizeof(roster_entry_t) * MAX_ROSTER_ENTRIES);
+    memset(rooms,         0, sizeof(room_t) * MAX_ROOMS);
+    memset(offline_store, 0, sizeof(offline_msg_t) * MAX_OFFLINE_MSGS);
+    memset(pending_subs,  0, sizeof(pending_sub_t) * MAX_PENDING_SUBS);
 
-    disk_write_sectors(LBA_PRIVATE_START, LBA_PRIVATE_SECTORS, private_buf);
-    disk_write_sectors(LBA_ROSTER_START, LBA_ROSTER_SECTORS, roster_buf);
-    disk_write_sectors(LBA_ROOMS_START, LBA_ROOMS_SECTORS, rooms_buf);
-    
+    memset(private_buf,      0, sizeof(private_buf));
+    memset(roster_buf,       0, sizeof(roster_buf));
+    memset(rooms_buf,        0, sizeof(rooms_buf));
+    memset(offline_buf,      0, sizeof(offline_buf));
+    memset(pending_subs_buf, 0, sizeof(pending_subs_buf));
+
+    disk_write_sectors(LBA_PRIVATE_START,      LBA_PRIVATE_SECTORS,      private_buf);
+    disk_write_sectors(LBA_ROSTER_START,       LBA_ROSTER_SECTORS,       roster_buf);
+    disk_write_sectors(LBA_ROOMS_START,        LBA_ROOMS_SECTORS,        rooms_buf);
+    disk_write_sectors(LBA_OFFLINE_START,      LBA_OFFLINE_SECTORS,      offline_buf);
+    disk_write_sectors(LBA_PENDING_SUBS_START, LBA_PENDING_SUBS_SECTORS, pending_subs_buf);
+
     write_header();
-    
+
     serial_print("[PERSIST] Clean disk initialised\n");
 }
 
@@ -314,24 +475,47 @@ static int try_load(void) {
 
         return 0;
     }
+    if (disk_read_sectors(LBA_OFFLINE_START, LBA_OFFLINE_SECTORS,
+                          offline_buf) != 0) {
+        serial_print("[PERSIST] ERROR: cannot read offline sectors\n");
+
+        return 0;
+    }
+    if (disk_read_sectors(LBA_PENDING_SUBS_START, LBA_PENDING_SUBS_SECTORS,
+                          pending_subs_buf) != 0) {
+        serial_print("[PERSIST] ERROR: cannot read pending_subs sectors\n");
+
+        return 0;
+    }
 
     /* Copy into live stores before CRC check */
-    memcpy(private_store, private_buf, sizeof(private_store_entry_t) * PRIVATE_STORAGE_SLOTS);
-    memcpy(roster_store, roster_buf, sizeof(roster_entry_t) * MAX_ROSTER_ENTRIES);
+    memcpy(private_store, private_buf,
+           sizeof(private_store_entry_t) * PRIVATE_STORAGE_SLOTS);
+    memcpy(roster_store, roster_buf,
+           sizeof(roster_entry_t) * MAX_ROSTER_ENTRIES);
 
     /* Restore rooms — configuration only, participants start empty */
     const persist_room_entry_t *entries = (const persist_room_entry_t *)rooms_buf;
 
     for (int i = 0; i < MAX_ROOMS; i++) {
         memset(&rooms[i], 0, sizeof(room_t));
-        
+
         strncpy(rooms[i].name, entries[i].name, sizeof(rooms[i].name) - 1);
-        strncpy(rooms[i].creator_jid, entries[i].creator_jid, sizeof(rooms[i].creator_jid) - 1);
-        
+        strncpy(rooms[i].creator_jid, entries[i].creator_jid,
+                sizeof(rooms[i].creator_jid) - 1);
+
         rooms[i].semi_anon = (int)entries[i].semi_anon;
-        rooms[i].locked = (int)entries[i].locked;
-        rooms[i].active = (int)entries[i].active;
+        rooms[i].locked    = (int)entries[i].locked;
+        rooms[i].active    = (int)entries[i].active;
     }
+
+    /* Restore offline_store — layout-compatible direct copy. */
+    memcpy(offline_store, offline_buf,
+           sizeof(persist_offline_entry_t) * MAX_OFFLINE_MSGS);
+
+    /* Restore pending_subs — layout-compatible direct copy. */
+    memcpy(pending_subs, pending_subs_buf,
+           sizeof(persist_pending_sub_entry_t) * MAX_PENDING_SUBS);
 
     uint32_t expected = hdr.crc32;
     uint32_t actual = compute_full_crc();
