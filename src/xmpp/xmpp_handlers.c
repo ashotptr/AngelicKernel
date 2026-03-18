@@ -348,6 +348,19 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
          *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.1.5 */
         roster_store_set_from_payload(ctx->username, stanza->payload);
 
+        /* Bug 14 fix — persist once after all items are processed.
+         *
+         * roster_store_upsert_item() previously called
+         * xmpp_persist_save_roster() on every item, meaning a roster set
+         * with N items caused N full sector writes (56 sectors × 512 B each)
+         * plus N CRC computations, all synchronous ATA PIO polling on the
+         * cooperative lwIP thread — stalling every other connection for the
+         * entire duration.  The save call has been removed from
+         * roster_store_upsert_item() and moved here, running exactly once
+         * per IQ-set regardless of how many <item/> elements it contains.
+         *   XEP-0049 §2 / RFC 6121 §2.1.5 — no batching requirement. */
+        xmpp_persist_save_roster();
+
         /* Acknowledge the set — RFC 6121 §2.1.5 result is an empty IQ */
         snprintf(response, sizeof(response),
             "<iq type='result' id='%s' to='%s'/>",
@@ -1409,6 +1422,51 @@ void handle_general_success(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   sub-state; session IQ (RFC 6121 §3.1) may optionally follow.
  * ------------------------------------------------------------------ */
 void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
+    /* Bug 4 fix — explicit state guard: bind is only valid in STATE_BIND.
+     *
+     * The router now uses min_state=STATE_BIND which prevents bind IQs
+     * arriving before the post-SASL stream re-open (e.g. in STATE_AUTHENTICATED).
+     * But the router only has a min_state concept, not a max_state.  Without
+     * this guard a fully-active client in STATE_SESSION or STATE_READY could
+     * still send a bind IQ, satisfy the min_state check, reach this handler,
+     * re-assign ctx->full_jid, and trigger the eviction loop against live
+     * sessions — effectively hijacking or crashing another user's connection.
+     *
+     * This guard is the authoritative enforcement point.  The router
+     * min_state change is belt; this check is suspenders.
+     *
+     *   RFC 6120 §7 — resource binding is a one-time per-stream negotiation.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-7 */
+    if (ctx->state != STATE_BIND) {
+        char err[512];
+        const char *from_jid = (stanza->to[0] != '\0') ? stanza->to : XMPP_DOMAIN;
+        const char *to_jid   = (ctx->full_jid[0] != '\0') ? ctx->full_jid : "unknown";
+
+        if (stanza->id[0] != '\0') {
+            snprintf(err, sizeof(err),
+                "<iq type='error' from='%s' to='%s' id='%s'>"
+                  "<error type='cancel'>"
+                    "<unexpected-request"
+                      " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                  "</error>"
+                "</iq>",
+                from_jid, to_jid, stanza->id);
+        }
+        else {
+            snprintf(err, sizeof(err),
+                "<iq type='error' from='%s' to='%s'>"
+                  "<error type='cancel'>"
+                    "<unexpected-request"
+                      " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                  "</error>"
+                "</iq>",
+                from_jid, to_jid);
+        }
+
+        send_raw(ctx, err);
+        return;
+    }
+
     /* RFC 6120 §7.7.1 — server-generated resource.
      * secure_random_u32() provides hardware entropy (or a CSPRNG
      * fallback); modulo 9999 keeps the resource short and readable.

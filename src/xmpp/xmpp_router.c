@@ -77,8 +77,36 @@ struct route_entry {
  * distinguish them. RFC 6121 §5 — Message delivery.
  * ------------------------------------------------------------------ */
 static struct route_entry router[] = {
-    { "urn:ietf:params:xml:ns:xmpp-sasl", handle_sasl, STATE_CONNECTED },
-    { "urn:ietf:params:xml:ns:xmpp-bind", handle_core_bind, STATE_AUTHENTICATED },
+    /* Bug 4 fix — SASL entry removed from the routing table.
+     *
+     * SASL <auth> stanzas are dispatched exclusively inside
+     * xmpp_recv_callback() when state == STATE_CONNECTED or STATE_SASL.
+     * Any other state goes to xmpp_route_stanza(); if this table still
+     * contained the SASL entry with min_state=STATE_CONNECTED, a
+     * fully-authenticated client in STATE_READY could send a stanza
+     * with xmlns=urn:ietf:params:xml:ns:xmpp-sasl, match this entry
+     * (STATE_READY >= STATE_CONNECTED), and call handle_sasl() —
+     * overwriting ctx->username and ctx->authenticated on a live session.
+     *
+     * With the entry absent, such a stanza falls through to the
+     * IQ fallback which returns <service-unavailable/>, which is the
+     * correct response for an out-of-sequence protocol element.
+     *   RFC 6120 §6.3 — SASL negotiation is a pre-authentication step.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.3 */
+
+    /* Bug 4 fix — bind min_state tightened from STATE_AUTHENTICATED
+     * to STATE_BIND.
+     *
+     * handle_handshake_logic() now sets STATE_BIND when it sends the
+     * post-SASL <stream:features> containing <bind/>.  Using STATE_BIND
+     * as the minimum means the router sends <unexpected-request/> if
+     * a bind IQ arrives before the post-SASL stream re-open completes.
+     * An explicit max-state guard inside handle_core_bind() (see
+     * xmpp_handlers.c) additionally blocks re-binding from STATE_SESSION
+     * or STATE_READY, which the min_state check alone cannot prevent.
+     *   RFC 6120 §7 — resource binding is a one-time per-stream step.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-7 */
+    { "urn:ietf:params:xml:ns:xmpp-bind", handle_core_bind, STATE_BIND },
     { "urn:ietf:params:xml:ns:xmpp-session", handle_core_session, STATE_AUTHENTICATED },
     { "jabber:iq:roster", handle_roster_request, STATE_SESSION },
     { "http://jabber.org/protocol/disco#info", handle_disco_info, STATE_SESSION },

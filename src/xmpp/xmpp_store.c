@@ -361,8 +361,9 @@ int roster_store_upsert_item(const char *username, const char *item_xml) {
             slot->active = 0;
         }
 
-        xmpp_persist_save_roster(); /* persist the deletion */
-        
+        /* Bug 14 fix — save removed from here; called once by
+         * handle_roster_request() after roster_store_set_from_payload()
+         * completes all upserts in the IQ-set payload. */
         return 0;
     }
 
@@ -398,11 +399,10 @@ int roster_store_upsert_item(const char *username, const char *item_xml) {
 
     slot->active = 1;
 
-    /* Write-through: commit roster change to disk (ATA data drive)
-     * immediately so it survives a reboot. Also called for remove
-     * (active=0) above via the early-return path. */
-    xmpp_persist_save_roster();
-
+    /* Bug 14 fix — save removed from here; called once by
+     * handle_roster_request() after all items in the IQ-set are
+     * processed.  A roster set with N items previously caused N
+     * synchronous ATA PIO writes; now there is exactly one. */
     return 0;
 }
 

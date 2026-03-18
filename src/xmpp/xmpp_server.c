@@ -61,7 +61,18 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
     if (ctx->authenticated) {
         /* Post-SASL stream: offer bind (required) and session (legacy).
          * RFC 6120 §7.2  — bind MUST be present after SASL.
-         * RFC 6121 §3.1  — session is optional but widely expected. */
+         * RFC 6121 §3.1  — session is optional but widely expected.
+         *
+         * Bug 4 fix — set STATE_BIND so that the bind IQ handler is
+         * only reachable from this specific negotiation point.  Before
+         * this fix the handler was reachable from any state >=
+         * STATE_AUTHENTICATED, including STATE_SESSION and STATE_READY,
+         * allowing a fully-active client to re-run binding logic and
+         * trigger the eviction loop against live sessions.
+         *   RFC 6120 §7 — Resource Binding is a one-time per-stream step.
+         *   https://datatracker.ietf.org/doc/html/rfc6120#section-7 */
+        ctx->state = STATE_BIND;
+
         snprintf(response, sizeof(response),
             "<?xml version='1.0'?>"
             "<stream:stream from='%s' id='%u' version='1.0' "
@@ -112,6 +123,22 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
      * before this function is called.  By the time we reach here the
      * opening element has already been validated and accepted. */
     send_raw(ctx, response);
+
+    /* Bug 4 fix — advance to STATE_SASL after advertising mechanisms
+     * so that <auth> stanzas are only accepted in the pre-authentication
+     * window.  The post-SASL stream re-open sets STATE_BIND (above),
+     * which means re-sending <auth> from STATE_BIND/SESSION/READY
+     * is rejected by the recv_callback dispatch check below.
+     *
+     * For the post-SASL stream re-open (ctx->authenticated == 1) we
+     * already set STATE_BIND above; this branch only runs for the
+     * initial pre-auth stream open where ctx->authenticated == 0.
+     *   RFC 6120 §6.3 — SASL negotiation must complete before any
+     *   other protocol exchange.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.3 */
+    if (!ctx->authenticated) {
+        ctx->state = STATE_SASL;
+    }
 }
 
 /* ------------------------------------------------------------------
@@ -199,7 +226,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * this slot as inactive even before it is reclaimed by
          * xmpp_accept_callback(). */
         tcp_close(pcb);
-        ctx->pcb = NULL;           /* Bug 1 fix: mark slot as dead */
+        ctx->pcb   = NULL;           /* Bug 1 fix: mark slot as dead */
         ctx->state = STATE_CONNECTED; /* not SESSION — slot is inactive */
 
         return ERR_OK;
@@ -307,7 +334,8 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * inside the state guard anyway so both arms are always gated together.
          *
          *   RFC 6120 §4.9.1  https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.1 */
-        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_AUTHENTICATED) && (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream"))) {
+        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_AUTHENTICATED) &&
+            (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream"))) {
             /* ------------------------------------------------------------------
              * Fix (§5): RFC 6120 §4.9.1 — validate the stream opening element
              * before accepting.  If required attributes are absent or wrong,
@@ -413,7 +441,12 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * This check only triggers in STATE_CONNECTED (pre-authentication)
          * where SASL exchange is valid; it is a no-op in all other states.
          * ------------------------------------------------------------------ */
-        if (ctx->state == STATE_CONNECTED && strncmp(ctx->rx_buffer, "<abort", 6) == 0) {
+        /* Bug 4 fix — include STATE_SASL in the abort check.
+         * <abort/> is a SASL-layer element valid throughout the SASL
+         * exchange, which now spans STATE_CONNECTED → STATE_SASL.
+         *   RFC 6120 §6.4.4
+         *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.4 */
+        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_SASL) && strncmp(ctx->rx_buffer, "<abort", 6) == 0) {
             /* Find the end of the abort element (self-closing or with children) */
             char *gt = strchr(ctx->rx_buffer, '>');
 
@@ -445,12 +478,20 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
         xmpp_stanza_t *stanza = parse_xml_stream(ctx->rx_buffer, ctx->rx_pos, &bytes_consumed, &reason);
 
         if (stanza) {
-            if (ctx->state == STATE_CONNECTED) {
+            if (ctx->state == STATE_CONNECTED || ctx->state == STATE_SASL) {
                 /* RFC 6120 §6.4.2 — only SASL <auth> is valid before
                  * authentication is complete.
                  * <abort/> is handled above this loop (before parsing).
                  * <invalid-mechanism/> and <incorrect-encoding/> are
-                 * handled inside handle_sasl(). */
+                 * handled inside handle_sasl().
+                 *
+                 * Bug 4 fix — include STATE_SASL here.
+                 * handle_handshake_logic() now sets STATE_SASL after
+                 * advertising mechanisms.  Without this, the state
+                 * would advance to STATE_SASL but the dispatch check
+                 * would still require STATE_CONNECTED, causing a
+                 * legitimate <auth> to fall through to xmpp_route_stanza
+                 * (which would reject it as an unrecognised IQ). */
                 if (strcmp(stanza->xmlns, "urn:ietf:params:xml:ns:xmpp-sasl") == 0) {
                     handle_sasl(ctx, stanza);
                 }
