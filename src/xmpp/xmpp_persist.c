@@ -253,6 +253,12 @@ void xmpp_persist_save_rooms(void) {
 
 /* ------------------------------------------------------------------
  * fresh_start — zero all stores and write a clean disk image
+ *
+ * IMPORTANT: this function is only safe to call at boot time, before
+ * any network connections are accepted.  It zeroes rooms[] in place,
+ * which includes the participant_t.pcb (TCP PCB pointer) fields inside
+ * each room_t.  Those pointers are only valid during an active session;
+ * zeroing them while live connections exist would corrupt lwIP state.
  * ------------------------------------------------------------------ */
 static void fresh_start(void) {
     memset(private_store, 0, sizeof(private_store_entry_t) * PRIVATE_STORAGE_SLOTS);
