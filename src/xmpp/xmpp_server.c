@@ -27,12 +27,16 @@ room_t rooms[MAX_ROOMS];
  *   RFC 6120 §4.3   — <stream:features> rules: server MUST include all
  *     features the client can use at this point.
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-4.3
- *   RFC 6120 §5     — STARTTLS feature; we omit it (no TLS).
- *     If TLS is ever added it MUST be listed first and SHOULD be
- *     marked <required/> for non-localhost connections.
- *     https://datatracker.ietf.org/doc/html/rfc6120#section-5.3
+ *   RFC 6120 §5     — STARTTLS feature; offered <required/> before any
+ *     SASL mechanisms.  Implemented via mbedTLS in xmpp_tls.c.
+ *     Pre-TLS: only <starttls><required/></starttls> is advertised.
+ *     Post-TLS: SASL mechanisms are advertised; STARTTLS not re-offered.
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-5
+ *   RFC 6120 §13.8.4 — PLAIN MUST NOT be offered without TLS;
+ *     enforced by withholding <mechanisms> until tls_established=1.
+ *     https://datatracker.ietf.org/doc/html/rfc6120#section-13.8.4
  *   RFC 6120 §6.4.1 — Exchange of Stream Headers and Stream Features:
- *     SASL <mechanisms> advertisement in stream:features.
+ *     SASL <mechanisms> advertisement in stream:features (post-TLS only).
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.1
  *
  * Stream features (post-auth):
@@ -87,22 +91,11 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
             "</stream:features>",
             XMPP_DOMAIN, stream_id);
     }
-    else {
-        /* Pre-auth stream: offer SASL mechanisms.
-         * RFC 6120 §6.4.1 — Exchange of Stream Headers and Stream
-         *   Features: server advertises available mechanisms.
-         *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.1
-         * RFC 6120 §6.3.4 — Mechanism Offers: each <mechanism> name is a
-         *   registered IANA SASL mechanism name (case-sensitive, uppercase).
-         *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.3.4
-         * RFC 6120 §6.3.3 — ANONYMOUS allows login without credentials;
-         *   sufficient for a local-only embedded server.
-         *   PLAIN credentials travel in cleartext — acceptable only
-         *   over a TLS-protected stream (RFC 6120 §13.8.4).
-         *   https://datatracker.ietf.org/doc/html/rfc6120#section-13.8.4
-         * NOTE (future work): When TLS is added, advertise <starttls>
-         *   before <mechanisms> and mark it <required/> per RFC 6120 §5.3.
-         *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.3 */
+    else if (ctx->tls_established) {
+        /* TLS is live — now safe to offer SASL PLAIN (RFC 6120 §13.8.4).
+         * STARTTLS is NOT offered again per RFC 6120 §5.2 step 5c.
+         * RFC 6120 §6.4.1 — server advertises available mechanisms.
+         *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.1 */
         snprintf(response, sizeof(response),
             "<?xml version='1.0'?>"
             "<stream:stream from='%s' id='%u' version='1.0' "
@@ -117,6 +110,29 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
             "</stream:features>",
             XMPP_DOMAIN, stream_id);
     }
+    else {
+        /* Pre-TLS stream: offer STARTTLS as REQUIRED.
+         *
+         * RFC 6120 §5.3.1 — STARTTLS MUST be the first feature listed.
+         * RFC 6120 §5.3.2 — <required/> means the client MUST negotiate
+         *   TLS before any other protocol exchange.
+         * RFC 6120 §13.8.4 — PLAIN MUST NOT be offered without TLS;
+         *   therefore no SASL mechanisms are listed here.
+         *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.3
+         *   https://datatracker.ietf.org/doc/html/rfc6120#section-13.8.4 */
+        snprintf(response, sizeof(response),
+            "<?xml version='1.0'?>"
+            "<stream:stream from='%s' id='%u' version='1.0' "
+            "xml:lang='en' "
+            "xmlns='jabber:client' "
+            "xmlns:stream='http://etherx.jabber.org/streams'>"
+            "<stream:features>"
+              "<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'>"
+                "<required/>"
+              "</starttls>"
+            "</stream:features>",
+            XMPP_DOMAIN, stream_id);
+    }
 
     /* NOTE: RFC 6120 §4.9.1 stream-error conditions are enforced in
      * xmpp_recv_callback() (invalid-namespace / unsupported-version)
@@ -124,19 +140,13 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
      * opening element has already been validated and accepted. */
     send_raw(ctx, response);
 
-    /* Bug 4 fix — advance to STATE_SASL after advertising mechanisms
-     * so that <auth> stanzas are only accepted in the pre-authentication
-     * window.  The post-SASL stream re-open sets STATE_BIND (above),
-     * which means re-sending <auth> from STATE_BIND/SESSION/READY
-     * is rejected by the recv_callback dispatch check below.
-     *
-     * For the post-SASL stream re-open (ctx->authenticated == 1) we
-     * already set STATE_BIND above; this branch only runs for the
-     * initial pre-auth stream open where ctx->authenticated == 0.
-     *   RFC 6120 §6.3 — SASL negotiation must complete before any
-     *   other protocol exchange.
-     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.3 */
-    if (!ctx->authenticated) {
+    /* Advance state after advertising:
+     *   STATE_SASL — when SASL mechanisms were just offered (TLS live).
+     *   STATE_CONNECTED stays — when STARTTLS was offered (waiting for
+     *     <starttls/> from client before any SASL exchange).
+     * The post-SASL and post-bind cases are handled by the STATE_BIND
+     * assignment above. */
+    if (!ctx->authenticated && ctx->tls_established) {
         ctx->state = STATE_SASL;
     }
 }
@@ -226,7 +236,12 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * this slot as inactive even before it is reclaimed by
          * xmpp_accept_callback(). */
         tcp_close(pcb);
-        ctx->pcb   = NULL;           /* Bug 1 fix: mark slot as dead */
+
+        /* Free mbedTLS resources before zeroing the context fields.
+         * Safe to call when TLS was never initialised. */
+        xmpp_tls_client_free(ctx);
+
+        ctx->pcb = NULL;           /* Bug 1 fix: mark slot as dead */
         ctx->state = STATE_CONNECTED; /* not SESSION — slot is inactive */
 
         return ERR_OK;
@@ -234,43 +249,76 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
 
     xmpp_log("RECV", (char*)p->payload, p->len);
 
-    if (ctx->rx_pos + (int)p->len < (int)(sizeof(ctx->rx_buffer) - 1)) {
-        memcpy(ctx->rx_buffer + ctx->rx_pos, p->payload, p->len);
-
-        ctx->rx_pos += p->len;
-        ctx->rx_buffer[ctx->rx_pos] = '\0';
-    }
-    else {
-        /* FIX (§3 LOW): Buffer full — RFC 6120 §4.9.3.14 requires a
-         * <policy-violation/> stream error followed by closing the
-         * connection rather than silently dropping data. */
-        printf("[XMPP] Buffer Overflow! rx_pos=%d, incoming=%d — sending policy-violation and closing.\n",
-               ctx->rx_pos, p->len);
-
+    /* ── TLS: handshake in progress (STATE_STARTTLS) ───────────────────────
+     * All bytes arriving in this state are raw TLS records.  Route them
+     * directly to the TLS staging buffer; do NOT touch rx_buffer.
+     * RFC 6120 §5.2.3 — after <proceed/> both sides immediately begin TLS.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.2.3 */
+    if (ctx->state == STATE_STARTTLS) {
         tcp_recved(pcb, p->len);
 
+        xmpp_tls_handshake_step(ctx, (const uint8_t *)p->payload, (int)p->len);
+        
         pbuf_free(p);
-
-        const char *stream_err =
-            "<stream:error>"
-              "<policy-violation xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
-            "</stream:error>"
-            "</stream:stream>";
-
-        /* RFC 6120 §4.9.3.14 — send stream error then close */
-        tcp_write(pcb, stream_err, strlen(stream_err), TCP_WRITE_FLAG_COPY);
-
-        tcp_output(pcb);
-
-        tcp_close(pcb);
-
+        
         return ERR_OK;
     }
 
-    /* RFC 6120 §4.1 — acknowledge received bytes to the TCP stack */
-    tcp_recved(pcb, p->len);
+    /* ── TLS: established — decrypt encrypted bytes into rx_buffer ─────────
+     * After decryption, fall through to the normal parse loop.  The
+     * skip_plaintext_copy flag prevents the raw (still-encrypted) bytes
+     * from being appended to rx_buffer a second time. */
+    int skip_plaintext_copy = 0;
 
-    pbuf_free(p);
+    if (ctx->tls_established) {
+        tcp_recved(pcb, p->len);
+
+        xmpp_tls_decrypt(ctx, (const uint8_t *)p->payload, (int)p->len);
+
+        pbuf_free(p);
+        
+        skip_plaintext_copy = 1;
+    }
+
+    if (!skip_plaintext_copy) {
+        if (ctx->rx_pos + (int)p->len < (int)(sizeof(ctx->rx_buffer) - 1)) {
+            memcpy(ctx->rx_buffer + ctx->rx_pos, p->payload, p->len);
+
+            ctx->rx_pos += p->len;
+            ctx->rx_buffer[ctx->rx_pos] = '\0';
+        }
+        else {
+            /* FIX (§3 LOW): Buffer full — RFC 6120 §4.9.3.14 requires a
+             * <policy-violation/> stream error followed by closing the
+             * connection rather than silently dropping data. */
+            printf("[XMPP] Buffer Overflow! rx_pos=%d, incoming=%d — sending policy-violation and closing.\n",
+                   ctx->rx_pos, p->len);
+
+            tcp_recved(pcb, p->len);
+
+            pbuf_free(p);
+
+            const char *stream_err =
+                "<stream:error>"
+                  "<policy-violation xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                "</stream:error>"
+                "</stream:stream>";
+
+            /* RFC 6120 §4.9.3.14 — send stream error then close */
+            tcp_write(pcb, stream_err, strlen(stream_err), TCP_WRITE_FLAG_COPY);
+
+            tcp_output(pcb);
+
+            tcp_close(pcb);
+
+            return ERR_OK;
+        }
+
+        /* RFC 6120 §4.1 — acknowledge received bytes to the TCP stack */
+        tcp_recved(pcb, p->len);
+
+        pbuf_free(p);
+    }
 
     while (ctx->rx_pos > 0) {
         /* Strip leading whitespace; RFC 6120 §11.7 permits whitespace
@@ -297,6 +345,59 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
 
         if (ctx->rx_pos == 0) {
             break;
+        }
+
+        /* STARTTLS element detection — RFC 6120 §5.2
+         *
+         * Detected pre-parse (like <abort/>) for reliability.  Only valid
+         * in STATE_CONNECTED before TLS has been established.  The element
+         * arrives as the first thing in rx_buffer after the initial stream
+         * negotiation offers STARTTLS <required/>.
+         *
+         * On receiving <starttls/>:
+         *   1. Send <proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>.
+         *   2. Initialise per-client TLS context.
+         *   3. Advance to STATE_STARTTLS; subsequent bytes are TLS records.
+         *
+         * If TLS init fails we send <failure/> and close (RFC 6120 §5.2.2).
+         *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.2 */
+        if (ctx->state == STATE_CONNECTED && !ctx->tls_established && strncmp(ctx->rx_buffer, "<starttls", 9) == 0) {
+            char *starttls_gt = strchr(ctx->rx_buffer, '>');
+
+            if (!starttls_gt) {
+                break;
+            }
+
+            /* Send <proceed/> — RFC 6120 §5.2.2 */
+            const char *proceed = "<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>";
+
+            tcp_write(ctx->pcb, proceed, strlen(proceed), TCP_WRITE_FLAG_COPY);
+
+            tcp_output(ctx->pcb);
+
+            /* Initialise per-client TLS session */
+            if (xmpp_tls_client_init(ctx) != 0) {
+                /* TLS setup failed — RFC 6120 §5.2.2 send <failure/> */
+                const char *fail = "<failure xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>";
+                
+                tcp_write(ctx->pcb, fail, strlen(fail), TCP_WRITE_FLAG_COPY);
+                
+                tcp_output(ctx->pcb);
+                
+                tcp_close(ctx->pcb);
+                
+                ctx->pcb = NULL;
+                ctx->state = STATE_CONNECTED;
+                ctx->rx_pos = 0;
+                
+                return ERR_OK;
+            }
+
+            /* All subsequent bytes from this client are TLS records */
+            ctx->state = STATE_STARTTLS;
+            ctx->rx_pos = 0; /* discard anything before the starttls tag */
+
+            return ERR_OK;
         }
 
         /* Stream (re-)open detection.
@@ -334,8 +435,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * inside the state guard anyway so both arms are always gated together.
          *
          *   RFC 6120 §4.9.1  https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.1 */
-        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_AUTHENTICATED) &&
-            (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream"))) {
+        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_AUTHENTICATED) && (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream"))) {
             /* ------------------------------------------------------------------
              * Fix (§5): RFC 6120 §4.9.1 — validate the stream opening element
              * before accepting.  If required attributes are absent or wrong,
@@ -585,7 +685,11 @@ err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
     /* FIX (§3 CRITICAL): Close the old connection if the slot is still
      * in use, then zero the entire context to prevent state bleed. */
     if (ctx->pcb != NULL) {
-        /* Evict the previous occupant before reusing this slot. */
+        /* Evict the previous occupant before reusing this slot.
+         * Free TLS context BEFORE tcp_close() and memset() so mbedTLS
+         * can release its pool allocations cleanly. */
+        xmpp_tls_client_free(ctx);
+
         tcp_close(ctx->pcb);
     }
 
@@ -616,7 +720,22 @@ err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
  * ------------------------------------------------------------------ */
 void xmpp_init_server() {
     xmpp_persist_load_all();
-    
+
+    /* Initialise mbedTLS: generate key + self-signed cert, configure
+     * the shared server SSL context.  Must complete before we start
+     * accepting connections (key generation takes < 100 ms on a
+     * typical embedded core).
+     *   RFC 6120 §5 — STARTTLS
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-5 */
+    if (xmpp_tls_server_init() != 0) {
+        /* TLS init failure is fatal — the server must not accept
+         * connections without being able to offer STARTTLS
+         * (RFC 6120 §5.3.2 <required/>). */
+        printf("[XMPP] FATAL: TLS server init failed — halting.\n");
+        
+        for (;;) {} /* halt */
+    }
+
     struct tcp_pcb *pcb = tcp_new();
 
     tcp_bind(pcb, IP_ADDR_ANY, 5222); /* RFC 6120 §3.2 — XMPP client port */

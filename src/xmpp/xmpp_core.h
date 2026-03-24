@@ -5,10 +5,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include "mbedtls/ssl.h"
 
 typedef enum {
-    PARSE_INCOMPLETE,   // wait for more data — do nothing
-    PARSE_NO_MEMORY,    // pool exhausted — send resource-constraint + close
+    PARSE_INCOMPLETE,
+    PARSE_NO_MEMORY,
 } parse_null_reason_t;
 
 /* ============================================================
@@ -31,6 +32,8 @@ typedef enum {
 #define MAX_NICK_LEN 32
 #define MAX_ROOM_NAME_LEN 32
 #define MAX_USERS 10
+
+#define TLS_RX_BUF_SIZE 32768
 
 /* Domain used as the server's authoritative domain in JIDs and the
  * stream 'from' attribute.
@@ -140,6 +143,21 @@ typedef enum {
  * ------------------------------------------------------------------ */
 typedef enum {
     STATE_CONNECTED,
+
+    /* STATE_STARTTLS — TLS handshake in progress.
+     *
+     * Set by xmpp_recv_callback() immediately after the server sends
+     * <proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>.
+     * All bytes arriving in this state are raw TLS records; they are
+     * routed directly to the TLS staging buffer and never touch rx_buffer.
+     * On handshake completion, state returns to STATE_CONNECTED with
+     * ctx->tls_established = 1; the client then opens a new XML stream.
+     *
+     *   RFC 6120 §5.2.3 — after <proceed/> both sides MUST immediately
+     *   begin the TLS negotiation.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.2.3 */
+    STATE_STARTTLS,
+
     STATE_SASL,
     STATE_AUTHENTICATED,
     STATE_BIND,
@@ -211,8 +229,35 @@ typedef struct {
     char full_jid[64];
     char username[32];
     int authenticated;
-    char rx_buffer[16384];
+    char rx_buffer[32768];
     int rx_pos;
+
+    /* ------------------------------------------------------------------
+     * TLS state (RFC 6120 §5 — STARTTLS negotiation)
+     *
+     * tls_ssl         — per-connection mbedTLS session context.
+     *                   Initialised by xmpp_tls_client_init() when the
+     *                   client sends <starttls/>.  Freed by
+     *                   xmpp_tls_client_free() on disconnect or slot eviction.
+     *
+     * tls_rx_buf      — encrypted input staging buffer.  Raw bytes from
+     *                   lwIP are copied here; the internal tls_net_recv()
+     *                   callback drains them into mbedTLS for decryption or
+     *                   handshake processing.
+     *
+     * tls_rx_len      — number of valid encrypted bytes in tls_rx_buf.
+     * tls_rx_pos      — mbedTLS read position within tls_rx_buf.
+     *
+     * tls_established — set to 1 once the TLS handshake completes
+     *                   successfully.  send_raw() uses this flag to route
+     *                   outbound data through mbedtls_ssl_write() instead
+     *                   of tcp_write().
+     * ------------------------------------------------------------------ */
+    mbedtls_ssl_context tls_ssl;
+    uint8_t tls_rx_buf[TLS_RX_BUF_SIZE];
+    int tls_rx_len;
+    int tls_rx_pos;
+    int tls_established;
 } xmpp_client_ctx_t;
 
 /* ------------------------------------------------------------------
@@ -381,8 +426,41 @@ void handle_general_success(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
     /* Catch-all: returns empty <iq type='result'/> for benign unknown IQs.
      * RFC 6120 §8.2.3 — server MUST reply to every IQ get/set. */
 
+void handle_blocklist(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
+    /* XEP-0191 — Blocklist: get returns empty <blocklist/>, set acknowledged. */
+void handle_version(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
+    /* XEP-0092 — Software Version: returns server name/version/OS. */
+void handle_last(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
+    /* XEP-0012 — Last Activity: returns seconds=0 (always active). */
+void handle_ping(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza);
+    /* XEP-0199 — Ping: returns empty IQ result. */
+
 void xmpp_log(const char *direction, const char *data, int len);
 void send_raw(xmpp_client_ctx_t *ctx, const char *data);
+
+int xmpp_tls_server_init(void);
+    /* Generate ECDSA P-256 key + self-signed cert; configure server SSL ctx.
+     * Called once from xmpp_init_server() before accepting connections. */
+
+int xmpp_tls_client_init(xmpp_client_ctx_t *ctx);
+    /* Initialise per-client TLS session after <starttls/> is received.
+     * Returns 0 on success, non-zero on failure (server responds
+     * with <failure xmlns='urn:ietf:params:xml:ns:xmpp-tls'/> on error). */
+
+void xmpp_tls_client_free(xmpp_client_ctx_t *ctx);
+    /* Release mbedTLS resources for a client context.
+     * Safe to call on a context where TLS was never initialised. */
+
+void xmpp_tls_handshake_step(xmpp_client_ctx_t *ctx, const uint8_t *data, int len);
+    /* Feed raw TLS bytes and drive the handshake state machine.
+     * Called from xmpp_recv_callback() while ctx->state == STATE_STARTTLS.
+     * On completion sets tls_established=1 and returns state to STATE_CONNECTED;
+     * on failure closes the TCP connection. */
+
+void xmpp_tls_decrypt(xmpp_client_ctx_t *ctx, const uint8_t *data, int len);
+    /* Feed raw encrypted bytes and decrypt into ctx->rx_buffer.
+     * Called from xmpp_recv_callback() when ctx->tls_established == 1.
+     * The decrypted plaintext is appended to rx_buffer for normal parsing. */
 
 /* xmpp_server.c — TCP network layer */
 err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err);

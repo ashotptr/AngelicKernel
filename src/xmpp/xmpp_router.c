@@ -115,8 +115,11 @@ static struct route_entry router[] = {
     { "http://jabber.org/protocol/muc#owner", handle_muc_owner, STATE_SESSION },
     { "jabber:iq:private", handle_private_storage, STATE_SESSION },
     { "http://jabber.org/protocol/muc#admin", handle_muc_admin, STATE_SESSION },
-    { "urn:xmpp:blocking", handle_general_success, STATE_SESSION },
+    { "urn:xmpp:blocking", handle_blocklist, STATE_SESSION },
     { "vcard-temp", handle_general_success, STATE_SESSION },
+    { "jabber:iq:version", handle_version, STATE_SESSION },
+    { "jabber:iq:last", handle_last, STATE_SESSION },
+    { "urn:ietf:params:xml:ns:xmpp-ping", handle_ping, STATE_SESSION },
     { NULL, NULL, 0 }
 };
 

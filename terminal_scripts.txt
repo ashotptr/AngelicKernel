@@ -20,3 +20,6 @@ gdb -ex "target remote localhost:1234" -ex "symbol-file unikernel.debug"
 
 6) repo into .txt file
 npx repomix --remote 'https://github.com/ashotptr/AngelicKernel' --style plain
+
+7) one time mbedtls installation script
+make mbedtls-fetch

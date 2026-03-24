@@ -290,9 +290,43 @@ static int b64decode(const char *src, unsigned char *dst, int dst_len) {
 void send_raw(xmpp_client_ctx_t *ctx, const char *data) {
     xmpp_log("SEND", data, strlen(data));
 
-    tcp_write(ctx->pcb, data, strlen(data), TCP_WRITE_FLAG_COPY);
+    if (ctx->tls_established) {
+        /*   RFC 6120 §5 — STARTTLS
+         *   https://datatracker.ietf.org/doc/html/rfc6120#section-5 */
+        size_t total = strlen(data);
+        const unsigned char *p = (const unsigned char *)data;
 
-    tcp_output(ctx->pcb);
+        while (total > 0) {
+            int written = mbedtls_ssl_write(&ctx->tls_ssl, p, total);
+
+            if (written == MBEDTLS_ERR_SSL_WANT_WRITE || written == MBEDTLS_ERR_SSL_WANT_READ) {
+                if (ctx->pcb) {
+                    tcp_output(ctx->pcb);
+                }
+
+                written = mbedtls_ssl_write(&ctx->tls_ssl, p, total);
+                
+                if (written <= 0) {
+                    break;
+                }
+            }
+            else if (written <= 0) {
+                break;
+            }
+
+            p += written;
+            total -= (size_t)written;
+        }
+
+        if (ctx->pcb) {
+            tcp_output(ctx->pcb);
+        }
+    }
+    else {
+        tcp_write(ctx->pcb, data, strlen(data), TCP_WRITE_FLAG_COPY);
+
+        tcp_output(ctx->pcb);
+    }
 }
 
 
@@ -1356,10 +1390,107 @@ void handle_muc_admin(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
 
 /* ------------------------------------------------------------------
+ * handle_blocklist
+ *
+ * XEP-0191 §2.3 — Fetching the Blocklist (IQ-get)
+ *   Client sends:  <iq type='get'><blocklist xmlns='urn:xmpp:blocking'/></iq>
+ *   Server MUST return a result containing an empty <blocklist/> child when
+ *   no contacts are blocked.
+ *   https://xmpp.org/extensions/xep-0191.html#fetch
+ *
+ * IQ-set (block/unblock) falls through to handle_general_success so
+ * commands are acknowledged without being stored.
+ * ------------------------------------------------------------------ */
+void handle_blocklist(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
+    char response[256];
+
+    if (stanza->type == XMPP_IQ_GET) {
+        snprintf(response, sizeof(response),
+            "<iq type='result' id='%s' to='%s'>"
+              "<blocklist xmlns='urn:xmpp:blocking'/>"
+            "</iq>",
+            stanza->id, ctx->full_jid);
+    }
+    else {
+        snprintf(response, sizeof(response),
+            "<iq type='result' id='%s' to='%s'/>",
+            stanza->id, ctx->full_jid);
+    }
+
+    send_raw(ctx, response);
+}
+
+
+/* ------------------------------------------------------------------
+ * handle_version
+ *
+ * XEP-0092 — Software Version (IQ-get)
+ *   Client sends:  <iq type='get'><query xmlns='jabber:iq:version'/></iq>
+ *   Server returns its name, version, and optionally OS.
+ *   https://xmpp.org/extensions/xep-0092.html
+ * ------------------------------------------------------------------ */
+void handle_version(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
+    char response[512];
+
+    snprintf(response, sizeof(response),
+        "<iq type='result' id='%s' from='angelic.local' to='%s'>"
+          "<query xmlns='jabber:iq:version'>"
+            "<name>AngelicKernel XMPP</name>"
+            "<version>1.0</version>"
+            "<os>Bare Metal UEFI</os>"
+          "</query>"
+        "</iq>",
+        stanza->id, ctx->full_jid);
+
+    send_raw(ctx, response);
+}
+
+
+/* ------------------------------------------------------------------
+ * handle_last
+ *
+ * XEP-0012 — Last Activity (IQ-get)
+ *   Client sends:  <iq type='get' to='server'><query xmlns='jabber:iq:last'/></iq>
+ *   Server returns seconds since last activity; 0 = always active.
+ *   https://xmpp.org/extensions/xep-0012.html
+ * ------------------------------------------------------------------ */
+void handle_last(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
+    char response[256];
+
+    snprintf(response, sizeof(response),
+        "<iq type='result' id='%s' from='angelic.local' to='%s'>"
+          "<query xmlns='jabber:iq:last' seconds='0'/>"
+        "</iq>",
+        stanza->id, ctx->full_jid);
+
+    send_raw(ctx, response);
+}
+
+
+/* ------------------------------------------------------------------
+ * handle_ping
+ *
+ * XEP-0199 — XMPP Ping (IQ-get)
+ *   Client or server sends:  <iq type='get'><ping xmlns='urn:ietf:params:xml:ns:xmpp-ping'/></iq>
+ *   Receiver MUST respond with an empty IQ result.
+ *   https://xmpp.org/extensions/xep-0199.html
+ * ------------------------------------------------------------------ */
+void handle_ping(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
+    char response[256];
+
+    snprintf(response, sizeof(response),
+        "<iq type='result' id='%s' to='%s'/>",
+        stanza->id, ctx->full_jid);
+
+    send_raw(ctx, response);
+}
+
+
+/* ------------------------------------------------------------------
  * handle_general_success
  *
  * Returns an empty IQ result for accepted-but-not-stored namespaces
- * (urn:xmpp:blocking, vcard-temp, unrecognised pubsub, etc.).
+ * (vcard-temp, unrecognised pubsub, etc.).
  *
  * RFC 6120 §8.2.3 — every IQ get/set MUST be answered with a result
  *   or an error; an empty result signals "acknowledged."
@@ -1502,7 +1633,15 @@ void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
              * resource-constraint are both appropriate; we close silently
              * here for simplicity on this embedded server).
              *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.4 */
+            /* Free TLS resources BEFORE tcp_close() + memset().
+             * mbedtls_ssl_free() returns pool allocations to the static
+             * pool; calling it after memset() would corrupt the pool
+             * by operating on zeroed mbedtls_ssl_context fields.
+             * Safe to call on a slot where TLS was never initialised. */
+            xmpp_tls_client_free(&client_registry[i]);
+            
             tcp_close(client_registry[i].pcb);   /* Bug 7 fix: close before zeroing */
+            
             memset(&client_registry[i], 0, sizeof(xmpp_client_ctx_t));
         }
     }
@@ -2210,11 +2349,7 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
               "<invalid-mechanism/>"
             "</failure>";
 
-        xmpp_log("SEND", inv_mech, strlen(inv_mech));
-
-        tcp_write(ctx->pcb, inv_mech, strlen(inv_mech), TCP_WRITE_FLAG_COPY);
-
-        tcp_output(ctx->pcb);
+        send_raw(ctx, inv_mech);
 
         return; /* state unchanged; client may retry with a valid mechanism */
     }
@@ -2235,11 +2370,7 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
               "<incorrect-encoding/>"
             "</failure>";
 
-        xmpp_log("SEND", bad_enc, strlen(bad_enc));
-
-        tcp_write(ctx->pcb, bad_enc, strlen(bad_enc), TCP_WRITE_FLAG_COPY);
-
-        tcp_output(ctx->pcb);
+        send_raw(ctx, bad_enc);
 
         return;
     }
@@ -2343,11 +2474,7 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                   "<not-authorized/>"
                 "</failure>";
 
-            xmpp_log("SEND", not_auth, strlen(not_auth));
-
-            tcp_write(ctx->pcb, not_auth, strlen(not_auth), TCP_WRITE_FLAG_COPY);
-
-            tcp_output(ctx->pcb);
+            send_raw(ctx, not_auth);
 
             return;
         }
@@ -2357,11 +2484,7 @@ void handle_sasl(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     /* RFC 6120 §6.4.6 — SASL success */
     const char *resp = "<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
 
-    xmpp_log("SEND", resp, strlen(resp));
-
-    tcp_write(ctx->pcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
-
-    tcp_output(ctx->pcb);
+    send_raw(ctx, resp);
 
     /* RFC 6120 §6.4.6 — server resets stream state; client will
      * re-open the stream and xmpp_recv_callback will call

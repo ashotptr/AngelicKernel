@@ -2,8 +2,111 @@ CC = gcc
 NASM = nasm
 
 # maybe add but are for c++: -fno-exceptions -fno-rtti, also reviwew fno-stack-protector, -mcmodel=large
+# ---------------------------------------------------------------------------
+# mbedTLS source tree.
+# Clone once with:  make mbedtls-fetch
+# Then pin to 3.6.x LTS: cd mbedtls && git checkout v3.6.4 && cd ..
+# ---------------------------------------------------------------------------
+MBEDTLS_DIR ?= ./mbedtls
+
+# ---------------------------------------------------------------------------
+# mbedTLS object files
+#
+# WHY THE CONFIG FILE IS NAMED angelic_mbedtls_config.h (not mbedtls_config.h):
+#
+#   mbedTLS's build_info.h is located at mbedtls/include/mbedtls/build_info.h.
+#   When it does:
+#       #include MBEDTLS_CONFIG_FILE   ->   #include "mbedtls_config.h"
+#   GCC searches the DIRECTORY OF THE INCLUDING FILE first, which is
+#   mbedtls/include/mbedtls/.  The default config is at
+#   mbedtls/include/mbedtls/mbedtls_config.h -- same directory, same filename.
+#   GCC finds the DEFAULT config (everything enabled) instead of ours.
+#   This causes hundreds of linker errors: DES, Camellia, RSA, PSA, debug,
+#   DHM, etc. are all enabled but their source files were not compiled.
+#
+#   Renaming our config to angelic_mbedtls_config.h means there is no file
+#   by that name in mbedtls/include/mbedtls/, so GCC falls through to -I.
+#   (project root) and finds our file.  All those errors disappear.
+#
+# Modules enabled in angelic_mbedtls_config.h and compiled here:
+#   AES-GCM, ECDHE, ECDSA, SHA-256/384, X.509 write, CTR-DRBG,
+#   TLS 1.2 server, memory buffer allocator, error strings.
+#
+# Explicitly absent (disabled by config and not compiled):
+#   MBEDTLS_DEBUG_C, MBEDTLS_NET_C, MBEDTLS_TIMING_C, MBEDTLS_SELF_TEST,
+#   MBEDTLS_SSL_CACHE_C, MBEDTLS_SSL_SESSION_TICKETS, MBEDTLS_SSL_CLI_C,
+#   MBEDTLS_SSL_PROTO_TLS1_3, MBEDTLS_RSA_C, MBEDTLS_DHM_C,
+#   MBEDTLS_DES_C, MBEDTLS_CAMELLIA_C, MBEDTLS_ARIA_C, MBEDTLS_CHACHA20_C.
+#
+# WHY pk_wrap.c IS IN THIS LIST:
+#
+#   pk.c calls mbedtls_pk_info_from_type() which references three const
+#   mbedtls_pk_info_t structures:
+#       mbedtls_eckey_info, mbedtls_eckeydh_info, mbedtls_ecdsa_info
+#   These are defined in pk_wrap.c under #if defined(MBEDTLS_PK_HAVE_ECC_KEYS),
+#   NOT in pk_ecc.c as one might expect.  Omitting pk_wrap.c produces exactly
+#   three "undefined reference" errors for those three symbols at link time.
+#   Verified by: nm pk_wrap.o confirms all three as defined (D) symbols.
+# ---------------------------------------------------------------------------
+MBEDTLS_SRCS = \
+	$(MBEDTLS_DIR)/library/aes.c              \
+	$(MBEDTLS_DIR)/library/asn1parse.c        \
+	$(MBEDTLS_DIR)/library/asn1write.c        \
+	$(MBEDTLS_DIR)/library/base64.c           \
+	$(MBEDTLS_DIR)/library/bignum.c           \
+	$(MBEDTLS_DIR)/library/bignum_core.c      \
+	$(MBEDTLS_DIR)/library/bignum_mod.c       \
+	$(MBEDTLS_DIR)/library/bignum_mod_raw.c   \
+	$(MBEDTLS_DIR)/library/cipher.c           \
+	$(MBEDTLS_DIR)/library/cipher_wrap.c      \
+	$(MBEDTLS_DIR)/library/constant_time.c    \
+	$(MBEDTLS_DIR)/library/ctr_drbg.c         \
+	$(MBEDTLS_DIR)/library/ecp.c              \
+	$(MBEDTLS_DIR)/library/ecp_curves.c       \
+	$(MBEDTLS_DIR)/library/ecdh.c             \
+	$(MBEDTLS_DIR)/library/ecdsa.c            \
+	$(MBEDTLS_DIR)/library/error.c            \
+	$(MBEDTLS_DIR)/library/gcm.c              \
+	$(MBEDTLS_DIR)/library/md.c               \
+	$(MBEDTLS_DIR)/library/md5.c              \
+	$(MBEDTLS_DIR)/library/memory_buffer_alloc.c \
+	$(MBEDTLS_DIR)/library/oid.c              \
+	$(MBEDTLS_DIR)/library/pem.c              \
+	$(MBEDTLS_DIR)/library/pk.c               \
+	$(MBEDTLS_DIR)/library/pk_ecc.c           \
+	$(MBEDTLS_DIR)/library/pk_wrap.c          \
+	$(MBEDTLS_DIR)/library/pkparse.c          \
+	$(MBEDTLS_DIR)/library/pkwrite.c          \
+	$(MBEDTLS_DIR)/library/platform.c         \
+	$(MBEDTLS_DIR)/library/platform_util.c    \
+	$(MBEDTLS_DIR)/library/sha1.c             \
+	$(MBEDTLS_DIR)/library/sha256.c           \
+	$(MBEDTLS_DIR)/library/sha512.c           \
+	$(MBEDTLS_DIR)/library/ssl_ciphersuites.c             \
+	$(MBEDTLS_DIR)/library/ssl_debug_helpers_generated.c \
+	$(MBEDTLS_DIR)/library/ssl_msg.c                     \
+	$(MBEDTLS_DIR)/library/ssl_tls.c                     \
+	$(MBEDTLS_DIR)/library/ssl_tls12_server.c            \
+	$(MBEDTLS_DIR)/library/x509.c             \
+	$(MBEDTLS_DIR)/library/x509_crt.c         \
+	$(MBEDTLS_DIR)/library/x509_create.c      \
+	$(MBEDTLS_DIR)/library/x509write.c        \
+	$(MBEDTLS_DIR)/library/x509write_crt.c    \
+	$(MBEDTLS_DIR)/library/x509write_csr.c
+
+MBEDTLS_OBJS = $(MBEDTLS_SRCS:.c=.o)
+LIBGCC := $(shell gcc --print-libgcc-file-name)
+
+# ---------------------------------------------------------------------------
+# Compiler flags
+#
+# -DMBEDTLS_CONFIG_FILE: point every mbedTLS TU at our renamed config.
+#   Must use the unique name -- see the explanation in MBEDTLS_SRCS above.
+# ---------------------------------------------------------------------------
 CFLAGS = -I. -Iinclude -Isrc -Isrc/lwip/src/include \
 	-I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol \
+	-I$(MBEDTLS_DIR)/include \
+	-DMBEDTLS_CONFIG_FILE='"angelic_mbedtls_config.h"' \
 	-fno-stack-protector -ffreestanding -fpic -fshort-wchar -mno-red-zone \
 	-mno-mmx -mno-sse -mno-avx \
 	-Wall -Wextra -DEFI_FUNCTION_WRAPPER -DGNU_EFI_USE_MS_ABI -g \
@@ -64,9 +167,12 @@ OBJS = src/kernel.o \
 	src/xmpp/xmpp_store.o \
 	src/xmpp/xmpp_persist.o \
 	src/xmpp/xmpp_log.o \
-	src/xmpp/xmpp_memory.o\
-    src/xmpp/yxml.o
-	
+	src/xmpp/xmpp_memory.o \
+	src/xmpp/xmpp_tls.o \
+    src/xmpp/mbedtls_port.o \
+	src/xmpp/yxml.o \
+	$(MBEDTLS_OBJS)
+
 all: unikernel.efi
 
 # to get PE32+
@@ -82,7 +188,7 @@ unikernel.efi: unikernel.so
 # -z muldefs
 unikernel.so: $(OBJS)
 	ld -shared -Bsymbolic -nostdlib -znocombreloc -L/usr/lib --no-undefined -L/usr/lib64 -T linker.ld \
-		/usr/lib/crt0-efi-x86_64.o $(OBJS) -o $@ -lefi -lgnuefi
+		/usr/lib/crt0-efi-x86_64.o $(OBJS) -o $@ -lefi -lgnuefi $(LIBGCC)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -92,3 +198,10 @@ unikernel.so: $(OBJS)
 
 clean:
 	rm -f $(OBJS) *.so *.efi *.debug
+
+# Fetch and pin mbedTLS to 3.6.4 LTS (run once)
+mbedtls-fetch:
+	git clone --recurse-submodules https://github.com/Mbed-TLS/mbedtls.git $(MBEDTLS_DIR)
+	cd $(MBEDTLS_DIR) && git checkout v3.6.4
+
+.PHONY: all clean mbedtls-fetch
