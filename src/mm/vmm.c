@@ -17,11 +17,12 @@ uint64_t virt_to_phys(void* addr) {
 
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t* pml4 = kernel_pml4;
-    
+
     uint64_t idx = PML4_INDEX(virt);
 
     if (!(pml4[idx] & PTE_PRESENT)) {
-        pml4[idx] = (uint64_t)pmm_alloc_page() | PTE_PRESENT | PTE_WRITE;
+        // Add PTE_USER so this subtree can contain user-mode pages
+        pml4[idx] = (uint64_t)pmm_alloc_page() | PTE_PRESENT | PTE_WRITE | PTE_USER;
     }
 
     uint64_t* pdp = (uint64_t*)(pml4[idx] & ~0xFFFull);
@@ -29,7 +30,7 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     idx = PDP_INDEX(virt);
 
     if (!(pdp[idx] & PTE_PRESENT)) {
-        pdp[idx] = (uint64_t)pmm_alloc_page() | PTE_PRESENT | PTE_WRITE;
+        pdp[idx] = (uint64_t)pmm_alloc_page() | PTE_PRESENT | PTE_WRITE | PTE_USER;
     }
 
     uint64_t* pd = (uint64_t*)(pdp[idx] & ~0xFFFull);
@@ -37,7 +38,7 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     idx = PD_INDEX(virt);
 
     if (!(pd[idx] & PTE_PRESENT)) {
-        pd[idx] = (uint64_t)pmm_alloc_page() | PTE_PRESENT | PTE_WRITE;
+        pd[idx] = (uint64_t)pmm_alloc_page() | PTE_PRESENT | PTE_WRITE | PTE_USER;
     }
 
     uint64_t* pt = (uint64_t*)(pd[idx] & ~0xFFFull);
@@ -54,7 +55,7 @@ void vmm_init() {
     uint64_t limit = 0x100000000ULL;
 
     for (uint64_t addr = 0; addr < limit; addr += PAGE_SIZE) {
-        vmm_map_page(addr, addr, PTE_PRESENT | PTE_WRITE);
+        vmm_map_page(addr, addr, PTE_PRESENT | PTE_WRITE | PTE_USER);
     }
 
     serial_print("[VMM] Tables built. Switching CR3...\n");
@@ -87,14 +88,17 @@ extern uint64_t __secure_driver_data_end;
 void vmm_set_pkey(uint64_t virt, int pkey) {
     uint64_t* pml4 = kernel_pml4;
     uint64_t* pdp = (uint64_t*)(pml4[PML4_INDEX(virt)] & ~0xFFFull);
-    uint64_t* pd = (uint64_t*)(pdp [PDP_INDEX(virt)] & ~0xFFFull);
-    uint64_t* pt = (uint64_t*)(pd [PD_INDEX(virt)] & ~0xFFFull);
+    uint64_t* pd  = (uint64_t*)(pdp [PDP_INDEX(virt)]  & ~0xFFFull);
+    uint64_t* pt  = (uint64_t*)(pd  [PD_INDEX(virt)]   & ~0xFFFull);
 
     uint64_t* pte = &pt[PT_INDEX(virt)];
 
     // set bits 59-62
-    *pte &= ~(0xFULL << 59);          /* clear old key bits [62:59] */
-    *pte |= PTE_PKEY(pkey);          /* set new key               */
+    *pte &= ~(0xFULL << 59);   // clear old key bits [62:59]
+    *pte |= PTE_PKEY(pkey);   // set new key
+    *pte |= PTE_USER;         // makes this a user-mode page;
+                               // PKRU is now enforced for all
+                               // accesses (supervisor and user)
 
     // invalidate TLB for this address
     __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");

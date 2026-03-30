@@ -215,6 +215,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     //     while(1) __asm__ volatile("hlt");
     // }
     
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    if (cr4 & (1UL << 20)) {
+        serial_print("[MPK] WARNING: SMEP active — code pages cannot be user-mode\n");
+    }
+    else {
+        serial_print("[MPK] INFO: SMEP is disabled. Safe to mark code as user-mode.\n");
+    }
+
     mpk_enable();           /* CR4.PKE = 1 */
     
     init_idt();

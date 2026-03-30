@@ -219,10 +219,16 @@ static void violation_selftest(void) {
      * optimising it away. The output `=r` ensures the read result
      * is consumed (otherwise GCC may elide it as dead code).
      */
-    uint8_t probe = 0;
+   uint8_t probe = 0;
+
+    /*
+    * `mov al, [rax]` (Intel syntax) = `mov (%rax), %al` (AT&T) = 0x8A 0x00
+    * Exactly 2 bytes.  Force AL/RAX to prevent GCC from choosing a wider
+    * movzbl encoding which would be 3 bytes and break the RIP skip in idt.c.
+    */
     __asm__ volatile(
-        "mov (%1), %0\n"
-        : "=r"(probe)
+        "mov (%1), %b0\n"       /* %b0 = byte-sized variant of the output reg */
+        : "=a"(probe)            /* force output to AL/EAX/RAX */
         : "r"(target)
         : "memory"
     );
