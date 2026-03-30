@@ -1,5 +1,9 @@
 1) installing tools
-sudo apt install build-essential qemu-system-x86 nasm gnu-efi ovmf gdb qemu-utils
+sudo apt install build-essential qemu-system-x86 nasm gnu-efi ovmf gdb qemu-utils python3-venv python3-full maven
+python3 -m venv .venv
+source .venv/bin/activate
+pip install colorama pyopenssl
+pip install slixmpp colorama
 
 2) installing lwip
 1. https://savannah.nongnu.org/projects/lwip/

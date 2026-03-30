@@ -1,0 +1,49 @@
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd" >
+
+<suite name="Tigase Message Archiving Component" verbose="1">
+    <test name="XEP-0313 - Message Archive Management">
+        <classes>
+            <class name="tigase.tests.archive.TestMessageArchiveManagement"/>
+        </classes>
+    </test>
+    <test name="XEP-0313 - Message Archive Management: 2">
+        <classes>
+            <class name="tigase.tests.archive.TestMessageArchiveManagement2"/>
+        </classes>
+    </test>
+    <test name="XEP-0313 - Message Archive Management: 2 - extended">
+        <classes>
+            <class name="tigase.tests.archive.TestMessageArchiveManagement2Extended"/>
+        </classes>
+    </test>
+    <test name="XEP-0136 - Message Archiving - basic tests">
+        <classes>
+            <class name="tigase.tests.archive.TestMessageArchivingBasic"/>
+        </classes>
+    </test>
+    <test name="XEP-0136 - Message Archive - extended tests">
+        <classes>
+            <class name="tigase.tests.archive.TestMessageArchive"/>
+        </classes>
+    </test>
+    <test name="XEP-0136 - Message Archiving - RSM">
+        <classes>
+            <class name="tigase.tests.archive.TestMessageArchivingRSM"/>
+        </classes>
+    </test>
+    <test name="XEP-0136 - Message Archiving - Tags and Contains">
+        <classes>
+            <class name="tigase.tests.archive.TestMessageArchivingTagsAndContains"/>
+        </classes>
+    </test>
+    <test name="XEP-0136 - Message Archiving - MUC">
+        <classes>
+            <class name="tigase.tests.archive.TestMessageArchivingMUC"/>
+        </classes>
+    </test>
+    <test name="Archiving messages while recipient is oflfine">
+        <classes>
+            <class name="tigase.tests.archive.TestMessageArchivingOffline"/>
+        </classes>
+    </test>
+</suite>

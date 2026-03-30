@@ -1,0 +1,34 @@
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd" >
+
+<suite name="Tigase MUC Component Tests" verbose="1">
+    <test name="Test MAM support - #4732">
+        <classes>
+            <class name="tigase.tests.muc.TestMessageArchiveManagement"/>
+        </classes>
+    </test>
+    <test name="Test Message Moderation support">
+        <classes>
+            <class name="tigase.tests.muc.TestModeration"/>
+        </classes>
+    </test>
+    <test name="Test limit of users per room - #3179">
+        <classes>
+            <class name="tigase.tests.muc.TestLimitOfUsersPerRoom"/>
+        </classes>
+    </test>
+    <test name="Test handling of timestamps - #7443">
+        <classes>
+            <class name="tigase.tests.muc.TestMucHistoryTimestamps"/>
+        </classes>
+    </test>
+    <test name="Modify list of the occupants to include room members - #8660">
+        <classes>
+            <class name="tigase.tests.muc.TestOfflineUsers"/>
+        </classes>
+    </test>
+    <test name="Test MUC VCard support">
+        <classes>
+            <class name="tigase.tests.muc.TestVCard"></class>
+        </classes>
+    </test>
+</suite>

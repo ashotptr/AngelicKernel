@@ -1,0 +1,113 @@
+admins = [ 'admin@test-domain.com' ]
+'config-type' = '--gen-config-def'
+'default-virtual-host' = 'test-domain.com'
+'priority-queue-implementation' = 'tigase.util.workqueue.PriorityQueueStrict'
+'sm-threads-pool' = 'custom:200'
+trusted = [ 'admin@test-domain.com', 'http@{clusterNode}', 'user-status-endpoint@http.{clusterNode}' ]
+'vhost-disable-dns-check' = true
+debug = ['server', 'muc', 'component', 'pubsub', 'xmpp', 'extras', 'auth', 'vhosts']
+logging () {
+    'packet-debug-full' = true
+    handlers {
+        'java.util.logging.FileHandler' {
+            limit = 250000000
+        }
+    }
+}
+dataSource {
+    'pool-size' = 5
+    default () {
+        uri = env('JDBC_URI', 'jdbc://server/database')
+    }
+    'useCallableMysqlWorkaround' = 'true'
+}
+'account-email-password-resetter' () {}
+authRepository {
+    default () {
+       credentialDecoders () {
+            'SCRAM-SHA-512' () {}
+        }
+    }
+}
+c2s {
+    seeOtherHost {}
+    'urn:xmpp:sm:3' () {}
+}
+'disco-extensions' = {
+    'abuse-addresses' = [ 'mailto:abuse@test-domain.com', 'xmpp:abuse@test-domain.com' ]
+}
+ext () {}
+'ext-man' () {}
+http () {
+    rest () {
+        'password-reset-form' {
+            captchaRequired = false
+        }
+    }
+}
+httpServer {
+    connections {
+        8080 (active: false) {}
+        8088 () {}
+    }
+}
+mailer (class: tigase.extras.mailer.Mailer) {
+    'mailer-from-address' = env('MAIL_SENDER_ADDRESS', 'sender@localhost')
+    'mailer-smtp-host' = env('MAIL_SMTP_HOST', 'localhost')
+    'mailer-smtp-password' = env('MAIL_SENDER_PASS', 'password')
+    'mailer-smtp-port' = env('MAIL_SENDER_PORT', '3025')
+    'mailer-smtp-username' = env('MAIL_SENDER_ADDRESS', 'sender')
+}
+'message-archive' () {
+    'tags-support' = true
+}
+monitor () {
+    'monitor-mailer' (class: tigase.server.ext.monitor.MonitorMailer) {
+        'from-address' = env('MAIL_SENDER_ADDRESS', 'sender@localhost')
+        'to-addresses' = env('MAIL_RECEIVER_ADDRESS', 'receiver@localhost')
+    }
+}
+msgRepository {
+    'user-store-limit-enable' = true
+}
+muc () {
+    'hidden-room-creation-acl' = 'ALL'
+    'public-room-creation-acl' = 'ALL'
+}
+pubsub () {
+    'persistent-pep' = true
+    'mam-enabled' = true
+    'mam-enabled-for-generic-service' = true
+}
+'sess-man' {
+    'audit-log' () {}
+    'auth-timeout' = 20
+    'jabber:iq:register' () {}
+    'message-archive' () {
+    }
+    'message-archive-xep-0136' () {}
+    'msg-offline-pubsub-publisher-notifier' () {
+        'msg-pubsub-jid' = 'pubsub.test-domain.com'
+        'msg-pubsub-node' = 'test'
+        'msg-pubsub-publisher' = 'sess-man@test-domain.com'
+    }
+    pep () {}
+    'urn:xmpp:push:0' () {
+        away () {}
+    }
+    'urn:xmpp:mam:1' () {}
+    'urn:xmpp:bind:0' () {}
+    'urn:xmpp:sasl:2' () {}
+}
+'cm-traffic-throttling' = 'xmpp:0:0:disc,bin:0:0:disc'
+upload () {
+    logic () {
+        'server-name' = 'localhost'
+    }
+}
+'audit-log' () {
+    searchableRepository () {}
+}
+wg(class: tigase.workgroupqueues.WorkgroupQueuesComponent) {
+    'default-muc-domain' = 'muc.test-domain.com'
+}

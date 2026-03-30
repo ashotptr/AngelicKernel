@@ -11,6 +11,7 @@ src/net/*.o
 *.fd
 *.log
 data.img
+.venv
 
 internal-fs/EFI/BOOT/BOOTX64.EFI
 internal-fs/NvVars

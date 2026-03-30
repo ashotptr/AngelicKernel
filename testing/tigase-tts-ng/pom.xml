@@ -1,0 +1,345 @@
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+
+    <parent>
+        <groupId>tigase</groupId>
+        <artifactId>tigase-projects-parent</artifactId>
+        <version>1.0.5-SNAPSHOT</version>
+        <relativePath />
+    </parent>
+
+    <properties>
+        <license.inlineHeader>${inlineHeader_agpl3}</license.inlineHeader>
+
+        <guide_name>Tigase_TTS-NG</guide_name>
+        <documentation_phases.all_converters>generate-resources</documentation_phases.all_converters>
+        <kotlin.version>1.7.20</kotlin.version>
+    </properties>
+
+    <modelVersion>4.0.0</modelVersion>
+    <artifactId>tigase-tts-ng</artifactId>
+    <name>Tigase TTS-NG</name>
+    <version>1.1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <description>Test suits for Tigase XMPP Server</description>
+
+    <issueManagement>
+        <system>Github</system>
+        <url>https://github.com/tigase/tigase-tts-ng</url>
+    </issueManagement>
+    <scm>
+        <connection>scm:git:${scm_repo_base}/tigase/tigase-tts-ng.git</connection>
+        <developerConnection>scm:git:${scm_repo_base}/tigase/tigase-tts-ng.git</developerConnection>
+        <url>${scm_repo_base}/tigase/tigase-tts-ng</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <profiles>
+        <profile>
+            <id>test-auditlog</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <suiteXmlFiles combine.children="append">
+                                <suiteXmlFile>src/test/resources/testng_auditlog.xml</suiteXmlFile>
+                            </suiteXmlFiles>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>test-workgroup</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <suiteXmlFiles combine.children="append">
+                                <suiteXmlFile>src/test/resources/testng_workgroup.xml</suiteXmlFile>
+                            </suiteXmlFiles>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <version>${kotlin.version}</version>
+                <executions>
+                    <execution>
+                        <id>compile</id>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                        <configuration>
+                            <sourceDirs>
+                                <sourceDir>${project.basedir}/src/main/kotlin</sourceDir>
+                                <sourceDir>${project.basedir}/src/main/java</sourceDir>
+                            </sourceDirs>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>test-compile</id>
+                        <goals> <goal>test-compile</goal> </goals>
+                        <configuration>
+                            <sourceDirs>
+                                <sourceDir>${project.basedir}/src/test/kotlin</sourceDir>
+                                <sourceDir>${project.basedir}/src/test/java</sourceDir>
+                            </sourceDirs>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <!-- Replacing default-compile as it is treated specially by maven -->
+                    <execution>
+                        <id>default-compile</id>
+                        <phase>none</phase>
+                    </execution>
+                    <!-- Replacing default-testCompile as it is treated specially by maven -->
+                    <execution>
+                        <id>default-testCompile</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
+                        <id>java-compile</id>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>java-test-compile</id>
+                        <phase>test-compile</phase>
+                        <goals>
+                            <goal>testCompile</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>1.6.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>copy-dependencies</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>copy-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>libs</outputDirectory>
+                            <stripVersion>true</stripVersion>
+                            <excludeTransitive>false</excludeTransitive>
+                            <overWriteIfNewer>true</overWriteIfNewer>
+                            <overWriteReleases>true&gt;</overWriteReleases>
+                            <overWriteSnapshots>true</overWriteSnapshots>
+                            <includeArtifactIds>tigase-utils</includeArtifactIds>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration combine.children="override" combine.self="override">
+                    <!--<redirectTestOutputToFile>true</redirectTestOutputToFile>-->
+                    <argLine>-Xmx4G</argLine>
+                    <!--                    <forkMode>once</forkMode>-->
+                    <!--                    <reuseForks>false</reuseForks>-->
+                    <argLine>-Dfile.encoding=UTF-8</argLine>
+                    <!--                    <useSystemClassLoader>false</useSystemClassLoader>-->
+                    <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
+                    <printSummary>true</printSummary>
+                    <reportFormat>plain</reportFormat>
+                    <trimStackTrace>false</trimStackTrace>
+                    <failIfNoTests>false</failIfNoTests>
+                    <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+                    <rerunFailingTestsCount>5</rerunFailingTestsCount>
+                    <systemPropertyVariables>
+                        <org.uncommons.reportng.escape-output>true</org.uncommons.reportng.escape-output>
+                        <properties_file>${properties.file}</properties_file>
+                    </systemPropertyVariables>
+                    <testFailureIgnore>false</testFailureIgnore>
+
+                    <suiteXmlFiles>
+                        <!--<suiteXmlFile>src/test/resources/testng_features.xml</suiteXmlFile>-->
+                        <suiteXmlFile>src/test/resources/testng_server.xml</suiteXmlFile>
+                        <suiteXmlFile>src/test/resources/testng_muc.xml</suiteXmlFile>
+                        <suiteXmlFile>src/test/resources/testng_pubsub.xml</suiteXmlFile>
+                        <suiteXmlFile>src/test/resources/testng_http_api.xml</suiteXmlFile>
+                        <suiteXmlFile>src/test/resources/testng_archive.xml</suiteXmlFile>
+                        <suiteXmlFile>src/test/resources/testng_external.xml</suiteXmlFile>
+                        <suiteXmlFile>src/test/resources/testng_custom.xml</suiteXmlFile>
+                        <suiteXmlFile>src/test/resources/testng_jaxmpp.xml</suiteXmlFile>
+                        <suiteXmlFile>src/test/resources/testng_mix.xml</suiteXmlFile>
+                    </suiteXmlFiles>
+                    <!--<workingDirectory>target/</workingDirectory>-->
+                    <properties>
+                        <property>
+                            <name>listener</name>
+                            <value>tigase.DotTestListener, tigase.CompactXMLReporter</value>
+                        </property>
+                    </properties>
+                </configuration>
+            </plugin>
+
+
+            <plugin>
+                <groupId>com.mycila</groupId>
+                <artifactId>license-maven-plugin</artifactId>
+                <configuration>
+                    <excludes combine.children="append">
+                        <exclude>tmp/**/*</exclude>
+                        <exclude>files/**/*</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <dependencies>
+        <dependency>
+            <groupId>tigase</groupId>
+            <artifactId>jaxmpp-all</artifactId>
+            <version>3.6.1-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>tigase</groupId>
+            <artifactId>tigase-utils</artifactId>
+            <version>4.3.0-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>tigase</groupId>
+            <artifactId>tigase-xmltools</artifactId>
+            <version>4.2.0-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>com.icegreen</groupId>
+            <artifactId>greenmail</artifactId>
+            <version>1.5.10</version>
+        </dependency>
+        <dependency>
+            <groupId>javax.activation</groupId>
+            <artifactId>activation</artifactId>
+            <version>1.1.1</version>
+        </dependency>
+        <dependency>
+            <groupId>com.sun.mail</groupId>
+            <artifactId>javax.mail</artifactId>
+            <version>1.5.3</version>
+        </dependency>
+        <dependency>
+            <groupId>com.sun.mail</groupId>
+            <artifactId>smtp</artifactId>
+            <version>1.5.3</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpclient</artifactId>
+            <version>4.5.13</version>
+        </dependency>
+        <dependency>
+            <groupId>net.sourceforge.htmlunit</groupId>
+            <artifactId>htmlunit</artifactId>
+            <version>2.37.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.testng</groupId>
+            <artifactId>testng</artifactId>
+            <version>7.5</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+            <version>3.12.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>tigase</groupId>
+            <artifactId>tigase-http-api</artifactId>
+            <version>2.3.0-SNAPSHOT</version>
+        </dependency>
+
+
+        <dependency>
+            <groupId>com.google.inject</groupId>
+            <artifactId>guice</artifactId>
+            <version>3.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.testng</groupId>
+            <artifactId>reportng</artifactId>
+            <version>1.2.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.velocity</groupId>
+            <artifactId>velocity</artifactId>
+            <version>1.7</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-stdlib</artifactId>
+            <version>${kotlin.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-test-testng</artifactId>
+            <version>${kotlin.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>tigase.halcyon</groupId>
+            <artifactId>halcyon-core-jvm</artifactId>
+            <version>0.0.25-SNAPSHOT</version>
+        </dependency>
+    </dependencies>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>2.13.1</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <repositories>
+        <repository>
+            <id>tigase</id>
+            <url>https://maven-repo.tigase.org/repository/tigase</url>
+        </repository>
+    </repositories>
+</project>
+
+
