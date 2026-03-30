@@ -9,6 +9,7 @@
 #include "lwip/timeouts.h"
 #include "mm/pmm.h" 
 #include "mm/vmm.h"
+#include "sys/mpk_gate.h"
 
 // address is arbitrary, but safe in QEMU
 // #define GDB_MAGIC_ADDR  0x10000 
@@ -21,6 +22,8 @@ uint64_t global_mmio_base = 0;
 
 extern void mpk_enable();
 extern void vmm_protect_driver();
+extern void mpk_set_pkru(uint32_t pkru_val);
+extern void mpk_diagnostic(void);
 
 void xmpp_init_server();
 
@@ -45,6 +48,19 @@ void serial_print(const char* str) {
     for (int i = 0; str[i] != '\0'; i++) {
         serial_putc(str[i]);
     }
+}
+
+static int cpu_has_pku(void) {
+    uint32_t ecx = 0;
+
+    __asm__ volatile(
+        "cpuid"
+        : "=c"(ecx)
+        : "a"(7), "c"(0)
+        : "ebx", "edx"
+    );
+
+    return (ecx >> 3) & 1;  /* CPUID.(EAX=7,ECX=0):ECX.PKU = bit 3 */
 }
 
 static void enable_sse(void) {
@@ -191,12 +207,21 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     serial_print("\n\n=== ANGELIC KERNEL (BARE METAL) ===\n");
 
     pmm_init(MemoryMap, MapSize, DescriptorSize);
-    vmm_init(); 
+    vmm_init();
 
+    // if (!cpu_has_pku()) {
+    //     serial_print("[FATAL] CPU does not support Intel MPK (PKU). Halting.\n");
+
+    //     while(1) __asm__ volatile("hlt");
+    // }
+    
+    mpk_enable();           /* CR4.PKE = 1 */
+    
     init_idt();
     
-    e1000_init(global_mmio_base, mac);
-
+    //e1000_init(global_mmio_base, mac);
+    mpk_e1000_init(global_mmio_base, mac);
+    
     /* Initialise the storage backend.
      * disk_init() tries AHCI first (PCI scan), then falls back to ATA PIO
      * on the primary IDE channel (0x1F0).  Either way it prints the drive
@@ -233,9 +258,43 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     init_network_stack(global_mmio_base, mac);
     
-    // mpk_enable();           
-    // vmm_protect_driver();   
-    
+    /*
+     * ── MPK Isolation Activation ──────────────────────────────────────
+     *
+     * Order matters:
+     *   (a) mpk_enable()        — set CR4.PKE so WRPKRU/RDPKRU are legal
+     *   (b) vmm_protect_driver() — tag Key 1 onto driver code+data PTEs
+     *   (c) mpk_set_pkru(0x0C)  — activate restriction in the CPU
+     *
+     * Why (c) must come AFTER (b):
+     *   If we set PKRU = 0x0C before the PTEs carry Key 1, the kernel
+     *   tries to read/write pages that have key 0 in their PTEs — those
+     *   are NOT restricted, so PKRU = 0x0C has no effect yet.  Setting
+     *   PKRU before tagging means there is a window where the driver code
+     *   is callable without the trampoline.  The reverse (tag first, then
+     *   restrict) is always safe because tagging with no PKRU restriction
+     *   is a no-op.
+     *
+     * Why (c) must come BEFORE any direct driver calls:
+     *   After mpk_set_pkru(0x0C), any direct call to an e1000 function
+     *   (without the trampoline) will fault.  All call sites in kernel.c
+     *   and lwip_glue.c must have been converted to mpk_e1000_*() before
+     *   this line is reached.
+     *
+     * PKRU value 0x0000000C:
+     *   bits [3:2] = 0b11 → Key 1: AD=1 (Access Disable), WD=1 (Write Disable)
+     *   bits [1:0] = 0b00 → Key 0: AD=0, WD=0  (kernel has full access)
+     *   All other keys default to 0 (accessible).
+     *
+     * Intel SDM Vol. 3A §4.6.2 — Protection Keys
+     * Intel SDM Vol. 2B — WRPKRU, RDPKRU
+     */
+    vmm_protect_driver();   /* PTE bits [62:59] = 1 for all driver pages */
+    mpk_set_pkru(0x0000000C); /* PKRU: Key 1 inaccessible to kernel      */
+
+    serial_print("[MPK] Isolation ACTIVE. Driver domain locked to Key 1.\n");
+    mpk_diagnostic();   // prints verification report to serial
+
     // Enable Interrupts globally
     __asm__ volatile("sti");
 

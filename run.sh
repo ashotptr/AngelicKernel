@@ -57,7 +57,7 @@ echo "Launching AngelicKernel (disk backend: ${DISK_BACKEND})..."
 # ---------------------------------------------------------------------------
 if [ "${DISK_BACKEND}" = "ata" ]; then
     qemu-system-x86_64 \
-        -cpu max \
+        -cpu max,+pku \
         -nographic \
         -machine pc,smm=off,accel=tcg \
         -m 512M \
@@ -81,7 +81,7 @@ if [ "${DISK_BACKEND}" = "ata" ]; then
 # ---------------------------------------------------------------------------
 elif [ "${DISK_BACKEND}" = "ahci" ]; then
     qemu-system-x86_64 \
-        -cpu max \
+        -cpu max,+pku \
         -nographic \
         -machine q35,smm=off,accel=tcg \
         -m 512M \

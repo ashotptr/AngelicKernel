@@ -110,8 +110,8 @@ CFLAGS = -I. -Iinclude -Isrc -Isrc/lwip/src/include \
 	-fno-stack-protector -ffreestanding -fpic -fshort-wchar -mno-red-zone \
 	-mno-mmx -mno-sse -mno-avx \
 	-Wall -Wextra -DEFI_FUNCTION_WRAPPER -DGNU_EFI_USE_MS_ABI -g \
-	-DNO_SYS=1
-
+	-DNO_SYS=1 -DUSE_MPK
+	
 LWIP_CORE = src/lwip/src/core/init.c \
 	src/lwip/src/core/def.c \
 	src/lwip/src/core/dns.c \
@@ -147,6 +147,7 @@ LWIP_SRCS = $(LWIP_CORE) $(LWIP_IPV4) $(LWIP_NETIF)
 # 	$(wildcard src/lwip/src/netif/*.c)
 
 OBJS = src/kernel.o \
+	src/mpk_diagnostic.o \
 	src/drivers/e1000.o \
 	src/drivers/pci.o \
 	src/drivers/ata.o \

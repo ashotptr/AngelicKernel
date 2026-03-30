@@ -120,6 +120,23 @@ void init_idt() {
 }
 
 void interrupt_handler(registers_t* regs) {
+    // ── MPK self-test recovery — MUST be first ──────────────────────
+    // mpk_diagnostic.c sets this flag before intentionally touching
+    // Key-1 memory. If we fault here with that flag set, it means
+    // MPK fired correctly. We skip past the faulting instruction
+    // and return instead of halting.
+    if (regs->int_no == 14) {
+        extern volatile int mpk_test_in_progress;
+        extern volatile int mpk_test_fault_occurred;
+        if (mpk_test_in_progress) {
+            mpk_test_fault_occurred = 1;
+            mpk_test_in_progress = 0;
+            regs->rip += 2;   // skip the 2-byte `mov al, [rax]` instruction
+            return;           // resume after the inline asm block — no crash
+        }
+    }
+    // ────────────────────────────────────────────────────────────────
+
     // Case 1: Hardware Interrupts (IRQs)
     if (regs->int_no >= 32 && regs->int_no < 48) {
         // serial_print("IRQ Received\n");
