@@ -29,6 +29,39 @@
 #define MBEDTLS_CONFIG_H
 
 /* ===========================================================================
+ * FORWARD DECLARATIONS — snprintf / vsnprintf
+ *
+ * In -ffreestanding mode GCC does not include <stdio.h>, so snprintf has no
+ * visible prototype.  mbedTLS maps mbedtls_snprintf → snprintf via the macro
+ * below; without a prototype GCC emits:
+ *
+ *   warning: implicit declaration of function 'snprintf' [-Wimplicit-function-declaration]
+ *
+ * from mbedtls/library/x509_crt.c:1703 (and any other callers).
+ *
+ * Both <stddef.h> (size_t) and <stdarg.h> (va_list) are freestanding-safe
+ * headers mandated by ISO C11 §4 and available in every GCC freestanding
+ * build.  We include them here so the prototypes are complete.
+ *
+ * The actual implementations live in src/net/libc_glue.c.
+ * =========================================================================== */
+#include <stddef.h>
+#include <stdarg.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+__attribute__((format(printf, 3, 4)))
+int snprintf(char *str, size_t size, const char *format, ...);
+
+int vsnprintf(char *str, size_t size, const char *format, va_list args);
+
+#ifdef __cplusplus
+}
+#endif
+
+/* ===========================================================================
  * PLATFORM LAYER
  * =========================================================================== */
 

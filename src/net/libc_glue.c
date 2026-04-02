@@ -342,9 +342,18 @@ int vprintf(const char *format, va_list args) {
                     print_int(va_arg(args, int));
                     break;
                 case 'u':
-                    print_int(va_arg(args, unsigned int));
+                    /* BUG FIX: print_int() takes a signed long; passing
+                     * va_arg(unsigned int) lets the compiler implicitly
+                     * convert it to long, sign-extending values >= 0x80000000
+                     * to negative 64-bit numbers.  Cast through unsigned long
+                     * to prevent that. */
+                    print_int((long)(unsigned long)(unsigned int)va_arg(args, unsigned int));
                     break;
                 case 'x':
+                    /* BUG FIX: %x is a plain hex integer — no "0x" prefix.
+                     * Only %p (pointer) should emit the prefix. */
+                    print_hex(va_arg(args, unsigned long));
+                    break;
                 case 'p':
                     print_str("0x");
                     print_hex(va_arg(args, unsigned long));
@@ -423,12 +432,18 @@ int vsnprintf(char *str, size_t size, const char *format, va_list args) {
                     remaining--;
                 }
             }
-            else if (*format == 'x' || *format == 'p') {
+            else if (*format == 'x') {
+                /* BUG FIX: %x must NOT prepend "0x" — that prefix belongs
+                 * only to %p.  The original combined %x and %p in one branch
+                 * and always prepended "0x", corrupting plain hex outputs
+                 * (e.g. XMPP capability hash strings, colour values). */
+                simple_append_hex(&out, &remaining, va_arg(args, unsigned long));
+            }
+            else if (*format == 'p') {
                 if (remaining > 2) {
-                    *out++ = '0'; *out++ = 'x'; remaining -= 2; 
+                    *out++ = '0'; *out++ = 'x'; remaining -= 2;
                 }
-                
-                simple_append_hex(&out, &remaining, va_arg(args, unsigned long)); 
+                simple_append_hex(&out, &remaining, va_arg(args, unsigned long));
             }
         }
         else {
@@ -495,27 +510,41 @@ int snprintf(char *str, size_t size, const char *format, ...) {
  * RFC 6120 §4.7.3 — stream IDs MUST be hard to predict.
  * RFC 6120 §7.7.1 — server-generated resource IDs (we treat the same).
  * ------------------------------------------------------------------ */
-__attribute__((weak))
+/* ------------------------------------------------------------------
+ * hw_trng_read — x86-64 implementation using RDRAND.
+ *
+ * RDRAND (available since Ivy Bridge / QEMU -cpu max,+pku) fills a
+ * 32-bit register and sets CF=1 on success.  We retry up to 10 times
+ * as recommended by the Intel SDM; on QEMU this never actually retries.
+ *
+ * This replaces the weak stub so secure_random_u32() no longer falls
+ * back to a compile-time seed, eliminating the boot-time
+ * [SECURITY WARNING] and giving every TLS session and XMPP stream ID
+ * real hardware entropy.
+ *
+ * RFC 6120 §4.7.3 — stream IDs MUST be hard to predict.
+ * RFC 6120 §7.7.1 — server-generated resource IDs (we treat the same).
+ * ------------------------------------------------------------------ */
 int hw_trng_read(uint32_t *out) {
-    (void)out;
-    /* Weak stub -- signals no hardware TRNG so secure_random_u32()
-     * activates its xorshift64* CSPRNG fallback (with a seed warning).
-     *
-     * To provide real entropy, define a non-weak hw_trng_read() in your
-     * BSP that reads from the MCU TRNG peripheral, e.g. (STM32 RNG):
-     *
-     *   int hw_trng_read(uint32_t *out) {
-     *       while (!(RNG->SR & RNG_SR_DRDY));
-     *       *out = RNG->DR;
-     *       return 1;
-     *   }
-     *
-     * On x86-64 / QEMU, rdrand is available:
-     *   int hw_trng_read(uint32_t *out) {
-     *       return __builtin_ia32_rdrand32_step(out);
-     *   }
-     */
-    return 0;
+    for (int attempt = 0; attempt < 10; attempt++) {
+        unsigned int val = 0;
+        unsigned char cf  = 0;
+
+        __asm__ volatile(
+            "rdrand %0\n"
+            "setc   %1\n"
+            : "=r"(val), "=qm"(cf)
+            :
+            : "cc"
+        );
+
+        if (cf) {
+            *out = (uint32_t)val;
+            return 1;
+        }
+    }
+
+    return 0;  /* RDRAND not ready — caller uses xorshift64* fallback */
 }
 
 /* ------------------------------------------------------------------
