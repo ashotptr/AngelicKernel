@@ -98,8 +98,13 @@ class TestClient(ClientXMPP):
         self.add_event_handler("presence", self._on_presence)
 
         import ssl
-        self.ssl_version = ssl.PROTOCOL_TLS_CLIENT
-        self.ca_certs = None
+        # Build a permissive SSLContext so the kernel's ephemeral self-signed
+        # ECDSA cert is accepted without a CA chain or hostname match.
+        _ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        _ctx.check_hostname = False
+        _ctx.verify_mode = ssl.CERT_NONE
+        self.ssl_context = _ctx   # slixmpp >= 1.7 honours this attribute
+        self.ca_certs = None      # legacy fallback for older slixmpp builds
 
     async def _on_session(self, event):
         await self.get_roster()
@@ -118,9 +123,8 @@ class TestClient(ClientXMPP):
 
         try:
             self.connect(
-                address=(self._host, self._port),
-                disable_starttls=False,
-                use_ssl=False,
+                host=self._host,
+                port=self._port
             )
             try:
                 await asyncio.wait_for(self.session_event.wait(), timeout=10)
