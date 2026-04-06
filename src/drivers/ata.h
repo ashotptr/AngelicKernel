@@ -57,7 +57,7 @@
  * print model/capacity to the serial console.  Call once after serial_init().
  * Not required for read/write to function, but catches wiring issues early.
  */
-void ata_init(void);
+int ata_init(void);
 
 /*
  * ata_read_sectors

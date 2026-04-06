@@ -52,6 +52,41 @@ room_t rooms[MAX_ROOMS];
  *   this function, so by the time we reach here the opening element
  *   has already been validated.
  * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------
+ * extract_stream_attr
+ *
+ * Scans the raw rx_buffer for a named attribute in the <stream:stream>
+ * tag and copies its value (single- or double-quoted) into out[out_max].
+ *
+ * Returns 1 on success, 0 if the attribute is absent or the buffer does
+ * not yet contain the full opening tag.
+ *
+ * RFC 6120 §4.7 — stream attributes
+ * ------------------------------------------------------------------ */
+static int extract_stream_attr(const char *buf, const char *attr_name,
+                                char *out, int out_max) {
+    /* Build search key: " attr_name=" */
+    char key[64];
+    snprintf(key, sizeof(key), " %s=", attr_name);
+
+    const char *p = strstr(buf, key);
+    if (!p) return 0;
+
+    p += strlen(key);           /* skip to the quote */
+    char q = *p;                /* opening quote: ' or " */
+    if (q != '\'' && q != '"') return 0;
+    p++;                        /* skip opening quote */
+
+    const char *end = strchr(p, q);
+    if (!end) return 0;         /* closing quote not yet received */
+
+    int len = (int)(end - p);
+    if (len >= out_max) len = out_max - 1;
+    strncpy(out, p, len);
+    out[len] = '\0';
+    return 1;
+}
+
 void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
     char response[512];
 
@@ -62,24 +97,33 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
      * https://datatracker.ietf.org/doc/html/rfc6120#section-4.7.3 */
     unsigned int stream_id = secure_random_u32();
 
+        /* RFC 6120 §4.7.2 — build 'to=' for the response stream header.
+         *
+         * If the client sent a 'from=' attribute in its <stream:stream> header
+         * we MUST echo it as 'to=' in our response.  If absent, MUST NOT include
+         * 'to=' at all.  ctx->client_from is populated from rx_buffer by the
+         * caller (xmpp_recv_callback) before invoking handle_handshake_logic().
+         *
+         * RFC 6120 §4.7.2 — https://datatracker.ietf.org/doc/html/rfc6120#section-4.7.2 */
+        char to_attr[96] = "";   /* empty → omit from snprintf */
+        if (ctx->client_from[0] != '\0') {
+            snprintf(to_attr, sizeof(to_attr), " to='%s'", ctx->client_from);
+        }
+
     if (ctx->authenticated) {
         /* Post-SASL stream: offer bind (required) and session (legacy).
          * RFC 6120 §7.2  — bind MUST be present after SASL.
          * RFC 6121 §3.1  — session is optional but widely expected.
          *
-         * Bug 4 fix — set STATE_BIND so that the bind IQ handler is
-         * only reachable from this specific negotiation point.  Before
-         * this fix the handler was reachable from any state >=
-         * STATE_AUTHENTICATED, including STATE_SESSION and STATE_READY,
-         * allowing a fully-active client to re-run binding logic and
-         * trigger the eviction loop against live sessions.
+         * set STATE_BIND so that the bind IQ handler is
+         * only reachable from this specific negotiation point.
          *   RFC 6120 §7 — Resource Binding is a one-time per-stream step.
          *   https://datatracker.ietf.org/doc/html/rfc6120#section-7 */
         ctx->state = STATE_BIND;
 
         snprintf(response, sizeof(response),
             "<?xml version='1.0'?>"
-            "<stream:stream from='%s' id='%u' version='1.0' "
+            "<stream:stream from='%s'%s id='%u' version='1.0' "
             "xml:lang='en' "
             "xmlns='jabber:client' "
             "xmlns:stream='http://etherx.jabber.org/streams'>"
@@ -89,7 +133,7 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
                * all target clients no longer require it. */
               "<session xmlns='urn:ietf:params:xml:ns:xmpp-session'/>"
             "</stream:features>",
-            XMPP_DOMAIN, stream_id);
+            XMPP_DOMAIN, to_attr, stream_id);
     }
     else if (ctx->tls_established) {
         /* TLS is live — now safe to offer SASL PLAIN (RFC 6120 §13.8.4).
@@ -98,7 +142,7 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
          *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.1 */
         snprintf(response, sizeof(response),
             "<?xml version='1.0'?>"
-            "<stream:stream from='%s' id='%u' version='1.0' "
+            "<stream:stream from='%s'%s id='%u' version='1.0' "
             "xml:lang='en' "
             "xmlns='jabber:client' "
             "xmlns:stream='http://etherx.jabber.org/streams'>"
@@ -108,7 +152,7 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
                 "<mechanism>PLAIN</mechanism>"
               "</mechanisms>"
             "</stream:features>",
-            XMPP_DOMAIN, stream_id);
+            XMPP_DOMAIN, to_attr, stream_id);
     }
     else {
         /* Pre-TLS stream: offer STARTTLS as REQUIRED.
@@ -121,17 +165,17 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
          *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.3
          *   https://datatracker.ietf.org/doc/html/rfc6120#section-13.8.4 */
         snprintf(response, sizeof(response),
-            "<?xml version='1.0'?>"
-            "<stream:stream from='%s' id='%u' version='1.0' "
-            "xml:lang='en' "
-            "xmlns='jabber:client' "
-            "xmlns:stream='http://etherx.jabber.org/streams'>"
-            "<stream:features>"
-              "<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'>"
-                "<required/>"
-              "</starttls>"
-            "</stream:features>",
-            XMPP_DOMAIN, stream_id);
+             "<?xml version='1.0'?>"
+            "<stream:stream from='%s'%s id='%u' version='1.0' "
+             "xml:lang='en' "
+             "xmlns='jabber:client' "
+             "xmlns:stream='http://etherx.jabber.org/streams'>"
+             "<stream:features>"
+               "<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'>"
+                 "<required/>"
+               "</starttls>"
+             "</stream:features>",
+            XMPP_DOMAIN, to_attr, stream_id);
     }
 
     /* NOTE: RFC 6120 §4.9.1 stream-error conditions are enforced in
@@ -151,19 +195,7 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
     }
 }
 
-/* ------------------------------------------------------------------
- * handle_sasl_success — REMOVED (Bug 6 fix)
- *
- * This function was dead code: handle_sasl() sends <success/> inline
- * (lines above) and sets ctx->authenticated = 1 / ctx->state =
- * STATE_AUTHENTICATED directly.  handle_sasl_success() did exactly
- * the same work and was never called from anywhere in the codebase.
- *
- * Keeping duplicate logic here risked accidental double-sends if a
- * future caller was added without realising handle_sasl() already
- * handled it.  The declaration in xmpp_core.h has also been removed.
- *
- * RFC 6120 §6.4.6 — SASL Success: <success/> and stream-state reset
+/* RFC 6120 §6.4.6 — SASL Success: <success/> and stream-state reset
  * are now performed exclusively inside handle_sasl() in xmpp_handlers.c.
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.6
  * ------------------------------------------------------------------ */
@@ -183,7 +215,7 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
  *   by <stream:stream ...>. We detect this with strncmp/strstr below.
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.2
  *
- * Buffer overflow handling (FIX §3 LOW):
+ * Buffer overflow handling:
  *   RFC 6120 §4.9.3.14 — <policy-violation/>: server MUST send a
  *   stream error and close the stream when a policy limit is exceeded.
  *   We now send <stream:error><policy-violation/></stream:error> then
@@ -204,7 +236,7 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
  *   handle_sasl(): <not-authorized/>, <incorrect-encoding/>, and
  *   <invalid-mechanism/> are all implemented there.
  *
- * Pool exhaustion handling (FIX §3 LOW):
+ * Pool exhaustion handling:
  *   RFC 6120 §4.9.3.17 — <resource-constraint/>: when the stanza pool
  *   is exhausted, we send a stream error and close the connection rather
  *   than silently discarding the stanza.
@@ -217,7 +249,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
         /* RFC 6120 §4.4 — remote closed TCP without </stream:stream>;
          * clean up silently.
          *
-         * FIX Bug 1 — ctx->pcb must be set to NULL after tcp_close().
+         *ctx->pcb must be set to NULL after tcp_close().
          *
          * lwIP calls this callback with p == NULL when the remote side
          * closes the TCP connection.  All broadcaster loops in
@@ -241,7 +273,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * Safe to call when TLS was never initialised. */
         xmpp_tls_client_free(ctx);
 
-        ctx->pcb = NULL;           /* Bug 1 fix: mark slot as dead */
+        ctx->pcb = NULL; 
         ctx->state = STATE_CONNECTED; /* not SESSION — slot is inactive */
 
         return ERR_OK;
@@ -288,7 +320,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
             ctx->rx_buffer[ctx->rx_pos] = '\0';
         }
         else {
-            /* FIX (§3 LOW): Buffer full — RFC 6120 §4.9.3.14 requires a
+            /* Buffer full — RFC 6120 §4.9.3.14 requires a
              * <policy-violation/> stream error followed by closing the
              * connection rather than silently dropping data. */
             printf("[XMPP] Buffer Overflow! rx_pos=%d, incoming=%d — sending policy-violation and closing.\n",
@@ -407,7 +439,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * element is never "complete" XML — it is deliberately left open
          * for the lifetime of the session.
          *
-         * SECURITY FIX — gate on connection state before scanning for
+         * gate on connection state before scanning for
          * <stream:stream>.
          *
          * The old code ran strstr(rx_buffer, "<stream:stream") unconditionally
@@ -435,9 +467,51 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * inside the state guard anyway so both arms are always gated together.
          *
          *   RFC 6120 §4.9.1  https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.1 */
+         
+
+         /* ------------------------------------------------------------------
+         * RFC 6120 §4.4 — Graceful stream close.
+         *
+         * When the client sends </stream:stream>, the server MUST reply with
+         * its own </stream:stream> and then close the TCP connection.
+         * Previously the server only handled TCP FIN (p == NULL path) and
+        * silently ignored the XML close element.
+         *
+         * Detection: the buffer starts with "</stream:stream" or
+         * "</stream>" (some old clients omit the namespace prefix).
+         * We check only at the start of the buffer to prevent false matches
+         * inside stanza bodies.
+         *
+         *   RFC 6120 §4.4 — https://datatracker.ietf.org/doc/html/rfc6120#section-4.4
+         * ------------------------------------------------------------------ */
+        if (strncmp(ctx->rx_buffer, "</stream:stream", 15) == 0 ||
+            strncmp(ctx->rx_buffer, "</stream>", 9) == 0) {
+
+            /* Reply with our own close element */
+            const char *close_tag = "</stream:stream>";
+            if (ctx->tls_established) {
+                /* Send through TLS layer */
+                mbedtls_ssl_write(&ctx->tls_ssl,
+                    (const unsigned char *)close_tag, strlen(close_tag));
+                if (ctx->pcb) tcp_output(ctx->pcb);
+                /* RFC 6120 §4.4 / TLS §7.2.1 — send close_notify */
+                mbedtls_ssl_close_notify(&ctx->tls_ssl);
+            } else {
+                tcp_write(ctx->pcb, close_tag, strlen(close_tag),
+                          TCP_WRITE_FLAG_COPY);
+                tcp_output(ctx->pcb);
+            }
+
+            xmpp_tls_client_free(ctx);
+            tcp_close(ctx->pcb);
+            ctx->pcb = NULL;
+            ctx->state = STATE_CONNECTED;
+            ctx->rx_pos = 0;
+            return ERR_OK;
+        }
         if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_AUTHENTICATED) && (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream"))) {
             /* ------------------------------------------------------------------
-             * Fix (§5): RFC 6120 §4.9.1 — validate the stream opening element
+             * RFC 6120 §4.9.1 — validate the stream opening element
              * before accepting.  If required attributes are absent or wrong,
              * send the appropriate <stream:error> and close the connection.
              *
@@ -456,6 +530,58 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
              *   RFC 6120 §4.9.3.22 (unsupported-version)
              * ------------------------------------------------------------------ */
             if (strstr(ctx->rx_buffer, "<stream:stream")) {
+                /* ----------------------------------------------------------
+                 * RFC 6120 §4.7.2 — Extract client's 'from=' attribute.
+                 * Store it so handle_handshake_logic() can echo it as 'to='.
+                 * Clear client_from first so a re-open without 'from=' does
+                 * not inherit the value from a previous stream.
+                 * ---------------------------------------------------------- */
+                ctx->client_from[0] = '\0';
+                extract_stream_attr(ctx->rx_buffer, "from",
+                                    ctx->client_from, sizeof(ctx->client_from));
+
+                /* ----------------------------------------------------------
+                 * RFC 6120 §4.9.3.6 — host-unknown.
+                 *
+                 * The 'to=' attribute of the client's stream header MUST be
+                 * a domain serviced by this server.  If absent or wrong, send
+                 * <stream:error><host-unknown/></stream:error> and close.
+                 *
+                 * We only enforce this on the first (pre-TLS) stream open.
+                 * After TLS is established the client already proved it reached
+                 * the right host via the certificate's CN/SAN.
+                 *
+                 *   RFC 6120 §4.9.3.6
+                 *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.9.3.6
+                 * ---------------------------------------------------------- */
+                if (!ctx->tls_established && !ctx->authenticated) {
+                    char stream_to[64] = "";
+                    extract_stream_attr(ctx->rx_buffer, "to",
+                                        stream_to, sizeof(stream_to));
+                    if (stream_to[0] != '\0' &&
+                        strcmp(stream_to, XMPP_DOMAIN) != 0) {
+                        /* Build the stream open so the client can parse our error */
+                        char err[512];
+                        snprintf(err, sizeof(err),
+                            "<?xml version='1.0'?>"
+                            "<stream:stream from='" XMPP_DOMAIN "' id='0'"
+                              " version='1.0' xml:lang='en'"
+                              " xmlns='jabber:client'"
+                              " xmlns:stream='http://etherx.jabber.org/streams'>"
+                            "<stream:error>"
+                              "<host-unknown"
+                                " xmlns='urn:ietf:params:xml:ns:xmpp-streams'/>"
+                            "</stream:error>"
+                            "</stream:stream>");
+                        tcp_write(ctx->pcb, err, strlen(err),
+                                  TCP_WRITE_FLAG_COPY);
+                        tcp_output(ctx->pcb);
+                        tcp_close(ctx->pcb);
+                        ctx->pcb = NULL;
+                        ctx->rx_pos = 0;
+                        return ERR_OK;
+                    }
+                }
                 /* Check for required xmlns='jabber:client' */
                 int bad_ns = (strstr(ctx->rx_buffer, "xmlns='jabber:client'") == NULL && strstr(ctx->rx_buffer, "xmlns=\"jabber:client\"") == NULL);
 
@@ -541,7 +667,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * This check only triggers in STATE_CONNECTED (pre-authentication)
          * where SASL exchange is valid; it is a no-op in all other states.
          * ------------------------------------------------------------------ */
-        /* Bug 4 fix — include STATE_SASL in the abort check.
+        /* include STATE_SASL in the abort check.
          * <abort/> is a SASL-layer element valid throughout the SASL
          * exchange, which now spans STATE_CONNECTED → STATE_SASL.
          *   RFC 6120 §6.4.4
@@ -585,9 +711,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                  * <invalid-mechanism/> and <incorrect-encoding/> are
                  * handled inside handle_sasl().
                  *
-                 * Bug 4 fix — include STATE_SASL here.
-                 * handle_handshake_logic() now sets STATE_SASL after
-                 * advertising mechanisms.  Without this, the state
+                 * Without this, the state
                  * would advance to STATE_SASL but the dispatch check
                  * would still require STATE_CONNECTED, causing a
                  * legitimate <auth> to fall through to xmpp_route_stanza
@@ -611,7 +735,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
             }
         }
         else {
-            /* FIX (§3 LOW): If parse_xml_stream returned NULL because
+            /* If parse_xml_stream returned NULL because
              * xmpp_alloc_stanza() exhausted the pool (bytes_consumed > 0
              * but stanza is NULL), send RFC 6120 §4.9.3.17 resource-constraint
              * stream error and close the connection.
@@ -651,7 +775,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
  * RFC 6120 §3   — Client-to-server connections use port 5222 (IANA).
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-3
  *
- * FIX (§3 CRITICAL): ctx is now zeroed with memset() before use.
+ * ctx is now zeroed with memset() before use.
  * Without this, when slot N+MAX_USERS is reused, stale rx_buffer,
  * rx_pos, state, authenticated, username, and full_jid from the
  * previous occupant would persist, causing the new client to inherit
@@ -682,7 +806,7 @@ err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
     xmpp_client_ctx_t *ctx = &client_registry[client_idx];
     client_idx = (client_idx + 1) % MAX_USERS;
 
-    /* FIX (§3 CRITICAL): Close the old connection if the slot is still
+    /* Close the old connection if the slot is still
      * in use, then zero the entire context to prevent state bleed. */
     if (ctx->pcb != NULL) {
         /* Evict the previous occupant before reusing this slot.

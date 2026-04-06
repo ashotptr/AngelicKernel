@@ -79,9 +79,7 @@ typedef enum {
     XMPP_PRESENCE_UNSUBSCRIBE,    /* RFC 6121 §3.1.3 — type="unsubscribe"             */
     XMPP_PRESENCE_UNSUBSCRIBED,   /* RFC 6121 §3.1.3 — type="unsubscribed"            */
 
-    /* FIX Bug 13 — type="probe" was unhandled.
-     *
-     * RFC 6121 §4.3.1 defines the presence probe: a server receiving a
+    /* RFC 6121 §4.3.1 defines the presence probe: a server receiving a
      * probe from a client SHOULD respond with the probed user's current
      * presence.  Without a distinct enum value the parser left probes
      * typed as XMPP_PRESENCE, causing them to be re-broadcast as an
@@ -231,6 +229,38 @@ typedef struct {
     int authenticated;
     char rx_buffer[32768];
     int rx_pos;
+ 
+     /* ------------------------------------------------------------------
+     * RFC 6120 §4.7.2 — 'from' sent by client in the initial stream header.
+     *
+     * The client MAY include a 'from' attribute in its initial <stream:stream>
+     * tag (typically the bare JID it believes it has, e.g. "juliet@example.com").
+     * Per §4.7.2:
+     *   "if the client included a 'from' attribute in the initial stream header
+     *    then the server MUST include a 'to' attribute in the response stream
+     *    header and MUST set its value to the bare JID specified in the 'from'
+     *    attribute of the initial stream header."
+     * We store it here so handle_handshake_logic() can echo it as 'to='.
+     * If the client omitted 'from=', this field stays empty and 'to=' is
+     * omitted from the server's response per the same section.
+     * ------------------------------------------------------------------ */
+     char client_from[64];   /* bare JID from client's <stream:stream from='...'> */
+ /* ------------------------------------------------------------------
+     * RFC 6121 §4.6 — Client's actual presence content.
+     *
+     * When the client sends initial or updated <presence/>, it may include
+     * <show>, <status>, and <priority> children.  We store the inner XML
+     * verbatim here so that handle_initial_presence() and
+     * handle_broadcast_presence() forward the real content rather than
+     * a hardcoded "<status>Online</status>".
+     *
+     * RFC 6121 §4.7.2.1 — <show>: away|chat|dnd|xa
+     * RFC 6121 §4.7.2.2 — <status>: human-readable string
+     * RFC 6121 §4.7.2.3 — <priority>: integer -128 to +127
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.7.2
+     * ------------------------------------------------------------------ */
+     char presence_payload[512]; /* verbatim inner XML of last <presence/> */
+
 
     /* ------------------------------------------------------------------
      * TLS state (RFC 6120 §5 — STARTTLS negotiation)

@@ -171,7 +171,7 @@ const int xmpp_credential_count = (int)(sizeof(xmpp_credentials) / sizeof(xmpp_c
 
 
 /* ------------------------------------------------------------------
- * find_client_by_jid  (FIX Bug 2 — dangling PCB in target_ctx)
+ * find_client_by_jid
  *
  * Returns the live client_registry[] slot whose full_jid matches
  * full_jid, or NULL if no such slot exists or the slot's PCB is NULL.
@@ -180,7 +180,7 @@ const int xmpp_credential_count = (int)(sizeof(xmpp_credentials) / sizeof(xmpp_c
  *   MUC broadcast loops previously built a stack-local
  *   xmpp_client_ctx_t target_ctx whose only initialised field was pcb,
  *   copied verbatim from participant_t.pcb.  If that client had already
- *   disconnected (Bug 1 fix — pcb nulled on close), participant_t.pcb
+ *   disconnected participant_t.pcb
  *   still pointed at the now-freed PCB: the old target_ctx approach
  *   was therefore a use-after-free.
  *
@@ -221,8 +221,7 @@ static xmpp_client_ctx_t *find_client_by_jid(const char *full_jid) {
  *   RFC 6120 §13.9.1 — "the receiving entity MUST verify that the
  *   [Base64] data is properly encoded."
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-13.9.1
- *   BUG: invalid Base64 characters are silently skipped (val < 0 →
- *   continue) instead of triggering a failure. On encountering an
+ //  On encountering an
  *   invalid character this function should return -1 and handle_sasl()
  *   should respond with:
  *     RFC 6120 §6.5.5 — <failure><incorrect-encoding/></failure>
@@ -382,16 +381,7 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
          *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.1.5 */
         roster_store_set_from_payload(ctx->username, stanza->payload);
 
-        /* Bug 14 fix — persist once after all items are processed.
-         *
-         * roster_store_upsert_item() previously called
-         * xmpp_persist_save_roster() on every item, meaning a roster set
-         * with N items caused N full sector writes (56 sectors × 512 B each)
-         * plus N CRC computations, all synchronous ATA PIO polling on the
-         * cooperative lwIP thread — stalling every other connection for the
-         * entire duration.  The save call has been removed from
-         * roster_store_upsert_item() and moved here, running exactly once
-         * per IQ-set regardless of how many <item/> elements it contains.
+        /* 
          *   XEP-0049 §2 / RFC 6121 §2.1.5 — no batching requirement. */
         xmpp_persist_save_roster();
 
@@ -405,16 +395,6 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         /* Roster push to other connected resources of the same user.
          * RFC 6121 §2.1.6 — server MUST push to all active resources.
          * We identify "same user" by matching ctx->username.
-         *
-         * FIX Bug 8 — the push[768] buffer contained a literal "%%s"
-         * which was intended as a two-pass template:
-         *   snprintf(push, …, "… to='%%s' …", payload)   → "… to='%s' …"
-         *   snprintf(msg, …, push, full_jid)              → "… to='jid' …"
-         * The buffer was allocated and formatted but its value was never
-         * used; push_with_to was built independently via its own snprintf.
-         * Worse, if the template had accidentally been passed as a format
-         * string, the embedded %s would have caused undefined behaviour.
-         * The push[] buffer and its snprintf call are now deleted entirely;
          * push_with_to is the only variable and is built directly below. */
         for (int i = 0; i < MAX_USERS; i++) {
             if (client_registry[i].pcb == NULL){ 
@@ -538,7 +518,7 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   and drained by pending_sub_drain() at the end of this function.
  *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3
  *
- * Presence probing (Fix §5):
+ * Presence probing:
  *   RFC 6121 §4.3.1 — after broadcasting initial presence the server
  *   SHOULD send a <presence type='probe'> to each contact so that it
  *   triggers a presence update back to the newly-available user.
@@ -548,6 +528,38 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  * ------------------------------------------------------------------ */
 void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     char response[512];
+
+/* ------------------------------------------------------------------
+* RFC 6121 §4.6 — Store the client's actual presence content.
+*
+* The client's <presence/> stanza MAY carry <show>, <status>, and
+     * <priority> children.  We store the inner XML (stanza->payload)
+    * verbatim in ctx->presence_payload so that:
+     *   (a) When we broadcast this user's presence to others, we forward
+     *       their real content instead of hardcoded "<status>Online</status>".
+     *   (b) When handle_broadcast_presence() responds to probe requests, it
+     *       returns the stored payload rather than a static string.
+     *
+     * If the payload is empty (bare <presence/>) we set a sensible default
+     * so the stanza is still valid XML.
+     *
+     *   RFC 6121 §4.7.2.1 — <show>: away|chat|dnd|xa
+     *   RFC 6121 §4.7.2.2 — <status>: human-readable availability text
+     *   RFC 6121 §4.7.2.3 — <priority>: -128 to +127
+     *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.7.2
+     * ------------------------------------------------------------------ */
+    if (stanza->payload[0] != '\0') {
+        strncpy(ctx->presence_payload, stanza->payload,
+            sizeof(ctx->presence_payload) - 1);
+
+        ctx->presence_payload[sizeof(ctx->presence_payload) - 1] = '\0';
+    }
+    else {
+        /* No inner content — default to an empty available presence.
+         * RFC 6121 §4.2 — bare <presence/> means "available". */
+        ctx->presence_payload[0] = '\0';
+    }
+
 
     /* RFC 6121 §4.2.2 — broadcast the user's available presence to every
      * connected client that has completed session establishment.
@@ -568,19 +580,27 @@ void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         if (client_registry[i].state < STATE_SESSION) {
             continue;
         }
-
-        snprintf(response, sizeof(response),
-            "<presence from='%s' to='%s' xml:lang='en'>"
-              "<show>chat</show>"
-              "<priority>1</priority>"
-            "</presence>",
-            ctx->full_jid, client_registry[i].full_jid);
+        
+        /* RFC 6121 §4.6 — forward the actual presence content.
+         * If presence_payload is non-empty embed it directly; otherwise
+         * send a bare available presence (valid per RFC 6121 §4.2). */
+        if (ctx->presence_payload[0] != '\0') {
+            snprintf(response, sizeof(response),
+                "<presence from='%s' to='%s' xml:lang='en'>%s</presence>",
+                ctx->full_jid, client_registry[i].full_jid,
+                ctx->presence_payload);
+        }
+        else {
+            snprintf(response, sizeof(response),
+                "<presence from='%s' to='%s' xml:lang='en'/>",
+                ctx->full_jid, client_registry[i].full_jid);
+        }
 
         send_raw(&client_registry[i], response);
     }
 
     /* ------------------------------------------------------------------
-     * Fix (§5): RFC 6121 §4.3.1 — presence probing.
+     * RFC 6121 §4.3.1 — presence probing.
      *
      * After advertising our own availability, send a presence probe to
      * every other fully-connected user.  A probe causes each peer to
@@ -772,25 +792,22 @@ private_store_upsert(const char *username, const char *ns,
  *   stored child XML inside <query xmlns='jabber:iq:private'>, or an
  *   empty element of the requested namespace if nothing is stored yet.
  *
- * FIX (HIGH) — inner namespace extraction:
- *   The old implementation called strstr(stanza->payload, "xmlns=")
- *   which matched the first xmlns= in the payload — the one belonging
- *   to <query> itself ('jabber:iq:private') — not the child element.
+ * inner namespace extraction:
  *   We now skip past the closing '>' of <query ...> before searching,
  *   so the first xmlns= we find belongs to the child element.
  *
- * FIX (HIGH) — data persistence:
+ * data persistence:
  *   For type='set' the child XML is written into the file-scope
  *   private_store[] array keyed by (ctx->username, inner_ns).
  *   For type='get' the stored XML is retrieved from that array.
  *   No malloc/free is used anywhere in this function.
  *
- * FIX (MEDIUM) — set vs get response body:
+ * set vs get response body:
  *   For a type='set' request we return a plain empty IQ result
  *   (<iq type='result' id='...' to='...'/>), not a <query> body.
  *   XEP-0049 §2.1 / Listing 1 — server response is a bare <iq result/>.
  *
- * FIX (MEDIUM) — missing child element validation:
+ * missing child element validation:
  *   XEP-0049 §2.3: "At least one child element with a proper namespace
  *   MUST be included; otherwise the server MUST respond with a
  *   'Not Acceptable' error."  We now enforce this.
@@ -1167,27 +1184,6 @@ void handle_muc_admin(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
                     strncpy(kicked_jid, r->users[j].jid, 63);
 
-                    /* kicked_pcb removed — Bug 2 fix uses find_client_by_jid()
-                     * instead of raw PCB copies. */
-
-                    /* FIX Bug 2 — replace dangling PCB pattern in kick/ban broadcast.
-                     *
-                     * The old code stored kicked_pcb = r->users[j].pcb and built
-                     * stack-local xmpp_client_ctx_t structs (target_ctx, kicked_ctx)
-                     * from raw pcb copies.  If any of those clients had already
-                     * disconnected, the pcb pointer was stale (freed memory).
-                     *
-                     * Additionally the removal[] buffer used a %%s two-pass template
-                     * (same pattern as Bug 12): snprintf embedded %%s → literal %s,
-                     * then that was used as a format string in a second snprintf to
-                     * insert the recipient JID.  The <reason> field comes from the
-                     * admin IQ payload and can contain '%' characters, which would be
-                     * interpreted as format specifiers in the second pass.
-                     *
-                     * Fix: look up each recipient through find_client_by_jid() and
-                     * build each stanza with a single direct snprintf per recipient,
-                     * inserting the target JID directly. */
-
                     /* Broadcast removal to all remaining occupants */
                     for (int k = 0; k < MAX_USERS_PER_ROOM; k++) {
                         if (!r->users[k].active || k == j) {
@@ -1553,20 +1549,7 @@ void handle_general_success(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   sub-state; session IQ (RFC 6121 §3.1) may optionally follow.
  * ------------------------------------------------------------------ */
 void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
-    /* Bug 4 fix — explicit state guard: bind is only valid in STATE_BIND.
-     *
-     * The router now uses min_state=STATE_BIND which prevents bind IQs
-     * arriving before the post-SASL stream re-open (e.g. in STATE_AUTHENTICATED).
-     * But the router only has a min_state concept, not a max_state.  Without
-     * this guard a fully-active client in STATE_SESSION or STATE_READY could
-     * still send a bind IQ, satisfy the min_state check, reach this handler,
-     * re-assign ctx->full_jid, and trigger the eviction loop against live
-     * sessions — effectively hijacking or crashing another user's connection.
-     *
-     * This guard is the authoritative enforcement point.  The router
-     * min_state change is belt; this check is suspenders.
-     *
-     *   RFC 6120 §7 — resource binding is a one-time per-stream negotiation.
+    /* RFC 6120 §7 — resource binding is a one-time per-stream negotiation.
      *   https://datatracker.ietf.org/doc/html/rfc6120#section-7 */
     if (ctx->state != STATE_BIND) {
         char err[512];
@@ -1618,15 +1601,7 @@ void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         }
 
         if (strcmp(client_registry[i].username, ctx->username) == 0) {
-            /* FIX Bug 7 — PCB leak in eviction path.
-             *
-             * Previously memset() zeroed the slot without first calling
-             * tcp_close() on the old PCB.  lwIP retains ownership of that
-             * PCB and its send/receive buffers until tcp_close() is called;
-             * silently dropping the pointer leaks the PCB permanently for
-             * the lifetime of the server.
-             *
-             * RFC 6120 §4.4 — either party MAY close the TCP connection
+            /* RFC 6120 §4.4 — either party MAY close the TCP connection
              * after </stream:stream> is exchanged, but the server is
              * permitted to close it unilaterally when a resource-conflict
              * eviction occurs (§4.9.3.14 policy-violation or §4.9.3.15
@@ -1640,7 +1615,7 @@ void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
              * Safe to call on a slot where TLS was never initialised. */
             xmpp_tls_client_free(&client_registry[i]);
             
-            tcp_close(client_registry[i].pcb);   /* Bug 7 fix: close before zeroing */
+            tcp_close(client_registry[i].pcb);
             
             memset(&client_registry[i], 0, sizeof(xmpp_client_ctx_t));
         }
@@ -1966,7 +1941,7 @@ void handle_muc_owner(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *
  * CASE 3 — main server or user JID fallback:
  *   XEP-0030 §4 — server or account identity.
- *   FIX (§3 LOW): when to='user@angelic.local' (a user's bare JID),
+ *   when to='user@angelic.local' (a user's bare JID),
  *   we now return identity category='account' type='registered' instead
  *   of category='server' type='im', which is only correct when queried
  *   on the bare server domain.
@@ -2089,7 +2064,7 @@ void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
          *   <service-unavailable/> (RFC 6120 §8.3.3.19).
          *   https://xmpp.org/extensions/xep-0115.html
          *
-         * FIX (§3 LOW): Return category='account' type='registered'
+         * Return category='account' type='registered'
          * per XEP-0030 §4; server identity only correct on bare domain. */
 
         /* XEP-0115: if the query carries a node= attribute it is a
@@ -2210,9 +2185,7 @@ void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   XEP-0045 §6.3 — Discovering Rooms: return all public rooms as
  *     <item jid='room@service' name='Room Name'/>
  *   https://xmpp.org/extensions/xep-0045.html#disco-rooms
- *   FIX (§3 MEDIUM): previously returned a hardcoded "Main Lobby" room
- *   regardless of which rooms were actually active in rooms[].
- *   Now iterates rooms[] and emits one <item/> per rooms[i].active == 1.
+ *   iterates rooms[] and emits one <item/> per rooms[i].active == 1.
  *
  * CASE 2 — main server:
  *   Return the MUC service as an item so clients can discover it.
@@ -2223,7 +2196,7 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
     if (strstr(stanza->to, "conference.angelic.local")) {
         /* CASE 1: XEP-0045 §6.3 — list of active rooms.
-         * FIX (§3 MEDIUM): Build room list dynamically from rooms[]. */
+         * Build room list dynamically from rooms[]. */
         char items[1536] = {0};
 
         for (int i = 0; i < MAX_ROOMS; i++) {
@@ -2765,9 +2738,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                     continue;
                 }
 
-                /* FIX Bug 2 — replace stack-local target_ctx built from
-                 * participant_t.pcb with a lookup through client_registry[].
-                 * participant_t.pcb may point at a freed PCB if that client
+                /* participant_t.pcb may point at a freed PCB if that client
                  * disconnected between joining the room and this broadcast.
                  * find_client_by_jid() returns NULL for dead slots, making
                  * the send a safe no-op instead of a use-after-free. */
@@ -2820,23 +2791,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
                 memset(r->creator_jid, 0, sizeof(r->creator_jid));
 
-                /* FIX Bug 3 — persist the deactivation immediately.
-                 *
-                 * Room creation calls xmpp_persist_save_rooms() (above).
-                 * Room unlock (handle_muc_owner) also calls it.  But the
-                 * room *deletion* path — triggered here when the last
-                 * occupant leaves — previously did not persist the update.
-                 *
-                 * Without this call, after a server restart the disk still
-                 * holds active=1 for this room.  xmpp_persist_load_all()
-                 * restores it with active=1 and an empty name/creator_jid,
-                 * violating the persist layer's own invariant and causing
-                 * the room to ghost-appear in disco#items responses.
-                 *
-                 * The fix is a single persist call here, symmetric with
-                 * the creation persist call made when the room was first
-                 * activated. */
-                xmpp_persist_save_rooms();   /* Bug 3 fix: persist deactivation */
+                xmpp_persist_save_rooms();
             }
 
             return; /* Exit handling complete */
@@ -2845,6 +2800,228 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         /* Nick not found in room — silently ignore */
         return;
     }
+
+    /* ------------------------------------------------------------------
+     * XEP-0045 §7.6 — Nick change detection.
+     * XEP-0045 §7.7 — In-room availability update.
+     *
+     * Both cases arise when an occupant already IN the room sends a new
+     * <presence to='room@service/nick'> stanza:
+     *
+     *   Case A — same nick as currently held → in-room availability update.
+     *     XEP-0045 §7.7: reflect the updated presence to all occupants.
+     *     e.g. client sends <show>away</show> to change status.
+     *
+     *   Case B — different nick → nick change (XEP-0045 §7.6).
+     *     Service MUST:
+     *       1. Check for nick conflict (done in the existing block below).
+     *       2. Send <presence type='unavailable'> with <status code='303'/>
+     *          and nick='new-nick' to every occupant (including changer).
+     *       3. Send the new available presence with the new nick to every
+     *          occupant (including changer, with code 110 for self).
+     *       4. Update the participant slot in the room.
+     *
+     * We detect "already in room" by scanning for the sender's full JID
+     * in r->users[].  If found, handle both sub-cases here and return early
+     * so the normal join path (add new slot, send subject, etc.) does NOT fire.
+     *
+     *   XEP-0045 §7.6 — https://xmpp.org/extensions/xep-0045.html#changenick
+     *   XEP-0045 §7.7 — https://xmpp.org/extensions/xep-0045.html#changeavail
+     * ------------------------------------------------------------------ */
+    {
+        int occupant_idx = -1;
+        
+        for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+            if (r->users[i].active &&
+                strcmp(r->users[i].jid, ctx->full_jid) == 0) {
+                occupant_idx = i;
+                break;
+            }
+        }
+
+        if (occupant_idx >= 0) {
+            /* Sender is already in the room */
+
+            if (strcmp(r->users[occupant_idx].nick, nick) == 0) {
+                /* ── Case A: same nick → in-room availability update ── */
+                /* XEP-0045 §7.7 — reflect updated presence to all occupants.
+                 *
+                 * We forward the client's actual presence payload (which may
+                 * contain <show>away</show> or other content) with the
+                 * sender's occupant JID as 'from'. */
+                char avail_resp[2400];
+
+                for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+                    if (!r->users[i].active) continue;
+
+                    xmpp_client_ctx_t *target = find_client_by_jid(r->users[i].jid);
+                    if (!target) continue;
+
+                    int is_self = (strcmp(r->users[i].jid, ctx->full_jid) == 0);
+
+                    /* Determine affiliation/role for this occupant */
+                    const char *aff  = (strcmp(r->users[occupant_idx].jid,
+                                                r->creator_jid) == 0)
+                                       ? "owner" : "member";
+                    const char *role = (strcmp(aff, "owner") == 0)
+                                       ? "moderator" : "participant";
+
+                    /* Inner payload from the client's stanza (may include
+                     * <show>, <status>, <priority> etc.) */
+                    const char *inner = (stanza->payload[0] != '\0')
+                                        ? stanza->payload : "";
+
+                    if (is_self) {
+                        snprintf(avail_resp, sizeof(avail_resp),
+                            "<presence from='%s/%s' to='%s'>"
+                              "%s"
+                              "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                                "<item affiliation='%s' role='%s'/>"
+                                "<status code='110'/>"
+                              "</x>"
+                            "</presence>",
+                            bare_jid, nick, r->users[i].jid,
+                            inner, aff, role);
+                    } else {
+                        snprintf(avail_resp, sizeof(avail_resp),
+                            "<presence from='%s/%s' to='%s'>"
+                              "%s"
+                              "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                                "<item affiliation='%s' role='%s'/>"
+                              "</x>"
+                            "</presence>",
+                            bare_jid, nick, r->users[i].jid,
+                            inner, aff, role);
+                    }
+
+                    send_raw(target, avail_resp);
+                }
+
+                return; /* in-room update complete — do not re-join */
+            }
+
+            /* ── Case B: different nick → nick change ── */
+            /* XEP-0045 §7.6 step 1: check if the requested nick conflicts
+             * with another occupant's current nick (handled below in the
+             * existing conflict block; here we only care that the sender's
+             * bare JID matches the conflict candidate, meaning it's allowed). */
+
+            const char *old_nick = r->users[occupant_idx].nick;
+
+            /* Check new nick is not taken by SOMEONE ELSE */
+            int nick_taken_by_other = 0;
+            for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+                if (!r->users[i].active) continue;
+                if (i == occupant_idx) continue;       /* skip self */
+                if (strcmp(r->users[i].nick, nick) == 0) {
+                    nick_taken_by_other = 1;
+                    break;
+                }
+            }
+
+            if (nick_taken_by_other) {
+                /* XEP-0045 §7.6 — conflict error, same as §7.2.8 */
+                char conflict[512];
+                snprintf(conflict, sizeof(conflict),
+                    "<presence type='error' from='%s/%s' to='%s'>"
+                      "<x xmlns='http://jabber.org/protocol/muc'/>"
+                      "<error type='cancel'"
+                        " by='%s'>"
+                        "<conflict"
+                          " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                      "</e>"
+                    "</presence>",
+                    bare_jid, nick, ctx->full_jid, bare_jid);
+                send_raw(ctx, conflict);
+                return;
+            }
+
+            /* XEP-0045 §7.6 step 2: broadcast unavailable for old nick with
+             * status 303 and nick='new-nick' to every current occupant. */
+            char unav_resp[512];
+
+            for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+                if (!r->users[i].active) continue;
+
+                xmpp_client_ctx_t *target = find_client_by_jid(r->users[i].jid);
+                if (!target) continue;
+
+                int is_self = (strcmp(r->users[i].jid, ctx->full_jid) == 0);
+
+                if (is_self) {
+                    /* XEP-0045 §7.6 — self: include status code 110 AND 303 */
+                    snprintf(unav_resp, sizeof(unav_resp),
+                        "<presence type='unavailable' from='%s/%s' to='%s'>"
+                          "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                            "<item affiliation='member' role='participant'"
+                              " nick='%s'/>"
+                            "<status code='303'/>"
+                            "<status code='110'/>"
+                          "</x>"
+                        "</presence>",
+                        bare_jid, old_nick, r->users[i].jid, nick);
+                } else {
+                    /* XEP-0045 §7.6 — others: status 303 only */
+                    snprintf(unav_resp, sizeof(unav_resp),
+                        "<presence type='unavailable' from='%s/%s' to='%s'>"
+                          "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                            "<item affiliation='member' role='participant'"
+                              " nick='%s'/>"
+                            "<status code='303'/>"
+                          "</x>"
+                        "</presence>",
+                        bare_jid, old_nick, r->users[i].jid, nick);
+                }
+
+                send_raw(target, unav_resp);
+            }
+
+            /* Update the participant slot to the new nick */
+            strncpy(r->users[occupant_idx].nick, nick, MAX_NICK_LEN - 1);
+            r->users[occupant_idx].nick[MAX_NICK_LEN - 1] = '\0';
+
+            /* XEP-0045 §7.6 step 3: broadcast new available presence with
+             * the new nick to every occupant. */
+            char new_pres[512];
+
+            for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+                if (!r->users[i].active) continue;
+
+                xmpp_client_ctx_t *target = find_client_by_jid(r->users[i].jid);
+                if (!target) continue;
+
+                int is_self = (strcmp(r->users[i].jid, ctx->full_jid) == 0);
+
+                if (is_self) {
+                    snprintf(new_pres, sizeof(new_pres),
+                        "<presence from='%s/%s' to='%s'>"
+                          "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                            "<item affiliation='member' role='participant'/>"
+                            "<status code='110'/>"
+                          "</x>"
+                        "</presence>",
+                        bare_jid, nick, r->users[i].jid);
+                } else {
+                    snprintf(new_pres, sizeof(new_pres),
+                        "<presence from='%s/%s' to='%s'>"
+                          "<x xmlns='http://jabber.org/protocol/muc#user'>"
+                            "<item affiliation='member' role='participant'/>"
+                          "</x>"
+                        "</presence>",
+                        bare_jid, nick, r->users[i].jid);
+                }
+
+                send_raw(target, new_pres);
+            }
+
+            /* Nick change complete — do NOT re-run the join path */
+            return;
+        }
+    }
+    /* End of nick-change / in-room update block.
+     * If we reach here the sender is a NEW occupant — continue with
+     * the regular nick-conflict check and join sequence. */
+
 
     /* ------------------------------------------------------------------
      * Nick conflict check (XEP-0045 §7.2.8).
@@ -2908,7 +3085,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
     /* SEND 1: XEP-0045 §7.2 — existing occupants → new user
      *
-     * Fix (§5): XEP-0045 §7.2.3 — real JID exposure in <item jid='...'/>.
+     * XEP-0045 §7.2.3 — real JID exposure in <item jid='...'/>.
      *   semi_anon == 1: include jid= only if the new user is an owner/mod.
      *   semi_anon == 0: always include jid= (non-anonymous room).
      *   https://xmpp.org/extensions/xep-0045.html#enter-pres */
@@ -2951,7 +3128,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
     /* SEND 2: XEP-0045 §7.2 — new user's presence → all existing occupants
      *
-     * Fix (§5): XEP-0045 §7.2.3 — expose new user's real JID only to
+     * XEP-0045 §7.2.3 — expose new user's real JID only to
      *   owners/moderators in semi-anonymous rooms; to all in non-anonymous.
      *   https://xmpp.org/extensions/xep-0045.html#enter-pres */
     for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
@@ -2963,8 +3140,6 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             continue;
         }
 
-        /* FIX Bug 2 — replace stack-local target_ctx with registry lookup.
-         * See find_client_by_jid() header comment for the full rationale. */
         xmpp_client_ctx_t *target = find_client_by_jid(r->users[i].jid);
 
         if (!target) {
@@ -3079,7 +3254,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  * --- DIRECT MESSAGE PATH ---
  *   RFC 6121 §5.1 — route to the addressed user's JID.
  *
- *   FIX (§3 HIGH) — from/to reversed:
+ *   from/to reversed:
  *     The snprintf was using from='stanza->to' (the intended recipient)
  *     and to='ctx->full_jid' (the sender). Corrected to:
  *       from='ctx->full_jid'  (the actual sender)
@@ -3123,6 +3298,130 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         if (!r) {
             return; /* Sender not in a known room — drop */
         }
+        /* ------------------------------------------------------------------
+         * XEP-0045 §7.13 — Private message to a specific occupant.
+         *
+         * If the 'to' address has a resource part (room@service/nick), the
+         * stanza is addressed to a particular occupant, NOT the room.
+         * The service MUST:
+         *   1. NOT broadcast to all occupants.
+         *   2. Change 'from' to the sender's occupant JID (room/sender-nick).
+         *   3. Deliver ONLY to the addressed occupant's real full JID.
+         *   4. Return <item-not-found/> if no occupant holds that nick.
+         *   5. Return <bad-request/> if type='groupchat' is used for a pm.
+         *
+         * Distinction from groupchat: presence of '/' after the '@domain'.
+         * e.g.  room@conference.angelic.local        → groupchat (no nick)
+         *       room@conference.angelic.local/alice  → private message
+         *
+         *   XEP-0045 §7.13 — https://xmpp.org/extensions/xep-0045.html#privatemessage
+         * ------------------------------------------------------------------ */
+        /* Check if 'to' contains a nick resource */
+        char *to_slash = NULL;
+        {
+            /* Find the '/' that comes AFTER the '@' (the nick separator).
+             * stanza->to looks like: room@conference.angelic.local/nick  */
+            char *to_at = strchr(stanza->to, '@');
+            if (to_at) to_slash = strchr(to_at, '/');
+        }
+
+        if (to_slash != NULL) {
+            /* Private message: addressed to a specific occupant nick */
+            const char *target_nick = to_slash + 1;
+
+            /* XEP-0045 §7.13 — reject type='groupchat' for private messages */
+            /* stanza->payload already contains the inner XML; the outer type
+             * attribute was parsed into stanza->type by the parser.  We check
+             * the raw 'to' string for type since it is easier here. */
+            if (strstr(ctx->rx_buffer, "type='groupchat'") ||
+                strstr(ctx->rx_buffer, "type=\"groupchat\"")) {
+                char bad_req[512];
+                snprintf(bad_req, sizeof(bad_req),
+                    "<message from='%s' to='%s' type='error' id='%s'>"
+                      "<error type='modify' by='%s@conference.angelic.local'>"
+                        "<bad-request"
+                          " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                      "</error>"
+                    "</message>",
+                    stanza->to, ctx->full_jid, stanza->id, r->name);
+                send_raw(ctx, bad_req);
+                return;
+            }
+
+            /* Find sender's nick in the room */
+            char sender_nick[32] = "unknown";
+            for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+                if (r->users[i].active &&
+                    strcmp(r->users[i].jid, ctx->full_jid) == 0) {
+                    strncpy(sender_nick, r->users[i].nick, 31);
+                    break;
+                }
+            }
+
+            /* Find recipient by nick */
+            xmpp_client_ctx_t *recipient = NULL;
+            for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
+                if (!r->users[i].active) continue;
+                if (strcmp(r->users[i].nick, target_nick) != 0) continue;
+                recipient = find_client_by_jid(r->users[i].jid);
+                break;
+            }
+
+            if (!recipient) {
+                /* XEP-0045 §7.13 — nick not found: return <item-not-found/> */
+                char not_found[512];
+                /* bare_jid = room@conference.angelic.local */
+                char bare_jid[64];
+                int bare_len = (int)(to_slash - stanza->to);
+                if (bare_len > 63) bare_len = 63;
+                strncpy(bare_jid, stanza->to, bare_len);
+                bare_jid[bare_len] = '\0';
+
+                snprintf(not_found, sizeof(not_found),
+                    "<message from='%s' to='%s' type='error' id='%s'>"
+                      "<error type='cancel'>"
+                        "<item-not-found"
+                          " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
+                      "</error>"
+                    "</message>",
+                    stanza->to, ctx->full_jid, stanza->id);
+                send_raw(ctx, not_found);
+                return;
+            }
+
+            /* Compute bare room JID (strip the /nick part) */
+            char bare_room[64];
+            int broom_len = (int)(to_slash - stanza->to);
+            if (broom_len > 63) broom_len = 63;
+            strncpy(bare_room, stanza->to, broom_len);
+            bare_room[broom_len] = '\0';
+
+            /* XEP-0045 §7.13 — deliver with from = room/sender-nick */
+            char pm_out[2400];
+            int written;
+            if (already_wrapped) {
+                written = snprintf(pm_out, sizeof(pm_out),
+                    "<message from='%s/%s' to='%s' type='chat' id='%s'>"
+                      "<x xmlns='http://jabber.org/protocol/muc#user'/>"
+                      "%s"
+                    "</message>",
+                    bare_room, sender_nick, recipient->full_jid,
+                    stanza->id, stanza->payload);
+            } else {
+                written = snprintf(pm_out, sizeof(pm_out),
+                    "<message from='%s/%s' to='%s' type='chat' id='%s'>"
+                      "<x xmlns='http://jabber.org/protocol/muc#user'/>"
+                      "<body>%s</body>"
+                    "</message>",
+                    bare_room, sender_nick, recipient->full_jid,
+                    stanza->id, stanza->payload);
+            }
+
+            if (written > 0 && (size_t)written < sizeof(pm_out)) {
+                send_raw(recipient, pm_out);
+            }
+            return; /* private message delivered — do NOT fall through to broadcast */
+        }
 
         /* Find sender's current nick */
         char sender_nick[32] = "unknown";
@@ -3139,23 +3438,16 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
          * from = room@service/sender-nick (occupant JID)
          * to   = each occupant's real full JID
          *
-         * FIX Bug 5 — groupchat response buffer too small / no truncation check.
-         *
-         * stanza->payload is up to 1024 bytes.  The XML framing adds roughly
-         * 150-200 bytes of overhead (from, to, id, element tags).  The old
-         * response[2048] buffer was therefore barely large enough and contained
-         * no check for snprintf truncation.  RFC 6120 §4.9.3.14 requires a
+         * RFC 6120 §4.9.3.14 requires a
          * <policy-violation/> stream error rather than silent truncation when
          * a limit is exceeded.
          *
-         * Fix: increase the buffer to 2400 bytes (1024 payload + ~200 framing
+         * increase the buffer to 2400 bytes (1024 payload + ~200 framing
          * + 64 from + 64 to + 64 id + margin) and check snprintf's return
          * value.  A truncated result is skipped for that recipient via
          * continue — the sender's stanza was too large; individual recipients
          * are not penalised and the loop continues to the next occupant.
-         *
-         * FIX Bug 2 — replace stack-local target_ctx (dangling PCB) with
-         * find_client_by_jid(); see find_client_by_jid() header comment. */
+         */
         for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
             if (!r->users[i].active) {
                 continue;
@@ -3167,7 +3459,6 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 continue; /* client disconnected — skip */
             }
 
-            /* Bug 5 fix: enlarged buffer */
             char gc_response[2400];
             int written;
 
@@ -3188,7 +3479,7 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                     stanza->id, stanza->payload);
             }
 
-            /* Bug 5 fix: detect truncation per RFC 6120 §4.9.3.14 */
+            /* detect truncation per RFC 6120 §4.9.3.14 */
             if (written < 0 || (size_t)written >= sizeof(gc_response)) {
                 /* Payload exceeded buffer — skip this recipient.
                  * RFC 6120 §4.9.3.14 — policy-violation would be the
@@ -3206,7 +3497,6 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     else {
         /* --- Direct message: RFC 6121 §5.1 ---
          *
-         * FIX (§4 ⚠ Partial — direct message routing):
          * Route to the addressed recipient by searching client_registry
          * for a matching JID (full or bare). Bare JID matching is needed
          * because the sender may address user@domain without a resource.
@@ -3286,8 +3576,7 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
              * in handle_initial_presence() reconstructs and delivers the full
              * <message> stanza with a XEP-0203 <delay/> stamp.
              *
-             * FIX Bug 15 — offline_msg_is_full() was never consulted before
-             * calling offline_msg_enqueue().  XEP-0160 §2 requires that when
+             *  XEP-0160 §2 requires that when
              * the server cannot store a message it MUST return
              * <service-unavailable/> to the sender.  offline_msg_is_full()
              * implements a per-user soft cap (≤ half the total pool) so one
@@ -3315,11 +3604,8 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 strncpy(to_user_check, bare_target, sizeof(to_user_check) - 1);
             }
 
-            /* Bug 15 fix: check per-user cap BEFORE attempting enqueue.
-             * Short-circuit: enqueue is skipped entirely when is_full fires. */
-            if (offline_msg_is_full(to_user_check)
-                || offline_msg_enqueue(bare_target, ctx->full_jid,
-                                       stanza->id, stanza->payload) != 0) {
+            /* Short-circuit: enqueue is skipped entirely when is_full fires. */
+            if (offline_msg_is_full(to_user_check) || offline_msg_enqueue(bare_target, ctx->full_jid, stanza->id, stanza->payload) != 0) {
                 /* XEP-0160 §2 / RFC 6121 §8.5.2.1 — cannot store; notify sender */
                 char err[512];
 
@@ -3337,6 +3623,161 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             /* On successful enqueue: no response to sender.
              * Delivery occurs when recipient next sends initial presence. */
         }
+    }
+}
+
+/* ------------------------------------------------------------------
+ * subscription_update_roster
+ *
+ * RFC 6121 §3.1.5 / §3.1.6 — update subscription state in the roster
+ * when a subscribed/unsubscribed stanza is processed.
+ *
+ * Rules (all-same-server case — both parties on angelic.local):
+ *
+ *   Outbound 'subscribed' (contact approving user's request):
+ *     Contact's roster item for user → subscription='from'
+ *     (if was 'both', stays 'both'; just ensure it includes 'from')
+ *
+ *   Inbound 'subscribed' (user receiving contact's approval):
+ *     User's roster item for contact → subscription='to'
+ *     (if was 'both', stays 'both'; just ensure it includes 'to')
+ *     Clear ask='subscribe' if present.
+ *
+ *   Outbound 'unsubscribed':
+ *     Contact's roster item for user → remove 'from' side
+ *     (subscription='both' → 'to'; subscription='from' → 'none')
+ *
+ *   Inbound 'unsubscribed':
+ *     User's roster item for contact → remove 'to' side
+ *     (subscription='both' → 'from'; subscription='to' → 'none')
+ *
+ * owner_user   — localpart of the account whose roster we are updating
+ * contact_jid  — bare JID of the contact entry to update
+ * direction    — "outbound" (owner sends) or "inbound" (owner receives)
+ * ptype        — "subscribed" or "unsubscribed"
+ *
+ *   RFC 6121 §3.1.5 https://datatracker.ietf.org/doc/html/rfc6121#section-3.1.5
+ *   RFC 6121 §3.1.6 https://datatracker.ietf.org/doc/html/rfc6121#section-3.1.6
+ *   Appendix A — full state table
+ * ------------------------------------------------------------------ */
+static void subscription_update_roster(const char *owner_user,
+                                        const char *contact_jid,
+                                        const char *direction,
+                                        const char *ptype) {
+    /* Locate the existing roster item */
+    roster_entry_t *slot = NULL;
+    for (int i = 0; i < MAX_ROSTER_ENTRIES; i++) {
+        if (!roster_store[i].active) continue;
+        if (strncmp(roster_store[i].username, owner_user, 32) != 0) continue;
+        if (strncmp(roster_store[i].jid, contact_jid, 64) != 0) continue;
+        slot = &roster_store[i];
+        break;
+    }
+
+    if (!slot) {
+        /* RFC 6121 §3.1.6 — if the contact is not in the user's roster,
+         * silently ignore (do not create a phantom roster entry). */
+        return;
+    }
+
+    /* Determine current subscription value */
+    const char *cur_sub = "none";
+    if (strstr(slot->item_xml, "subscription='both'") ||
+        strstr(slot->item_xml, "subscription=\"both\""))        cur_sub = "both";
+    else if (strstr(slot->item_xml, "subscription='to'") ||
+             strstr(slot->item_xml, "subscription=\"to\""))     cur_sub = "to";
+    else if (strstr(slot->item_xml, "subscription='from'") ||
+             strstr(slot->item_xml, "subscription=\"from\""))   cur_sub = "from";
+
+    /* Compute new subscription value */
+    const char *new_sub = cur_sub;
+
+    if (strcmp(ptype, "subscribed") == 0) {
+        if (strcmp(direction, "inbound") == 0) {
+            /* RFC 6121 §3.1.6 — inbound subscribed: gain 'to' */
+            if (strcmp(cur_sub, "none") == 0 || strcmp(cur_sub, "from") == 0) {
+                new_sub = (strcmp(cur_sub, "from") == 0) ? "both" : "to";
+            }
+        } else {
+            /* RFC 6121 §3.1.5 — outbound subscribed: gain 'from' */
+            if (strcmp(cur_sub, "none") == 0 || strcmp(cur_sub, "to") == 0) {
+                new_sub = (strcmp(cur_sub, "to") == 0) ? "both" : "from";
+            }
+        }
+    } else if (strcmp(ptype, "unsubscribed") == 0) {
+        if (strcmp(direction, "inbound") == 0) {
+            /* RFC 6121 §3.3.3 — inbound unsubscribed: lose 'to' */
+            if (strcmp(cur_sub, "both") == 0) new_sub = "from";
+            else if (strcmp(cur_sub, "to") == 0) new_sub = "none";
+        } else {
+            /* RFC 6121 §3.2.2 — outbound unsubscribed: lose 'from' */
+            if (strcmp(cur_sub, "both") == 0) new_sub = "to";
+            else if (strcmp(cur_sub, "from") == 0) new_sub = "none";
+        }
+    }
+
+    if (strcmp(new_sub, cur_sub) == 0) return; /* nothing to change */
+
+    /* Rebuild item_xml with updated subscription= and no ask= attribute */
+    char jid_val[64] = {0};
+    /* Extract jid from existing item_xml */
+    const char *jp = strstr(slot->item_xml, "jid=");
+    if (jp) {
+        jp += 4;
+        char qc = *jp++;
+        const char *je = strchr(jp, qc);
+        if (je) {
+            int jlen = (int)(je - jp);
+            if (jlen >= 64) jlen = 63;
+            strncpy(jid_val, jp, jlen);
+        }
+    }
+    if (jid_val[0] == '\0') strncpy(jid_val, contact_jid, 63);
+
+    /* Extract name= if present */
+    char name_attr[128] = {0};
+    const char *np = strstr(slot->item_xml, "name=");
+    if (np) {
+        np += 5;
+        char qc = *np++;
+        const char *ne = strchr(np, qc);
+        if (ne) {
+            int nlen = (int)(ne - np);
+            if (nlen >= 64) nlen = 63;
+            char name_val[64] = {0};
+            strncpy(name_val, np, nlen);
+            snprintf(name_attr, sizeof(name_attr), " name='%s'", name_val);
+        }
+    }
+
+    /* Write updated item (no ask= — cleared per RFC 6121 §3.1.6) */
+    char new_xml[ROSTER_ITEM_MAX_LEN];
+    snprintf(new_xml, sizeof(new_xml),
+        "<item jid='%s'%s subscription='%s'/>",
+        jid_val, name_attr, new_sub);
+
+    strncpy(slot->item_xml, new_xml, ROSTER_ITEM_MAX_LEN - 1);
+    slot->item_xml[ROSTER_ITEM_MAX_LEN - 1] = '\0';
+
+    /* Persist the updated roster */
+    xmpp_persist_save_roster();
+
+    /* RFC 6121 §3.1.5 / §3.1.6 — send roster push to all of owner's
+     * interested resources (those that have requested the roster). */
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (client_registry[i].pcb == NULL) continue;
+        if (client_registry[i].state < STATE_SESSION) continue;
+        if (strcmp(client_registry[i].username, owner_user) != 0) continue;
+
+        char push[512];
+        snprintf(push, sizeof(push),
+            "<iq type='set' to='%s'>"
+              "<query xmlns='jabber:iq:roster'>"
+                "%s"
+              "</query>"
+            "</iq>",
+            client_registry[i].full_jid, new_xml);
+        send_raw(&client_registry[i], push);
     }
 }
 
@@ -3394,18 +3835,12 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
 
     /* ------------------------------------------------------------------
-     * FIX Bug 13 — handle type="probe" per RFC 6121 §4.3.1.
+     * handle type="probe" per RFC 6121 §4.3.1.
      *
      * A presence probe is a server-to-server (or client-to-server) request
      * asking "what is the current presence of JID X?".  The server SHOULD
-     * respond with the probed user's current <presence/> stanza.
-     *
-     * Previously XMPP_PRESENCE_PROBE did not exist as an enum value, so
-     * probe stanzas arrived here typed as XMPP_PRESENCE and fell through
-     * into the availability broadcast loop — re-broadcasting the probe as
-     * if the prober had just come online, which is wrong.
-     *
-     * Fix: detect XMPP_PRESENCE_PROBE first, look up the probed user in
+     * respond with the probed user's current <presence/> stanza.     *
+     * detect XMPP_PRESENCE_PROBE first, look up the probed user in
      * client_registry[] by bare JID, send their current presence to the
      * prober, and return early so the availability broadcast is skipped.
      *
@@ -3446,12 +3881,18 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 /* Found the probed user — reply with their current presence */
                 char probe_resp[512];
 
+            /* RFC 6121 §4.3.1 + §4.6 — respond with the probed user's
+             * actual stored presence content, not a hardcoded value. */
+            if (client_registry[i].presence_payload[0] != '\0') {
                 snprintf(probe_resp, sizeof(probe_resp),
-                    "<presence from='%s' to='%s'>"
-                      "<show>chat</show>"
-                      "<priority>1</priority>"
-                    "</presence>",
+                    "<presence from='%s' to='%s'>%s</presence>",
+                    client_registry[i].full_jid, ctx->full_jid,
+                    client_registry[i].presence_payload);
+            } else {
+                snprintf(probe_resp, sizeof(probe_resp),
+                    "<presence from='%s' to='%s'/>",
                     client_registry[i].full_jid, ctx->full_jid);
+            }
 
                 send_raw(ctx, probe_resp);
             }
@@ -3497,21 +3938,14 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             *slash = '\0';
         }
 
-        /* FIX Bug 12 — CRITICAL: format string injection via relay buffer.
-         *
-         * The original code built a template string:
-         *   snprintf(relay, …, "<presence … from='%s' to='%%s'/>", bare_from)
-         * then used it as a format string in a second snprintf:
-         *   snprintf(msg, …, relay, client_registry[i].full_jid)
-         *
-         * bare_from is derived from ctx->full_jid → ctx->username, which
+        /* bare_from is derived from ctx->full_jid → ctx->username, which
          * comes from the SASL PLAIN payload supplied by the remote client.
          * A username containing '%' characters (e.g. "evil%s%n") would be
          * interpreted as format specifiers in the second snprintf, enabling
          * arbitrary stack reads (%s), integer writes (%n), and in the
          * worst case remote code execution.
          *
-         * Fix: eliminate the two-pass relay template entirely.  Build the
+         * eliminate the two-pass relay template entirely.  Build the
          * final stanza directly in a single snprintf that fills in both
          * bare_from and the recipient's full JID in one call.  There is no
          * longer any intermediate buffer that could be mis-treated as a
@@ -3537,7 +3971,6 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             }
 
             if (strcmp(bare_target, bare_reg) == 0) {
-                /* Bug 12 fix: single snprintf, no intermediate format string */
                 char msg[512];
                 snprintf(msg, sizeof(msg),
                     "<presence type='%s' from='%s' to='%s'/>",
@@ -3570,6 +4003,55 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
             pending_sub_enqueue(ptype, bare_from, to_user);
         }
+        /* ------------------------------------------------------------------
+         * RFC 6121 §3.1.5 / §3.1.6 — update subscription state in rosters.
+         *
+         * Both parties share the same server so we update both sides:
+         *   1. Sender's own roster: treat as if they sent the stanza to us.
+         *   2. Recipient's roster: treat as if they received the stanza.
+         *
+         * For 'subscribed':
+         *   Sender (contact) gains subscription='from' on their item for recipient.
+         *   Recipient (user) gains subscription='to' on their item for sender.
+         *
+         * For 'unsubscribed':
+         *   Sender loses 'from' on their item for recipient.
+         *   Recipient loses 'to' on their item for sender.
+         *
+         *   RFC 6121 §3.1.5  https://datatracker.ietf.org/doc/html/rfc6121#section-3.1.5
+         *   RFC 6121 §3.1.6  https://datatracker.ietf.org/doc/html/rfc6121#section-3.1.6
+         * ------------------------------------------------------------------ */
+        if (strcmp(ptype, "subscribed") == 0 ||
+            strcmp(ptype, "unsubscribed") == 0) {
+
+            /* Extract sender's username (localpart of bare_from) */
+            char sender_user[32] = {0};
+            const char *fat = strchr(bare_from, '@');
+            if (fat) {
+                int ul = (int)(fat - bare_from);
+                if (ul >= 32) ul = 31;
+                strncpy(sender_user, bare_from, ul);
+            } else {
+                strncpy(sender_user, bare_from, 31);
+            }
+
+            /* Extract recipient's username (localpart of bare_target) */
+            char recip_user[32] = {0};
+            const char *rat = strchr(bare_target, '@');
+            if (rat) {
+                int ul = (int)(rat - bare_target);
+                if (ul >= 32) ul = 31;
+                strncpy(recip_user, bare_target, ul);
+            } else {
+                strncpy(recip_user, bare_target, 31);
+            }
+
+            /* Sender's roster: they sent this (outbound) */
+            subscription_update_roster(sender_user, bare_target, "outbound", ptype);
+
+            /* Recipient's roster: they receive this (inbound) */
+            subscription_update_roster(recip_user, bare_from, "inbound", ptype);
+        }
 
         return;
     }
@@ -3580,7 +4062,6 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
      * RFC 6121 §4.2.2 — broadcast presence update to every connected
      * client that has completed session establishment.
      *
-     * FIX (§4 ⚠ Partial — unavailable presence):
      * stanza->type is now XMPP_PRESENCE_UNAVAILABLE when the client sent
      * type='unavailable'. Previously this was detected via strstr() on
      * stanza->payload, which is the INNER content and does not contain
@@ -3606,11 +4087,28 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 ctx->full_jid, client_registry[i].full_jid);
         }
         else {
-            snprintf(response, sizeof(response),
-                "<presence from='%s' to='%s' id='%s'>"
-                  "<status>Online</status>"
-                "</presence>",
-                ctx->full_jid, client_registry[i].full_jid, stanza->id);
+            /* RFC 6121 §4.6 — forward actual presence content.
+             *
+             * Update the stored payload first (this may be an in-session
+             * availability change, e.g. going away).  Then broadcast the
+             * real <show>/<status>/<priority> to each connected peer.
+             * RFC 6121 §4.7.2 — https://datatracker.ietf.org/doc/html/rfc6121#section-4.7.2 */
+            if (stanza->payload[0] != '\0') {
+                strncpy(ctx->presence_payload, stanza->payload,
+                        sizeof(ctx->presence_payload) - 1);
+                ctx->presence_payload[sizeof(ctx->presence_payload) - 1] = '\0';
+            }
+            if (ctx->presence_payload[0] != '\0') {
+                snprintf(response, sizeof(response),
+                    "<presence from='%s' to='%s' id='%s'>%s</presence>",
+                    ctx->full_jid, client_registry[i].full_jid,
+                    stanza->id, ctx->presence_payload);
+            } else {
+                snprintf(response, sizeof(response),
+                    "<presence from='%s' to='%s' id='%s'/>",
+                    ctx->full_jid, client_registry[i].full_jid,
+                    stanza->id);
+            }
         }
 
         send_raw(&client_registry[i], response);
