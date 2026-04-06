@@ -37,16 +37,7 @@ static idtr_t idtr;
 
 //extern uint32_t e1000_read_reg(uint64_t base, uint32_t offset);
 //extern uint64_t e1000_mmio_base_phys;
-/* FIX: e1000_read_reg and e1000_mmio_base_phys are NO LONGER referenced here.
- *
- * After vmm_protect_driver() + mpk_set_pkru(0x0C), all e1000 driver pages
- * are tagged with MPK Key 1 and are inaccessible to the kernel without the
- * MPK trampoline.  Interrupts fire asynchronously while MPK is active, so
- * calling e1000_read_reg() directly from the IRQ handler causes a Key-1
- * protection-key fault (#PF with error-code bit 5 set), producing the
- * spurious cause value (e.g. 0x83) seen in the serial log.
- *
- * The corrected strategy: signal packet_pending = 1 for any hardware IRQ
+/* signal packet_pending = 1 for any hardware IRQ
  * and let the main loop's trampoline-guarded angelic_netif_poll() drain the
  * NIC.  lwIP's ethernet_input() will discard the frame if there is nothing
  * waiting, so a false-positive flag costs one empty poll — not a crash.
@@ -170,16 +161,7 @@ void interrupt_handler(registers_t* regs) {
         //     }
         // }
         
-        /* FIX: Do NOT call e1000_read_reg() here.
-         *
-         * The e1000 driver pages are MPK Key-1 protected after
-         * vmm_protect_driver() runs.  Calling e1000_read_reg() directly
-         * from an interrupt handler — which fires while PKRU=0x0C is
-         * active — causes a protection-key #PF.  That produced the
-         * spurious cause value (0x...83) in the serial log and
-         * corrupted the ICR clear-on-read, losing real interrupt causes.
-         *
-         * Solution: unconditionally signal packet_pending for any IRQ.
+        /* unconditionally signal packet_pending for any IRQ.
          * The main loop calls angelic_netif_poll() via the MPK trampoline,
          * which safely reads ICR and drains the NIC ring.  A spurious
          * flag is cheap (one empty poll); a Key-1 fault is fatal.

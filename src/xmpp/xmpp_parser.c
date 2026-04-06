@@ -3,15 +3,6 @@
 #include <string.h>
 #include <stdio.h>
 
-/* extract_attribute — REMOVED (Bug 16 fix)
- *
- * This static helper was never called from parse_xml_stream() or
- * anywhere else in the codebase.  Attribute extraction inside the
- * parser is performed entirely through yxml ATTRVAL callbacks.
- * Keeping the function caused a -Wunused-function compiler warning
- * and was misleading (readers might assume it was part of the parse
- * path).  Removed entirely. */
-
 /* ------------------------------------------------------------------
  * find_stanza_end  (static helper)
  *
@@ -123,7 +114,7 @@ static int find_stanza_end(const char *xml, int len) {
  * IQ type attribute (MUST be exactly one of get|set|result|error):
  *   RFC 6120 §8.2.3 — IQ Semantics
  *     https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
- *   FIX (§3 HIGH): s->type is now initialised to XMPP_UNKNOWN at the
+ *   s->type is now initialised to XMPP_UNKNOWN at the
  *   depth-1 ELEMSTART for <iq> rather than being pre-set to XMPP_IQ_RESULT.
  *   The actual type value is resolved after the yxml loop by comparing
  *   the accumulated iq_type_buf against "get"/"set"/"result"/"error".
@@ -258,7 +249,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
                  * <iq>, <presence>; anything else at depth 1 is invalid
                  * mid-stream.
                  *
-                 * FIX (§3 HIGH): IQ type is now initialised to XMPP_UNKNOWN
+                 * IQ type is now initialised to XMPP_UNKNOWN
                  * here, not XMPP_IQ_RESULT. XMPP_IQ_RESULT is only set
                  * when the type="result" attribute is explicitly parsed in
                  * the ATTRVAL branch below. This prevents a malformed or
@@ -425,12 +416,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
         else if (strcmp(pres_type_buf, "unsubscribed") == 0) {
             s->type = XMPP_PRESENCE_UNSUBSCRIBED;
         }
-        /* FIX Bug 13 — resolve type="probe" to XMPP_PRESENCE_PROBE.
-         *
-         * Previously there was no case for "probe" so a probe stanza
-         * fell through with s->type == XMPP_PRESENCE (set at ELEMSTART)
-         * and was broadcast as an availability update, which is wrong.
-         * RFC 6121 §4.3.1 — the server SHOULD respond with the probed
+        /* RFC 6121 §4.3.1 — the server SHOULD respond with the probed
          * user's current presence, not re-broadcast the probe.
          * handle_broadcast_presence() has a dedicated probe branch that
          * handles this correctly and returns early.
@@ -442,13 +428,7 @@ xmpp_stanza_t* parse_xml_stream(char *payload, int len, int *bytes_consumed, par
     }
 
     /* --- Phase 2: strstr fallback for namespace detection --------------- */
-    /* FIX Bug 11 — the old code ran every strstr check unconditionally,
-     * overwriting whatever yxml correctly populated in s->xmlns during
-     * Phase 1.  This caused a <message> stanza whose <body> happened to
-     * contain the substring "muc#owner" to be misrouted to
-     * handle_muc_owner() instead of handle_chat_message().
-     *
-     * The correct approach:
+    /* The correct approach:
      *   A) If yxml found a xmlns (s->xmlns is non-empty), trust it —
      *      EXCEPT for MUC presence stanzas (see B below).
      *   B) MUC join/exit presence stanzas carry

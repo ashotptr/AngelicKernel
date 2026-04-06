@@ -48,7 +48,7 @@
 #define CHECKSUM_CHECK_UDP      1
 #define CHECKSUM_CHECK_TCP      1
 
-// --- 6. CRITICAL FIX: Disable OS-dependent APIs ---
+// Disable OS-dependent APIs ---
 // These require threads/mutexes, which we don't have.
 #define LWIP_NETCONN            0
 #define LWIP_SOCKET             0

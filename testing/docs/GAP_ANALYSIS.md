@@ -63,7 +63,7 @@ directly after `memset()`.
 **Current code:**
 ```c
 xmpp_tls_client_free(&client_registry[i]);
-tcp_close(client_registry[i].pcb);   // Bug 7 fix: close before zeroing
+tcp_close(client_registry[i].pcb);
 memset(&client_registry[i], 0, sizeof(xmpp_client_ctx_t));
 ```
 **Missing:** Before `tcp_close()`, send to the evicted client:

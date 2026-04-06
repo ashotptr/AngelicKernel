@@ -77,9 +77,7 @@ struct route_entry {
  * distinguish them. RFC 6121 §5 — Message delivery.
  * ------------------------------------------------------------------ */
 static struct route_entry router[] = {
-    /* Bug 4 fix — SASL entry removed from the routing table.
-     *
-     * SASL <auth> stanzas are dispatched exclusively inside
+    /* SASL <auth> stanzas are dispatched exclusively inside
      * xmpp_recv_callback() when state == STATE_CONNECTED or STATE_SASL.
      * Any other state goes to xmpp_route_stanza(); if this table still
      * contained the SASL entry with min_state=STATE_CONNECTED, a
@@ -94,10 +92,7 @@ static struct route_entry router[] = {
      *   RFC 6120 §6.3 — SASL negotiation is a pre-authentication step.
      *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.3 */
 
-    /* Bug 4 fix — bind min_state tightened from STATE_AUTHENTICATED
-     * to STATE_BIND.
-     *
-     * handle_handshake_logic() now sets STATE_BIND when it sends the
+    /* handle_handshake_logic() now sets STATE_BIND when it sends the
      * post-SASL <stream:features> containing <bind/>.  Using STATE_BIND
      * as the minimum means the router sends <unexpected-request/> if
      * a bind IQ arrives before the post-SASL stream re-open completes.
@@ -161,7 +156,7 @@ static struct route_entry router[] = {
  * ------------------------------------------------------------------ */
 void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     /* ------------------------------------------------------------------
-     * Fix (§5): RFC 6120 §8.1.2 — server MUST overwrite the 'from'
+     * RFC 6120 §8.1.2 — server MUST overwrite the 'from'
      * attribute on every inbound stanza with the authenticated sender JID.
      *
      * Clients can put any value (including another user's JID) in their
@@ -195,12 +190,6 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
         return;
     }
-
-    /* FIX (§3 HIGH): Removed the muc#owner strstr() pre-check block that
-     * was here. It caused handle_muc_owner() to be called twice for every
-     * muc#owner stanza — once by this block and again by the routing table
-     * entry below. The table entry is sufficient and correct; the pre-check
-     * was entirely redundant. */
 
     /* Primary dispatch: xmlns-based routing table */
     for (int i = 0; router[i].xmlns != NULL; i++) {
@@ -269,7 +258,7 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             return;
         }
         else if (stanza->type == XMPP_PRESENCE || stanza->type == XMPP_PRESENCE_UNAVAILABLE || stanza->type == XMPP_PRESENCE_SUBSCRIBE || stanza->type == XMPP_PRESENCE_SUBSCRIBED || stanza->type == XMPP_PRESENCE_UNSUBSCRIBE || stanza->type == XMPP_PRESENCE_UNSUBSCRIBED
-              /* FIX Bug 13 — XMPP_PRESENCE_PROBE must reach
+              /* XMPP_PRESENCE_PROBE must reach
                * handle_broadcast_presence() so the probe branch there
                * can respond with the probed user's current presence per
                * RFC 6121 §4.3.1.  Without this, probe stanzas fell
@@ -306,7 +295,7 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
              * condition when the server does not offer the feature.
              *   https://datatracker.ietf.org/doc/html/rfc6120#section-8.3.3.19
              *
-             * FIX (§4 ⚠ Partial): Reply even when stanza->id is empty.
+             * Reply even when stanza->id is empty.
              * RFC 6120 §8.2.3 — MUST reply to every IQ get/set regardless
              * of whether 'id' was present. When id is absent, the response
              * omits the id= attribute entirely (rather than echoing an empty

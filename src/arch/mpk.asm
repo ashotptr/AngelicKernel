@@ -64,17 +64,7 @@ mpk_set_pkru:
 ;     2. Call the driver function
 ;     3. Restore PKRU = 0x0000000C (re-lock Key 1)
 ;
-; Key invariant:
-;   WRPKRU uses EAX (new value), ECX (must=0), EDX (must=0).
-;   Setting ECX=0 and EDX=0 BEFORE the instruction DESTROYS the
-;   argument values that arrived in RCX and RDX (arg3 and arg2
-;   in the System V AMD64 ABI).
-;
-;   The original trampoline had this bug: it clobbered RCX/RDX
-;   with the WRPKRU setup, then tried to restore args from those
-;   same registers — passing zero as arg2 and arg3 to the driver.
-;
-;   Fix: save all arguments to callee-saved registers (R12–R15)
+;   save all arguments to callee-saved registers (R12–R15)
 ;   BEFORE touching ECX/EDX/EAX for WRPKRU.
 ;
 ; PKRU encoding for Key 1:
@@ -223,11 +213,6 @@ mpk_trampoline_2:
 ;   e1000_send_raw(uint64_t mmio, void *data, uint16_t len)
 ;   e1000_poll_receive(uint64_t mmio, void *buf, uint16_t max)
 ;   e1000_write_reg(uint64_t base, uint32_t off, uint32_t val)
-;
-; BUG FIX vs. original version:
-;   Original did xor ecx,ecx / xor edx,edx for WRPKRU BEFORE
-;   saving a1 (rdx) and a2 (rcx), then read the zeroed registers.
-;   This version saves all three args into R13–R15 first.
 ; ---------------------------------------------------
 mpk_trampoline_3:
     push rbp
@@ -239,8 +224,8 @@ mpk_trampoline_3:
 
     mov  r12, rdi           ; r12 = func
     mov  r13, rsi           ; r13 = a0
-    mov  r14, rdx           ; r14 = a1   ← was the bug: rdx was zeroed by WRPKRU setup
-    mov  r15, rcx           ; r15 = a2   ← was the bug: rcx was zeroed by WRPKRU setup
+    mov  r14, rdx           ; r14 = a1
+    mov  r15, rcx           ; r15 = a2
 
     ; ── 1. Unlock Key 1 ────────────────────────────
     xor  ecx, ecx           ; WRPKRU requires ECX=0

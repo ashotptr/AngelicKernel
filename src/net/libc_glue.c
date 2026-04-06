@@ -342,16 +342,9 @@ int vprintf(const char *format, va_list args) {
                     print_int(va_arg(args, int));
                     break;
                 case 'u':
-                    /* BUG FIX: print_int() takes a signed long; passing
-                     * va_arg(unsigned int) lets the compiler implicitly
-                     * convert it to long, sign-extending values >= 0x80000000
-                     * to negative 64-bit numbers.  Cast through unsigned long
-                     * to prevent that. */
                     print_int((long)(unsigned long)(unsigned int)va_arg(args, unsigned int));
                     break;
                 case 'x':
-                    /* BUG FIX: %x is a plain hex integer — no "0x" prefix.
-                     * Only %p (pointer) should emit the prefix. */
                     print_hex(va_arg(args, unsigned long));
                     break;
                 case 'p':
@@ -433,10 +426,6 @@ int vsnprintf(char *str, size_t size, const char *format, va_list args) {
                 }
             }
             else if (*format == 'x') {
-                /* BUG FIX: %x must NOT prepend "0x" — that prefix belongs
-                 * only to %p.  The original combined %x and %p in one branch
-                 * and always prepended "0x", corrupting plain hex outputs
-                 * (e.g. XMPP capability hash strings, colour values). */
                 simple_append_hex(&out, &remaining, va_arg(args, unsigned long));
             }
             else if (*format == 'p') {

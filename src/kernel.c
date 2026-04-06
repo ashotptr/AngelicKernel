@@ -319,10 +319,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     (void)use_interrupt_sleeping;
 
     while (1) {
-        /* FIX: Clear packet_pending BEFORE polling the NIC.
-         *
-         * Bug: the original code called angelic_netif_poll() 4 times and
-         * THEN cleared packet_pending.  Because e1000 interrupts can fire
+        /* Clear packet_pending BEFORE polling the NIC.
+         * Because e1000 interrupts can fire
          * at any point during the burst (interrupts are enabled), the IRQ
          * handler could set packet_pending = 1 again mid-burst.  The main
          * loop would then immediately start another burst, feeding the same
@@ -331,7 +329,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
          *
          *   LWIP ASSERT: tcp_input: pcb->next != pcb (before cache)
          *
-         * Fix (snapshot-and-drain pattern):
+         * (snapshot-and-drain pattern):
          *   1. Atomically clear packet_pending first.
          *   2. Then poll the NIC.
          *
@@ -344,7 +342,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
         if (packet_pending) {
             packet_pending = 0;  /* clear FIRST — then drain */
 
-            // [FIX] Loop this a few times to drain the hardware buffer.
+            // Loop this a few times to drain the hardware buffer.
             // Since angelic_netif_poll() returns void, we blindly call it 
             // a few times. 4 is usually enough to clear a burst.
             for(int i = 0; i < 4; i++) {

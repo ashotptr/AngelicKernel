@@ -127,7 +127,7 @@ int vsnprintf(char *str, size_t size, const char *format, va_list args);
 /* gmtime() is used by x509.c to validate NotBefore/NotAfter against the wall
  * clock.  No wall clock exists post-ExitBootServices.  Without this undef,
  * loading our self-signed cert would call gmtime(NULL) and either crash or
- * mark the cert as expired — a real runtime bug. */
+ * mark the cert as expired. */
 #undef MBEDTLS_HAVE_TIME_DATE
 
 /* fopen/fread/fwrite used across x509 parse, pkparse, entropy, bignum, dhm.

@@ -361,9 +361,6 @@ int roster_store_upsert_item(const char *username, const char *item_xml) {
             slot->active = 0;
         }
 
-        /* Bug 14 fix — save removed from here; called once by
-         * handle_roster_request() after roster_store_set_from_payload()
-         * completes all upserts in the IQ-set payload. */
         return 0;
     }
 
@@ -399,10 +396,6 @@ int roster_store_upsert_item(const char *username, const char *item_xml) {
 
     slot->active = 1;
 
-    /* Bug 14 fix — save removed from here; called once by
-     * handle_roster_request() after all items in the IQ-set are
-     * processed.  A roster set with N items previously caused N
-     * synchronous ATA PIO writes; now there is exactly one. */
     return 0;
 }
 

@@ -116,11 +116,6 @@ void vmm_set_pkey(uint64_t virt, int pkey) {
  *     will raise a #PF on any read or write to those pages from XMPP
  *     code, even though they share the same virtual address space.
  *
- * BUG FIX vs. original:
- *   The original only iterated __secure_driver_data_start/.._end.
- *   Driver CODE pages were left with key 0 (no protection), meaning
- *   XMPP code could still overwrite e1000 function bodies directly.
- *   Now both ranges are protected.
  * ----------------------------------------------------------------------- */
 void vmm_protect_driver(void) {
     serial_print("[VMM] Locking e1000 driver...\n");
