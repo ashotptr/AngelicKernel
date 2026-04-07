@@ -1,8 +1,10 @@
 #include <efi.h>
 #include <efilib.h>
+#include "lwip/pbuf.h"
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/etharp.h"
+#include "lwip/err.h"
 #include "netif/ethernet.h"
 #include "drivers/e1000.h"
 #include <stddef.h>
@@ -10,6 +12,8 @@
 #include <string.h>
 
 void serial_print(const char* str);
+
+extern err_t low_level_output_zerocopy(struct netif *netif, struct pbuf *p);
 
 // this function must be defined for lwIP
 uint32_t sys_now(void) {
@@ -26,31 +30,86 @@ static struct netif angelic_netif;
 static uint64_t global_mmio_base;
 
 static char rx_buffer[1514]; 
-static char tx_buffer[1514];
-
-static err_t low_level_output(struct netif *netif, struct pbuf *p) {
+static char tx_buffer[1514];#define MAX_TX_SEGS  8      /* maximum pbuf chain depth we support zero-copy */
+ 
+/* Fallback contiguous buffer (only used when chain is too deep) */
+static char tx_buffer_fallback[1514];
+ 
+/*
+ * low_level_output — zero-copy version
+ *
+ * This function is called by lwIP's ethernet_input path for each outbound
+ * Ethernet frame.  The pbuf chain `p` contains one fragment per element.
+ *
+ * Normal XMPP stanzas produce at most 2 pbuf fragments:
+ *   1. Ethernet + IP + TCP header (from lwIP)
+ *   2. Application payload (one pbuf per segment)
+ *
+ * We build a scatter array of (addr, len) pairs directly from the pbuf
+ * chain and pass it to e1000_send_scatter() via the MPK trampoline.
+ * No data is copied.
+ */
+static err_t low_level_output_zerocopy(struct netif *netif, struct pbuf *p) {
     (void)netif;
-    struct pbuf *q;
-    int len = 0;
-
-    // Flatten pbuf chain into contiguous memory for the driver
-    for(q = p; q != NULL; q = q->next) {
-        if (len + q->len > 1514) {
-            break;
+    extern uint64_t global_mmio_base;
+    extern int mpk_e1000_send_scatter(uint64_t, const void**, const uint16_t*, int);
+ 
+    /* Count segments */
+    int n_segs = 0;
+    for (struct pbuf *q = p; q != NULL; q = q->next) n_segs++;
+ 
+    if (n_segs == 0) return ERR_OK;
+ 
+    /* ── Fast path: scatter-gather (zero copy) ─────────────────────────── */
+    if (n_segs <= MAX_TX_SEGS) {
+        const void   *addrs[MAX_TX_SEGS];
+        uint16_t      lens [MAX_TX_SEGS];
+        int i = 0;
+ 
+        for (struct pbuf *q = p; q != NULL; q = q->next) {
+            addrs[i] = q->payload;
+            lens [i] = (uint16_t)q->len;
+            i++;
         }
-
-        memcpy(tx_buffer + len, q->payload, q->len);
-
+ 
+#ifdef USE_MPK
+        mpk_e1000_send_scatter(global_mmio_base, addrs, lens, n_segs);
+#else
+        /* Direct call (no MPK) — used when testing without MPK */
+        extern int e1000_send_scatter(uint64_t, const void**, const uint16_t*, int);
+        e1000_send_scatter(global_mmio_base, addrs, lens, n_segs);
+#endif
+        return ERR_OK;
+    }
+ 
+    /* ── Fallback: flatten into contiguous buffer ───────────────────────
+     * Reached only if the pbuf chain is unusually deep.  This is the
+     * original memcpy path, kept as a safety fallback.
+     */
+    int len = 0;
+    for (struct pbuf *q = p; q != NULL; q = q->next) {
+        if (len + (int)q->len > 1514) break;
+        memcpy(tx_buffer_fallback + len, q->payload, q->len);
         len += q->len;
     }
-
-    #ifdef USE_MPK
-        mpk_trampoline_3((void*)e1000_send_raw, global_mmio_base, (uint64_t)tx_buffer, (uint64_t)len);
-    #else
-        e1000_send_raw(global_mmio_base, (uint8_t*)tx_buffer, len);
-    #endif
-
+ 
+#ifdef USE_MPK
+    extern int mpk_trampoline_3(void*, uint64_t, uint64_t, uint64_t);
+    extern int e1000_send_raw(uint64_t, void*, uint16_t);
+    mpk_trampoline_3((void*)e1000_send_raw,
+                     global_mmio_base,
+                     (uint64_t)tx_buffer_fallback,
+                     (uint64_t)len);
+#else
+    extern int e1000_send_raw(uint64_t, void*, uint16_t);
+    e1000_send_raw(global_mmio_base, tx_buffer_fallback, len);
+#endif
+ 
     return ERR_OK;
+}
+
+static err_t low_level_output(struct netif *netif, struct pbuf *p) {
+    return low_level_output_zerocopy(netif, p);
 }
 
 err_t angelic_netif_init(struct netif *netif) {

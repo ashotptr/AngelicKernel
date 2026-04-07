@@ -326,6 +326,8 @@ void send_raw(xmpp_client_ctx_t *ctx, const char *data) {
 
         tcp_output(ctx->pcb);
     }
+
+    xmpp_sm_on_stanza_sent(ctx);
 }
 
 
@@ -3664,45 +3666,39 @@ static void subscription_update_roster(const char *owner_user,
                                         const char *contact_jid,
                                         const char *direction,
                                         const char *ptype) {
-    /* Locate the existing roster item */
+    /* ── Step 1: Locate existing roster item ──────────────────────────── */
     roster_entry_t *slot = NULL;
     for (int i = 0; i < MAX_ROSTER_ENTRIES; i++) {
         if (!roster_store[i].active) continue;
         if (strncmp(roster_store[i].username, owner_user, 32) != 0) continue;
-        if (strncmp(roster_store[i].jid, contact_jid, 64) != 0) continue;
+        if (strncmp(roster_store[i].jid, contact_jid, 64)  != 0) continue;
         slot = &roster_store[i];
         break;
     }
-
-    if (!slot) {
-        /* RFC 6121 §3.1.6 — if the contact is not in the user's roster,
-         * silently ignore (do not create a phantom roster entry). */
-        return;
-    }
-
-    /* Determine current subscription value */
+ 
+    /* ── Step 2: Determine current subscription state ─────────────────── */
     const char *cur_sub = "none";
-    if (strstr(slot->item_xml, "subscription='both'") ||
-        strstr(slot->item_xml, "subscription=\"both\""))        cur_sub = "both";
-    else if (strstr(slot->item_xml, "subscription='to'") ||
-             strstr(slot->item_xml, "subscription=\"to\""))     cur_sub = "to";
-    else if (strstr(slot->item_xml, "subscription='from'") ||
-             strstr(slot->item_xml, "subscription=\"from\""))   cur_sub = "from";
-
-    /* Compute new subscription value */
+    if (slot) {
+        if (strstr(slot->item_xml, "subscription='both'")  ||
+            strstr(slot->item_xml, "subscription=\"both\""))       cur_sub = "both";
+        else if (strstr(slot->item_xml, "subscription='to'")   ||
+                 strstr(slot->item_xml, "subscription=\"to\""))    cur_sub = "to";
+        else if (strstr(slot->item_xml, "subscription='from'") ||
+                 strstr(slot->item_xml, "subscription=\"from\""))  cur_sub = "from";
+    }
+ 
+    /* ── Step 3: Compute new subscription state ───────────────────────── */
     const char *new_sub = cur_sub;
-
+ 
     if (strcmp(ptype, "subscribed") == 0) {
         if (strcmp(direction, "inbound") == 0) {
             /* RFC 6121 §3.1.6 — inbound subscribed: gain 'to' */
-            if (strcmp(cur_sub, "none") == 0 || strcmp(cur_sub, "from") == 0) {
-                new_sub = (strcmp(cur_sub, "from") == 0) ? "both" : "to";
-            }
+            if (strcmp(cur_sub, "none") == 0)   new_sub = "to";
+            else if (strcmp(cur_sub, "from") == 0) new_sub = "both";
         } else {
             /* RFC 6121 §3.1.5 — outbound subscribed: gain 'from' */
-            if (strcmp(cur_sub, "none") == 0 || strcmp(cur_sub, "to") == 0) {
-                new_sub = (strcmp(cur_sub, "to") == 0) ? "both" : "from";
-            }
+            if (strcmp(cur_sub, "none") == 0)  new_sub = "from";
+            else if (strcmp(cur_sub, "to") == 0) new_sub = "both";
         }
     } else if (strcmp(ptype, "unsubscribed") == 0) {
         if (strcmp(direction, "inbound") == 0) {
@@ -3715,12 +3711,57 @@ static void subscription_update_roster(const char *owner_user,
             else if (strcmp(cur_sub, "from") == 0) new_sub = "none";
         }
     }
-
-    if (strcmp(new_sub, cur_sub) == 0) return; /* nothing to change */
-
-    /* Rebuild item_xml with updated subscription= and no ask= attribute */
+ 
+    /* Nothing to change — and no item to create */
+    if (strcmp(new_sub, cur_sub) == 0 && slot != NULL) return;
+ 
+    /* ── Step 4: Create or update the roster item ─────────────────────── *
+     *
+     * RFC 6121 §3.1.2 — if no roster item exists and the subscription
+     * state would become non-"none", create one.
+     *
+     * This is the core fix: the original code returned early here when
+     * slot == NULL.  The correct behaviour is to create a new entry so
+     * that the subscription state is correctly reflected in the roster.
+     */
+    if (!slot) {
+        /* Only create an item if the new state is meaningful */
+        if (strcmp(new_sub, "none") == 0) {
+            return;  /* Nothing to store for 'none' with no existing item */
+        }
+ 
+        /* Find a free slot */
+        for (int i = 0; i < MAX_ROSTER_ENTRIES; i++) {
+            if (!roster_store[i].active) {
+                slot = &roster_store[i];
+                break;
+            }
+        }
+ 
+        if (!slot) {
+            /* Roster store full — fail gracefully */
+            return;
+        }
+ 
+        /* Initialise the new slot */
+        strncpy(slot->username, owner_user, sizeof(slot->username) - 1);
+        slot->username[sizeof(slot->username) - 1] = '\0';
+        strncpy(slot->jid, contact_jid, sizeof(slot->jid) - 1);
+        slot->jid[sizeof(slot->jid) - 1] = '\0';
+        slot->item_xml[0] = '\0';
+        slot->active = 1;
+ 
+        cur_sub = "none";  /* for the item_xml build below */
+    }
+ 
+    /* ── Step 5: Build updated item_xml ─────────────────────────────────
+     *
+     * Preserve the contact's display name if it was already in the item.
+     * If this is a newly created slot, there is no name yet.
+     */
     char jid_val[64] = {0};
-    /* Extract jid from existing item_xml */
+ 
+    /* Extract jid= from existing item_xml (may be empty for new slots) */
     const char *jp = strstr(slot->item_xml, "jid=");
     if (jp) {
         jp += 4;
@@ -3733,7 +3774,7 @@ static void subscription_update_roster(const char *owner_user,
         }
     }
     if (jid_val[0] == '\0') strncpy(jid_val, contact_jid, 63);
-
+ 
     /* Extract name= if present */
     char name_attr[128] = {0};
     const char *np = strstr(slot->item_xml, "name=");
@@ -3749,26 +3790,28 @@ static void subscription_update_roster(const char *owner_user,
             snprintf(name_attr, sizeof(name_attr), " name='%s'", name_val);
         }
     }
-
-    /* Write updated item (no ask= — cleared per RFC 6121 §3.1.6) */
+ 
+    /* Build the updated item (no ask= attribute — cleared per RFC 6121 §3.1.6) */
     char new_xml[ROSTER_ITEM_MAX_LEN];
     snprintf(new_xml, sizeof(new_xml),
         "<item jid='%s'%s subscription='%s'/>",
         jid_val, name_attr, new_sub);
-
+ 
     strncpy(slot->item_xml, new_xml, ROSTER_ITEM_MAX_LEN - 1);
     slot->item_xml[ROSTER_ITEM_MAX_LEN - 1] = '\0';
-
-    /* Persist the updated roster */
+ 
+    /* Persist the updated roster immediately */
     xmpp_persist_save_roster();
-
-    /* RFC 6121 §3.1.5 / §3.1.6 — send roster push to all of owner's
-     * interested resources (those that have requested the roster). */
+ 
+    /* ── Step 6: Roster push to all active resources of owner ─────────── *
+     * RFC 6121 §3.1.5 / §3.1.6 — push updated item to all interested
+     * connected resources of the account.
+     */
     for (int i = 0; i < MAX_USERS; i++) {
         if (client_registry[i].pcb == NULL) continue;
         if (client_registry[i].state < STATE_SESSION) continue;
         if (strcmp(client_registry[i].username, owner_user) != 0) continue;
-
+ 
         char push[512];
         snprintf(push, sizeof(push),
             "<iq type='set' to='%s'>"

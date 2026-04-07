@@ -24,6 +24,7 @@ extern void mpk_enable();
 extern void vmm_protect_driver();
 extern void mpk_set_pkru(uint32_t pkru_val);
 extern void mpk_diagnostic(void);
+extern void mpk_benchmark(void);
 
 void xmpp_init_server();
 
@@ -303,7 +304,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     serial_print("[MPK] Isolation ACTIVE. Driver domain locked to Key 1.\n");
     mpk_diagnostic();   // prints verification report to serial
-
+    mpk_benchmark(); 
     // Enable Interrupts globally
     __asm__ volatile("sti");
 

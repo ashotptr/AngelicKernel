@@ -132,6 +132,8 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
               /* RFC 6121 §3.1 — <session> is legacy; comment out once
                * all target clients no longer require it. */
               "<session xmlns='urn:ietf:params:xml:ns:xmpp-session'/>"
+              // ADD THIS LINE:
+              "<sm xmlns='urn:xmpp:sm:3'/>"
             "</stream:features>",
             XMPP_DOMAIN, to_attr, stream_id);
     }
@@ -698,6 +700,12 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
             break; /* abort element incomplete — wait for more data */
         }
 
+        // Handle XEP-0198 SM elements before stanza parsing
+        if (ctx->state >= STATE_AUTHENTICATED) {
+            if (xmpp_sm_handle_element(ctx)) {
+                continue;  // SM element consumed; restart loop
+            }
+        }
         int bytes_consumed = 0;
 
         parse_null_reason_t reason;
@@ -722,6 +730,8 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
             }
             else {
                 xmpp_route_stanza(ctx, stanza);
+
+                xmpp_sm_on_stanza_received(ctx);
             }
 
             xmpp_free_stanza(stanza);

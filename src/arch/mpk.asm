@@ -6,6 +6,7 @@ global mpk_trampoline_0
 global mpk_trampoline_1
 global mpk_trampoline_2
 global mpk_trampoline_3
+global mpk_trampoline_4
 
 section .text
 
@@ -254,5 +255,44 @@ mpk_trampoline_3:
     pop  rbp
     ret
 
+mpk_trampoline_4:
+    push rbp
+    mov  rbp, rsp
+    push r12
+    push r13
+    push r14
+    push r15
+ 
+    mov  r12, rdi           ; func
+    mov  r13, rsi           ; a0
+    mov  r14, rdx           ; a1
+    mov  r15, rcx           ; a2
+    ; save a3 from r8 — r8 is caller-saved, use stack
+    push r8                 ; a3
+ 
+    xor  ecx, ecx
+    xor  edx, edx
+    xor  eax, eax
+    wrpkru                  ; PKRU = 0 (unlock Key 1)
+ 
+    mov  rdi, r13
+    mov  rsi, r14
+    mov  rdx, r15
+    pop  rcx                ; a3 = (formerly r8)
+    call r12
+ 
+    push rax
+    xor  ecx, ecx
+    xor  edx, edx
+    mov  eax, 0x0C
+    wrpkru                  ; PKRU = 0x0C (lock Key 1)
+    pop  rax
+ 
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbp
+    ret
 
 section .note.GNU-stack noalloc noexec nowrite progbits

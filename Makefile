@@ -172,6 +172,10 @@ OBJS = src/kernel.o \
 	src/xmpp/xmpp_tls.o \
     src/xmpp/mbedtls_port.o \
 	src/xmpp/yxml.o \
+	src/xmpp/mpk_benchmark.o \
+	src/xmpp/xmpp_sm.o \
+	src/xmpp/yxml_sse.o \
+	src/net/lwip_glue_zerocopy.o \
 	$(MBEDTLS_OBJS)
 
 all: unikernel.efi
@@ -204,5 +208,10 @@ clean:
 mbedtls-fetch:
 	git clone --recurse-submodules https://github.com/Mbed-TLS/mbedtls.git $(MBEDTLS_DIR)
 	cd $(MBEDTLS_DIR) && git checkout v3.6.4
+
+CFLAGS_SSE42 = $(filter-out -mno-sse -mno-avx -mno-mmx, $(CFLAGS)) -msse4.2
+
+src/xmpp/yxml_sse.o: src/xmpp/yxml_sse.c
+	$(CC) $(CFLAGS_SSE42) -c $< -o $@
 
 .PHONY: all clean mbedtls-fetch

@@ -1,0 +1,272 @@
+<?xml version="1.0"?>
+<!DOCTYPE tsung SYSTEM "/usr/share/tsung/tsung-1.0.dtd">
+<!--
+  tsung_angelic.xml — Tsung load test scenario for AngelicKernel XMPP
+
+  CAPSTONE §9.2 TARGETS:
+    - Message latency: sub-millisecond
+    - Throughput:      max msgs/sec (derived from this test)
+    - Memory footprint: measured separately via /proc on comparison servers
+
+  USAGE:
+    # Install Tsung on the host
+    sudo apt install tsung
+
+    # Run this scenario against the unikernel
+    tsung -f tsung_angelic.xml start
+
+    # View results (HTML report)
+    cd ~/.tsung/log/<timestamp>
+    perl /usr/share/tsung/tsung_stats.pl
+    xdg-open report.html
+
+  SCENARIO OVERVIEW:
+    Phase 1  — Ramp up:   1 user/second × 30 s  = 30 concurrent users
+    Phase 2  — Sustained: 30 concurrent users    × 60 s
+    Phase 3  — Peak:      5 users/second × 20 s  = 100 concurrent users
+    Phase 4  — Cool-down: stop adding, drain     × 30 s
+
+    Each virtual user:
+      1. Connects (TLS + SASL PLAIN + bind)
+      2. Sends initial presence
+      3. Joins the benchmark MUC room
+      4. Sends N groupchat messages, thinks between sends
+      5. Leaves the room
+      6. Disconnects
+
+  SERVER CONFIGURATION:
+    The unikernel binds port 5222 on 10.0.2.15 (QEMU user-mode network).
+    QEMU forwards host:5222 → guest:5222 via:
+      -netdev user,id=n0,hostfwd=tcp::5222-:5222
+
+  CREDENTIALS:
+    The compile-time credential table in xmpp_handlers.c defines:
+      user1/pass1, user2/pass2, admin/admin
+    For load testing, we use only user1 (ANONYMOUS would bypass
+    credential verification, masking auth overhead — so PLAIN is better
+    for a realistic benchmark).
+
+  COMPARISON BASELINE:
+    Run the same scenario against Prosody in Docker:
+      docker run -d -p 5222:5222 \
+        -e PROSODY_DOMAIN=angelic.local \
+        prosody/prosody:latest
+    Then: tsung -f tsung_angelic.xml start
+
+    And against Openfire:
+      docker run -d -p 5222:5222 \
+        -e OPENFIRE_DOMAIN=angelic.local \
+        sameersbn/openfire:latest
+    Then: tsung -f tsung_angelic.xml start
+-->
+
+<tsung loglevel="notice" version="1.0">
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       CLIENT MACHINES
+       Virtual users run from the local machine.
+       For a distributed test, add more <client> entries.
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <clients>
+    <client host="localhost" use_controller_vm="true" maxusers="200"/>
+  </clients>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       SERVER
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <servers>
+    <server host="127.0.0.1" port="5222" type="tcp"/>
+  </servers>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       LOAD PHASES
+       Phase 1: Ramp     —  1 user/s × 30 s  →  30 simultaneous users
+       Phase 2: Sustain  — 30 concurrent users × 60 s
+       Phase 3: Peak     —  5 user/s × 14 s  → 100 simultaneous users
+       Phase 4: Drain    —  0 new users       × 30 s
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <load>
+    <!-- Phase 1: Ramp-up -->
+    <arrivalphase phase="1" duration="30" unit="second">
+      <users interarrival="1" unit="second"/>
+    </arrivalphase>
+
+    <!-- Phase 2: Sustained 30-user load -->
+    <arrivalphase phase="2" duration="60" unit="second">
+      <users interarrival="2" unit="second"/>
+    </arrivalphase>
+
+    <!-- Phase 3: Peak — push to 100 users -->
+    <arrivalphase phase="3" duration="14" unit="second">
+      <users interarrival="0.2" unit="second"/>
+    </arrivalphase>
+
+    <!-- Phase 4: Cool-down — no new arrivals, let existing users finish -->
+    <arrivalphase phase="4" duration="30" unit="second">
+      <users interarrival="9999" unit="second"/>
+    </arrivalphase>
+  </load>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       OPTIONS
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <options>
+    <!-- XMPP domain -->
+    <option name="domain" value="angelic.local"/>
+
+    <!-- MUC room all load-test users join -->
+    <option name="muc_room" value="benchroom@conference.angelic.local"/>
+
+    <!-- Think time between message sends (milliseconds).
+         Adjust to control message rate:
+           0 ms  → maximum throughput test
+           100 ms → ~10 msg/s per user (realistic IM usage)
+           1000 ms → 1 msg/s per user (light usage)
+    -->
+    <option name="think_time" value="100"/>
+
+    <!-- Number of groupchat messages each VU sends -->
+    <option name="message_count" value="20"/>
+  </options>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       SESSIONS
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <sessions>
+    <session name="xmpp_muc_bench" probability="100" type="ts_xmpp">
+
+      <!-- ── Step 1: Connect + TLS ───────────────────────────────────────── -->
+      <request>
+        <xmpp type="connect"/>
+      </request>
+
+      <!-- ── Step 2: Initial stream open ────────────────────────────────── -->
+      <request>
+        <xmpp type="starttls"/>
+      </request>
+
+      <!-- ── Step 3: SASL PLAIN authentication ──────────────────────────── -->
+      <request>
+        <xmpp type="auth" username="user1" password="pass1"/>
+      </request>
+
+      <!-- ── Step 4: Re-open stream post-SASL ───────────────────────────── -->
+      <request>
+        <xmpp type="open_stream"/>
+      </request>
+
+      <!-- ── Step 5: Resource bind ──────────────────────────────────────── -->
+      <request>
+        <xmpp type="bind" resource="bench%%ts_user_server%%"/>
+      </request>
+
+      <!-- ── Step 6: Session establishment (legacy, optional) ───────────── -->
+      <request>
+        <xmpp type="session"/>
+      </request>
+
+      <!-- ── Step 7: Send initial presence ──────────────────────────────── -->
+      <request>
+        <xmpp type="presence"/>
+      </request>
+
+      <!-- ── Step 8: Join the benchmark MUC room ─────────────────────────
+           XEP-0045 §7.2 — join presence sent to room@service/nick
+      ──────────────────────────────────────────────────────────────────── -->
+      <request>
+        <xmpp type="raw">
+          <![CDATA[<presence to='benchroom@conference.angelic.local/bench%%ts_user_server%%'>
+                     <x xmlns='http://jabber.org/protocol/muc'/>
+                   </presence>]]>
+        </xmpp>
+      </request>
+
+      <!-- ── Step 9: Submit instant-room config (unlocks room) ──────────── -->
+      <request>
+        <xmpp type="raw">
+          <![CDATA[<iq type='set' to='benchroom@conference.angelic.local' id='cfg%%ts_user_server%%'>
+                     <query xmlns='http://jabber.org/protocol/muc#owner'>
+                       <x xmlns='jabber:x:data' type='submit'>
+                         <field var='FORM_TYPE'>
+                           <value>http://jabber.org/protocol/muc#roomconfig</value>
+                         </field>
+                       </x>
+                     </query>
+                   </iq>]]>
+        </xmpp>
+      </request>
+
+      <!-- ── Step 10: Message loop — send N groupchat messages ─────────── -->
+      <!-- Tsung repeats <for> blocks; each iteration = one message send  -->
+      <for from="1" to="%%message_count%%" var="msg_idx">
+
+        <!-- Think time between messages (simulates real user behaviour) -->
+        <thinktime value="%%think_time%%" random="true" unit="millisecond"/>
+
+        <request>
+          <xmpp type="raw">
+            <![CDATA[<message to='benchroom@conference.angelic.local'
+                              type='groupchat'
+                              id='msg%%ts_user_server%%%%msg_idx%%'>
+                       <body>AngelicKernel load test message %%msg_idx%%</body>
+                     </message>]]>
+          </xmpp>
+        </request>
+
+      </for>
+
+      <!-- ── Step 11: Leave the room ──────────────────────────────────── -->
+      <request>
+        <xmpp type="raw">
+          <![CDATA[<presence to='benchroom@conference.angelic.local/bench%%ts_user_server%%'
+                            type='unavailable'/>]]>
+        </xmpp>
+      </request>
+
+      <!-- ── Step 12: Send unavailable presence to roster ────────────── -->
+      <request>
+        <xmpp type="presence" type_attr="unavailable"/>
+      </request>
+
+      <!-- ── Step 13: Close stream ────────────────────────────────────── -->
+      <request>
+        <xmpp type="close"/>
+      </request>
+
+    </session>
+
+    <!-- ────────────────────────────────────────────────────────────────────
+         SECOND SESSION: Pure direct-message throughput test (10% of users)
+         Bypasses MUC to measure raw 1-1 message routing overhead.
+    ──────────────────────────────────────────────────────────────────────── -->
+    <session name="xmpp_direct_msg" probability="0" type="ts_xmpp">
+
+      <request><xmpp type="connect"/></request>
+      <request><xmpp type="starttls"/></request>
+      <request><xmpp type="auth" username="user1" password="pass1"/></request>
+      <request><xmpp type="open_stream"/></request>
+      <request><xmpp type="bind" resource="dm%%ts_user_server%%"/></request>
+      <request><xmpp type="session"/></request>
+      <request><xmpp type="presence"/></request>
+
+      <for from="1" to="%%message_count%%" var="dm_idx">
+        <thinktime value="%%think_time%%" random="true" unit="millisecond"/>
+        <request>
+          <xmpp type="raw">
+            <![CDATA[<message to='user2@angelic.local'
+                              type='chat'
+                              id='dm%%ts_user_server%%%%dm_idx%%'>
+                       <body>Direct message %%dm_idx%%</body>
+                     </message>]]>
+          </xmpp>
+        </request>
+      </for>
+
+      <request><xmpp type="presence" type_attr="unavailable"/></request>
+      <request><xmpp type="close"/></request>
+
+    </session>
+
+  </sessions>
+
+</tsung>

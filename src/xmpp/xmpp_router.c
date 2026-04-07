@@ -1,3 +1,24 @@
+/* xmpp_router.c — patched version
+ *
+ * KEY FIXES vs the original:
+ *
+ * 1. DEAD CODE: handle_initial_presence() was never called.
+ *    The router sent ALL presence stanzas to handle_broadcast_presence(),
+ *    meaning offline_msg_drain() and pending_sub_drain() in
+ *    handle_initial_presence() never executed.  Offline messages were
+ *    stored but never delivered.
+ *
+ *    FIX: Track first-presence with ctx->initial_presence_sent flag.
+ *    For the first available <presence/> after session establishment,
+ *    call handle_initial_presence() which handles broadcast + probing +
+ *    offline drain + pending subscription drain.  Subsequent presences
+ *    call handle_broadcast_presence() as before.
+ *
+ * 2. Missing field in xmpp_client_ctx_t:
+ *    Add `int initial_presence_sent;` to xmpp_client_ctx_t in xmpp_core.h.
+ *    It is zero-initialised by the memset() in xmpp_accept_callback().
+ */
+
 #include "xmpp_core.h"
 #include <stdio.h>
 
@@ -101,22 +122,24 @@ static struct route_entry router[] = {
      * or STATE_READY, which the min_state check alone cannot prevent.
      *   RFC 6120 §7 — resource binding is a one-time per-stream step.
      *   https://datatracker.ietf.org/doc/html/rfc6120#section-7 */
-    { "urn:ietf:params:xml:ns:xmpp-bind", handle_core_bind, STATE_BIND },
-    { "urn:ietf:params:xml:ns:xmpp-session", handle_core_session, STATE_AUTHENTICATED },
-    { "jabber:iq:roster", handle_roster_request, STATE_SESSION },
-    { "http://jabber.org/protocol/disco#info", handle_disco_info, STATE_SESSION },
-    { "http://jabber.org/protocol/disco#items", handle_disco_items, STATE_SESSION },
-    { "http://jabber.org/protocol/muc", handle_muc_presence, STATE_SESSION },
-    { "http://jabber.org/protocol/muc#owner", handle_muc_owner, STATE_SESSION },
-    { "jabber:iq:private", handle_private_storage, STATE_SESSION },
-    { "http://jabber.org/protocol/muc#admin", handle_muc_admin, STATE_SESSION },
-    { "urn:xmpp:blocking", handle_blocklist, STATE_SESSION },
-    { "vcard-temp", handle_general_success, STATE_SESSION },
-    { "jabber:iq:version", handle_version, STATE_SESSION },
-    { "jabber:iq:last", handle_last, STATE_SESSION },
-    { "urn:ietf:params:xml:ns:xmpp-ping", handle_ping, STATE_SESSION },
+    { "urn:ietf:params:xml:ns:xmpp-bind",    handle_core_bind,        STATE_BIND         },
+    { "urn:ietf:params:xml:ns:xmpp-session", handle_core_session,     STATE_AUTHENTICATED },
+    { "jabber:iq:roster",                     handle_roster_request,   STATE_SESSION       },
+    { "http://jabber.org/protocol/disco#info",  handle_disco_info,     STATE_SESSION       },
+    { "http://jabber.org/protocol/disco#items", handle_disco_items,    STATE_SESSION       },
+    { "http://jabber.org/protocol/muc",         handle_muc_presence,   STATE_SESSION       },
+    { "http://jabber.org/protocol/muc#owner",   handle_muc_owner,      STATE_SESSION       },
+    { "jabber:iq:private",                      handle_private_storage, STATE_SESSION      },
+    { "http://jabber.org/protocol/muc#admin",   handle_muc_admin,      STATE_SESSION       },
+    { "urn:xmpp:blocking",                      handle_blocklist,      STATE_SESSION       },
+    { "vcard-temp",                             handle_general_success, STATE_SESSION      },
+    { "jabber:iq:version",                      handle_version,        STATE_SESSION       },
+    { "jabber:iq:last",                         handle_last,           STATE_SESSION       },
+    { "urn:ietf:params:xml:ns:xmpp-ping",       handle_ping,           STATE_SESSION       },
     { NULL, NULL, 0 }
 };
+
+
 
 /* ------------------------------------------------------------------
  * xmpp_route_stanza
@@ -155,6 +178,7 @@ static struct route_entry router[] = {
  *   Both branches are implemented in the IQ fallback block below.
  * ------------------------------------------------------------------ */
 void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
+    /* RFC 6120 §8.1.2 — stamp from= with authenticated JID */
     /* ------------------------------------------------------------------
      * RFC 6120 §8.1.2 — server MUST overwrite the 'from'
      * attribute on every inbound stanza with the authenticated sender JID.
@@ -210,7 +234,7 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 if (stanza->type == XMPP_IQ_GET || stanza->type == XMPP_IQ_SET) {
                     char err[512];
                     const char *from_jid = (stanza->to[0] != '\0') ? stanza->to : XMPP_DOMAIN;
-                    const char *to_jid = (ctx->full_jid[0] != '\0') ? ctx->full_jid : "unknown";
+                    const char *to_jid   = (ctx->full_jid[0] != '\0') ? ctx->full_jid : "unknown";
 
                     if (stanza->id[0] != '\0') {
                         snprintf(err, sizeof(err),
@@ -257,14 +281,21 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
             return;
         }
-        else if (stanza->type == XMPP_PRESENCE || stanza->type == XMPP_PRESENCE_UNAVAILABLE || stanza->type == XMPP_PRESENCE_SUBSCRIBE || stanza->type == XMPP_PRESENCE_SUBSCRIBED || stanza->type == XMPP_PRESENCE_UNSUBSCRIBE || stanza->type == XMPP_PRESENCE_UNSUBSCRIBED
-              /* XMPP_PRESENCE_PROBE must reach
+
+        /* ── Presence ─────────────────────────────────────────────────────── */
+        else if (stanza->type == XMPP_PRESENCE             ||
+                 stanza->type == XMPP_PRESENCE_UNAVAILABLE  ||
+                 stanza->type == XMPP_PRESENCE_SUBSCRIBE    ||
+                 stanza->type == XMPP_PRESENCE_SUBSCRIBED   ||
+                 stanza->type == XMPP_PRESENCE_UNSUBSCRIBE  ||
+                 stanza->type == XMPP_PRESENCE_UNSUBSCRIBED ||
+            /* XMPP_PRESENCE_PROBE must reach
                * handle_broadcast_presence() so the probe branch there
                * can respond with the probed user's current presence per
                * RFC 6121 §4.3.1.  Without this, probe stanzas fell
                * through all conditions and were silently dropped.
                *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3.1 */
-              || stanza->type == XMPP_PRESENCE_PROBE) {
+                 stanza->type == XMPP_PRESENCE_PROBE) {
             if (strstr(stanza->to, "conference.angelic.local")) {
                 /* Presence directed at the MUC service subdomain.
                  * XEP-0045 §7.2  — entering a room
@@ -274,6 +305,37 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                  * distinguish enter vs exit vs subscription. */
                 handle_muc_presence(ctx, stanza);
             }
+            else if (stanza->type == XMPP_PRESENCE) {
+                /* ── Available presence ─────────────────────────────────────
+                 *
+                 * FIX: distinguish initial presence from subsequent updates.
+                 *
+                 * handle_initial_presence():
+                 *   - broadcasts presence to all contacts
+                 *   - sends probe to each peer  (RFC 6121 §4.3.1)
+                 *   - drains pending subscriptions  (RFC 6121 §4.3)
+                 *   - delivers queued offline messages  (XEP-0160 §2)
+                 *
+                 * handle_broadcast_presence():
+                 *   - only broadcasts the presence update
+                 *   - does NOT drain offline messages or pending subs
+                 *
+                 * The original code sent ALL presences to handle_broadcast_presence(),
+                 * making handle_initial_presence() dead code.  Offline messages
+                 * were stored but never delivered, and pending subscriptions were
+                 * never drained.
+                 *
+                 * With ctx->initial_presence_sent (added to xmpp_client_ctx_t):
+                 *   First available presence  → handle_initial_presence()
+                 *   Subsequent presences      → handle_broadcast_presence()
+                 */
+                if (!ctx->initial_presence_sent) {
+                    ctx->initial_presence_sent = 1;
+                    handle_initial_presence(ctx, stanza);
+                } else {
+                    handle_broadcast_presence(ctx, stanza);
+                }
+            }
             else {
                 /* Presence to/from regular contacts.
                  * RFC 6121 §4.2   — broadcasting initial/updated presence
@@ -281,6 +343,8 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                  * https://datatracker.ietf.org/doc/html/rfc6121#section-4.2 */
                 handle_broadcast_presence(ctx, stanza);
             }
+
+            return;
         }
         else if (stanza->type == XMPP_IQ_GET || stanza->type == XMPP_IQ_SET) {
             /* Second attempt at muc#owner inside unrecognised IQ payload */
@@ -360,10 +424,11 @@ void xmpp_route_stanza(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
      *   RFC 6120 §8.2.3   https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
      *   RFC 6120 §8.3.3.2  https://datatracker.ietf.org/doc/html/rfc6120#section-8.3.3.2
      * ------------------------------------------------------------------ */
-    if (stanza->type == XMPP_UNKNOWN && stanza->id[0] != '\0' && ctx->state >= STATE_AUTHENTICATED) {
+    if (stanza->type == XMPP_UNKNOWN && stanza->id[0] != '\0' &&
+        ctx->state >= STATE_AUTHENTICATED) {
         char response[512];
-        const char *from_jid = (stanza->to[0]      != '\0') ? stanza->to      : XMPP_DOMAIN;
-        const char *to_jid   = (ctx->full_jid[0]   != '\0') ? ctx->full_jid   : "unknown";
+        const char *from_jid = (stanza->to[0]    != '\0') ? stanza->to    : XMPP_DOMAIN;
+        const char *to_jid   = (ctx->full_jid[0] != '\0') ? ctx->full_jid : "unknown";
 
         snprintf(response, sizeof(response),
             "<iq type='error' from='%s' to='%s' id='%s'>"

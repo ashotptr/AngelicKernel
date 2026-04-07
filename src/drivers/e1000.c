@@ -215,6 +215,67 @@ SECURE_DRIVER_CODE static inline uint32_t nic_read(uint32_t reg) {
     return *(volatile uint32_t *)(e1000_mmio_base_phys + reg);
 }
 
+/* ─── Put this function in src/drivers/e1000.c ───────────────────────────── */
+
+SECURE_DRIVER_CODE int e1000_send_scatter(uint64_t mmio_base,
+                                           const void **addrs,
+                                           const uint16_t *lens,
+                                           int n_segs) {
+    (void)mmio_base;
+ 
+    if (n_segs <= 0 || n_segs > TX_RING_SIZE / 2) return -1;
+ 
+    static int tx_idx = 0;
+ 
+    // Check that there are enough free TX descriptors.
+    // A descriptor is free when its DD (Descriptor Done) bit is set,
+    // meaning the NIC finished DMAing the previous packet from that slot.
+    int first_idx = tx_idx;
+    for (int i = 0; i < n_segs; i++) {
+        int slot = (tx_idx + i) % TX_RING_SIZE;
+        if (!(tx_ring[slot].status & E1000_TXD_STAT_DD)) {
+            // Ring is full — wait for the oldest pending descriptor.
+            for (uint32_t t = 0; t < E1000_TX_TIMEOUT; t++) {
+                if (tx_ring[slot].status & E1000_TXD_STAT_DD) break;
+            }
+            if (!(tx_ring[slot].status & E1000_TXD_STAT_DD)) return -1;
+        }
+    }
+ 
+    // Write descriptors for all segments.
+    for (int i = 0; i < n_segs; i++) {
+        int slot = (tx_idx + i) % TX_RING_SIZE;
+        int is_last = (i == n_segs - 1);
+ 
+        tx_ring[slot].addr   = (uint64_t)(uintptr_t)addrs[i];
+        tx_ring[slot].length = lens[i];
+        tx_ring[slot].cso    = 0;
+        tx_ring[slot].css    = 0;
+        tx_ring[slot].special = 0;
+ 
+        // EOP + IFCS on all segments; RS only on the last (only one DD needed)
+        tx_ring[slot].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS |
+                            (is_last ? E1000_TXD_CMD_RS : 0);
+        tx_ring[slot].status = 0;   // clear DD
+    }
+ 
+    int last_idx = (tx_idx + n_segs - 1) % TX_RING_SIZE;
+    tx_idx = (tx_idx + n_segs) % TX_RING_SIZE;
+ 
+    __asm__ volatile("" ::: "memory");   // compiler barrier
+ 
+    // Kick the NIC: write TDT to the NEXT free slot.
+    nic_write(E1000_TDT, (uint32_t)tx_idx);
+ 
+    // Poll only the last descriptor for DD.
+    for (uint32_t t = 0; t < E1000_TX_TIMEOUT; t++) {
+        if (tx_ring[last_idx].status & E1000_TXD_STAT_DD) return 0;
+    }
+ 
+    serial_print("[E1000] ERROR: scatter TX timeout\n");
+    return -1;
+}
+
 /* =========================================================================
  * e1000_init
  *

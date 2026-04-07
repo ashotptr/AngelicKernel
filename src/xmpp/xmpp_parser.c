@@ -3,6 +3,10 @@
 #include <string.h>
 #include <stdio.h>
 
+
+extern int find_stanza_end_dispatch(const char *xml, int len);
+
+#define find_stanza_end(xml, len) find_stanza_end_dispatch(xml, len)
 /* ------------------------------------------------------------------
  * find_stanza_end  (static helper)
  *

@@ -288,6 +288,11 @@ typedef struct {
     int tls_rx_len;
     int tls_rx_pos;
     int tls_established;
+    // XEP-0198 Stream Management state (xmpp_sm.c)
+    int      initial_presence_sent; // ← ADD THIS LINE HERE
+    int      sm_enabled;         // 1 after <enable/> processed
+    uint32_t sm_inbound_h;       // stanzas received from client (acked count)
+    uint32_t sm_outbound_count;  // stanzas sent to client (triggers <r/>)
 } xmpp_client_ctx_t;
 
 /* ------------------------------------------------------------------
@@ -642,6 +647,16 @@ void xmpp_persist_save_rooms();
 void xmpp_persist_save_offline();      /* XEP-0160 offline queue    */
 void xmpp_persist_save_pending_subs(); /* RFC 6121 §4.3 sub queue   */
 
+// xmpp_sm.c — XEP-0198 Stream Management
+void xmpp_sm_send_enabled(xmpp_client_ctx_t *ctx);
+void xmpp_sm_send_ack(xmpp_client_ctx_t *ctx);
+void xmpp_sm_request_ack(xmpp_client_ctx_t *ctx);
+void xmpp_sm_on_stanza_received(xmpp_client_ctx_t *ctx);
+void xmpp_sm_on_stanza_sent(xmpp_client_ctx_t *ctx);
+int  xmpp_sm_handle_element(xmpp_client_ctx_t *ctx);
+
+// mpk_benchmark.c — WRPKRU cycle-count micro-benchmark
+void mpk_benchmark(void); 
 /* ------------------------------------------------------------------
  * xmpp_store.c — in-memory stores (offline queue + roster)
  * ------------------------------------------------------------------ */
@@ -656,4 +671,16 @@ int roster_store_upsert_item (const char *username, const char *item_xml);
 void roster_store_set_from_payload(const char *username, const char *payload);
 int roster_store_get_items (const char *username, char *buf, int buf_len);
 
+#endif
+
+#ifdef XMPP_CORE_PATCH_VERIFY
+#include "xmpp_core.h"
+#include <stddef.h>
+static void verify_patch(void) {
+    xmpp_client_ctx_t _t;
+    (void)_t.initial_presence_sent;
+    (void)_t.sm_enabled;
+    (void)_t.sm_inbound_h;
+    (void)_t.sm_outbound_count;
+}
 #endif
