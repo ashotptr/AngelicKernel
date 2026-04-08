@@ -25,73 +25,73 @@ extern int find_stanza_end_dispatch(const char *xml, int len);
  *   - Does not validate element nesting matches tag names
  *   - Processing instructions (<?...?>) are skipped correctly.
  * ------------------------------------------------------------------ */
-static int find_stanza_end(const char *xml, int len) {
-    const char *p   = xml;
-    const char *end = xml + len;
-    int depth = 0;
+// static int find_stanza_end(const char *xml, int len) {
+//     const char *p   = xml;
+//     const char *end = xml + len;
+//     int depth = 0;
 
-    while (p < end) {
-        if (*p != '<') { 
-            p++;
+//     while (p < end) {
+//         if (*p != '<') { 
+//             p++;
 
-            continue;
-        }
+//             continue;
+//         }
 
-        /* Processing instruction or declaration: <?...?> or <!...>
-         * RFC 6120 §11.3 — Processing instructions are allowed in streams. */
-        if (p + 1 < end && (*(p + 1) == '?' || *(p + 1) == '!')) {
-            const char *gt = memchr(p, '>', end - p);
+//         /* Processing instruction or declaration: <?...?> or <!...>
+//          * RFC 6120 §11.3 — Processing instructions are allowed in streams. */
+//         if (p + 1 < end && (*(p + 1) == '?' || *(p + 1) == '!')) {
+//             const char *gt = memchr(p, '>', end - p);
 
-            if (!gt) {
-                return -1;
-            }
+//             if (!gt) {
+//                 return -1;
+//             }
 
-            p = gt + 1;
+//             p = gt + 1;
 
-            continue;
-        }
+//             continue;
+//         }
 
-        /* Closing tag </foo> — decrements depth */
-        if (p + 1 < end && *(p + 1) == '/') {
-            const char *gt = memchr(p, '>', end - p);
+//         /* Closing tag </foo> — decrements depth */
+//         if (p + 1 < end && *(p + 1) == '/') {
+//             const char *gt = memchr(p, '>', end - p);
 
-            if (!gt) {
-                return -1;
-            }
+//             if (!gt) {
+//                 return -1;
+//             }
 
-            depth--;
+//             depth--;
 
-            if (depth == 0) {
-                return (int)((gt + 1) - xml);
-            }
+//             if (depth == 0) {
+//                 return (int)((gt + 1) - xml);
+//             }
 
-            p = gt + 1;
+//             p = gt + 1;
 
-            continue;
-        }
+//             continue;
+//         }
 
-        /* Opening or self-closing tag */
-        const char *gt = memchr(p, '>', end - p);
+//         /* Opening or self-closing tag */
+//         const char *gt = memchr(p, '>', end - p);
 
-        if (!gt) {
-            return -1;
-        }
+//         if (!gt) {
+//             return -1;
+//         }
 
-        if (*(gt - 1) == '/') {
-            /* Self-closing <foo/> — depth unchanged; complete if depth==0 */
-            if (depth == 0) {
-                return (int)((gt + 1) - xml);
-            }
-        }
-        else {
-            depth++;
-        }
+//         if (*(gt - 1) == '/') {
+//             /* Self-closing <foo/> — depth unchanged; complete if depth==0 */
+//             if (depth == 0) {
+//                 return (int)((gt + 1) - xml);
+//             }
+//         }
+//         else {
+//             depth++;
+//         }
 
-        p = gt + 1;
-    }
+//         p = gt + 1;
+//     }
 
-    return -1; /* Incomplete stanza */
-}
+//     return -1; /* Incomplete stanza */
+// }
 
 /* ------------------------------------------------------------------
  * parse_xml_stream

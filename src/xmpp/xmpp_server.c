@@ -132,7 +132,6 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
               /* RFC 6121 §3.1 — <session> is legacy; comment out once
                * all target clients no longer require it. */
               "<session xmlns='urn:ietf:params:xml:ns:xmpp-session'/>"
-              // ADD THIS LINE:
               "<sm xmlns='urn:xmpp:sm:3'/>"
             "</stream:features>",
             XMPP_DOMAIN, to_attr, stream_id);

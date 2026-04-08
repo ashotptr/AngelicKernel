@@ -2931,7 +2931,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                         " by='%s'>"
                         "<conflict"
                           " xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
-                      "</e>"
+                      "</error>"
                     "</presence>",
                     bare_jid, nick, ctx->full_jid, bare_jid);
                 send_raw(ctx, conflict);

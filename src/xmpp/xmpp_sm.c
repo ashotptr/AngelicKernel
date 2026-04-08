@@ -214,7 +214,7 @@ int xmpp_sm_handle_element(xmpp_client_ctx_t *ctx) {
     }
 
     /* ── <r .../> ─────────────────────────────────────────────────────── */
-    if (strncmp(buf, "<r", 2) == 0 && buf[2] == ' ' || strncmp(buf, "<r/>", 4) == 0) {
+    if ((strncmp(buf, "<r", 2) == 0 && buf[2] == ' ') || strncmp(buf, "<r/>", 4) == 0) {
         if (strstr(buf, SM_NS) != NULL) {
             char *gt = strchr(buf, '>');
             if (!gt) return 0;

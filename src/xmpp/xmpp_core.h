@@ -289,7 +289,7 @@ typedef struct {
     int tls_rx_pos;
     int tls_established;
     // XEP-0198 Stream Management state (xmpp_sm.c)
-    int      initial_presence_sent; // ← ADD THIS LINE HERE
+    int      initial_presence_sent; // 1 after initial presence broadcast sent
     int      sm_enabled;         // 1 after <enable/> processed
     uint32_t sm_inbound_h;       // stanzas received from client (acked count)
     uint32_t sm_outbound_count;  // stanzas sent to client (triggers <r/>)

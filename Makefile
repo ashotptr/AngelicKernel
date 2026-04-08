@@ -175,7 +175,6 @@ OBJS = src/kernel.o \
 	src/xmpp/mpk_benchmark.o \
 	src/xmpp/xmpp_sm.o \
 	src/xmpp/yxml_sse.o \
-	src/net/lwip_glue_zerocopy.o \
 	$(MBEDTLS_OBJS)
 
 all: unikernel.efi
