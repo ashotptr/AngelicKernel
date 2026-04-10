@@ -50,6 +50,7 @@ MBEDTLS_DIR ?= ./mbedtls
 # ---------------------------------------------------------------------------
 MBEDTLS_SRCS = \
 	$(MBEDTLS_DIR)/library/aes.c              \
+	$(MBEDTLS_DIR)/library/aesni.c            \
 	$(MBEDTLS_DIR)/library/asn1parse.c        \
 	$(MBEDTLS_DIR)/library/asn1write.c        \
 	$(MBEDTLS_DIR)/library/base64.c           \
@@ -212,5 +213,40 @@ CFLAGS_SSE42 = $(filter-out -mno-sse -mno-avx -mno-mmx, $(CFLAGS)) -msse4.2
 
 src/xmpp/yxml_sse.o: src/xmpp/yxml_sse.c
 	$(CC) $(CFLAGS_SSE42) -c $< -o $@
+
+# ---------------------------------------------------------------------------
+# AES-NI compile rules for mbedTLS aes.c and aesni.c
+#
+# WHY TWO FILES:
+#   aes.c    — top-level AES dispatch; calls mbedtls_aesni_* at runtime
+#              when CPUID reports AES-NI present.
+#   aesni.c  — the actual AES-NI intrinsic implementations
+#              (mbedtls_aesni_crypt_ecb, mbedtls_aesni_gcm_mult,
+#               mbedtls_aesni_setkey_enc, mbedtls_aesni_inverse_key,
+#               mbedtls_aesni_has_support).
+#              aes.c and gcm.c call these symbols at link time — if
+#              aesni.c is not compiled, the linker fails with 5 undefined
+#              reference errors.
+#
+# WHY -maes -mpclmul:
+#   aesni.c includes <wmmintrin.h> (AES-NI intrinsic header). GCC refuses
+#   to include it without -maes.  The global CFLAGS has -mno-sse which
+#   would override -maes, so we strip the -mno-* flags first via
+#   filter-out, exactly as done for yxml_sse.o above.
+#
+# SAFE: aesni.c uses __attribute__((target("aes,sse2"))) on every
+# function, so AES-NI instructions are emitted ONLY in those functions.
+# The rest of the kernel (compiled with -mno-sse) is unaffected.
+# enable_sse() in kernel.c activates SSE at line ~153, before
+# ExitBootServices and long before any TLS call — so AES-NI is always
+# live by the time mbedtls_aesni_has_support() runs its CPUID check.
+# ---------------------------------------------------------------------------
+CFLAGS_AESNI = $(filter-out -mno-sse -mno-avx -mno-mmx, $(CFLAGS)) -msse4.2 -maes -mpclmul
+
+$(MBEDTLS_DIR)/library/aes.o: $(MBEDTLS_DIR)/library/aes.c
+	$(CC) $(CFLAGS_AESNI) -c $< -o $@
+
+$(MBEDTLS_DIR)/library/aesni.o: $(MBEDTLS_DIR)/library/aesni.c
+	$(CC) $(CFLAGS_AESNI) -c $< -o $@
 
 .PHONY: all clean mbedtls-fetch
