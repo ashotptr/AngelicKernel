@@ -344,6 +344,9 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
 
             tcp_close(pcb);
 
+            ctx->pcb = NULL;
+            ctx->state = STATE_CONNECTED;
+
             return ERR_OK;
         }
 
@@ -764,6 +767,9 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                 tcp_output(pcb);
                 
                 tcp_close(pcb);
+                
+                ctx->pcb = NULL;
+                ctx->state = STATE_CONNECTED;
 
                 return ERR_OK;
             }

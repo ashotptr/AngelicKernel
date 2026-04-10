@@ -5,6 +5,7 @@
 #include "lwip/err.h"
 #include "netif/ethernet.h"
 #include "drivers/e1000.h"
+#include "sys/mpk_gate.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -21,7 +22,6 @@ uint32_t sys_now(void) {
     return a / 2000000; 
 }
 
-int mpk_trampoline_3(void* func, uint64_t arg1, uint64_t arg2, uint64_t arg3);
 static struct netif angelic_netif;
 static uint64_t global_mmio_base;
 
@@ -58,7 +58,6 @@ static char tx_buffer_fallback[1514];
 static err_t low_level_output_zerocopy(struct netif *netif, struct pbuf *p) {
     (void)netif;
     extern uint64_t global_mmio_base;
-    extern int mpk_e1000_send_scatter(uint64_t, const void**, const uint16_t*, int);
 
     /* Count segments */
     int n_segs = 0;
@@ -100,7 +99,6 @@ static err_t low_level_output_zerocopy(struct netif *netif, struct pbuf *p) {
     }
 
 #ifdef USE_MPK
-    extern int mpk_trampoline_3(void*, uint64_t, uint64_t, uint64_t);
     extern int e1000_send_raw(uint64_t, void*, uint16_t);
     mpk_trampoline_3((void*)e1000_send_raw,
                      global_mmio_base,

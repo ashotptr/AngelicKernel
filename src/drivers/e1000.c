@@ -197,6 +197,12 @@ extern void serial_print_hex(uint64_t n);
  * ========================================================================= */
 SECURE_DRIVER_DATA static uint64_t e1000_mmio_base_phys;
 
+/* Shared TX tail index — used by BOTH e1000_send_raw() and e1000_send_scatter().
+ * Placed in .secure_driver_data so it lives alongside the descriptor rings
+ * it indexes and is equally protected by MPK Key 1.
+ */
+SECURE_DRIVER_DATA static int tx_tail = 0;
+
 SECURE_DRIVER_DATA volatile struct e1000_rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
 SECURE_DRIVER_DATA volatile struct e1000_tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
 
@@ -225,14 +231,13 @@ SECURE_DRIVER_CODE int e1000_send_scatter(uint64_t mmio_base,
  
     if (n_segs <= 0 || n_segs > TX_RING_SIZE / 2) return -1;
  
-    static int tx_idx = 0;
  
     // Check that there are enough free TX descriptors.
     // A descriptor is free when its DD (Descriptor Done) bit is set,
     // meaning the NIC finished DMAing the previous packet from that slot.
-    int first_idx = tx_idx;
+    int first_idx = tx_tail;
     for (int i = 0; i < n_segs; i++) {
-        int slot = (tx_idx + i) % TX_RING_SIZE;
+        int slot = (tx_tail + i) % TX_RING_SIZE;
         if (!(tx_ring[slot].status & E1000_TXD_STAT_DD)) {
             // Ring is full — wait for the oldest pending descriptor.
             for (uint32_t t = 0; t < E1000_TX_TIMEOUT; t++) {
@@ -244,7 +249,7 @@ SECURE_DRIVER_CODE int e1000_send_scatter(uint64_t mmio_base,
  
     // Write descriptors for all segments.
     for (int i = 0; i < n_segs; i++) {
-        int slot = (tx_idx + i) % TX_RING_SIZE;
+        int slot = (tx_tail + i) % TX_RING_SIZE;
         int is_last = (i == n_segs - 1);
  
         tx_ring[slot].addr   = (uint64_t)(uintptr_t)addrs[i];
@@ -259,13 +264,13 @@ SECURE_DRIVER_CODE int e1000_send_scatter(uint64_t mmio_base,
         tx_ring[slot].status = 0;   // clear DD
     }
  
-    int last_idx = (tx_idx + n_segs - 1) % TX_RING_SIZE;
-    tx_idx = (tx_idx + n_segs) % TX_RING_SIZE;
+    int last_idx = (tx_tail + n_segs - 1) % TX_RING_SIZE;
+    tx_tail = (tx_tail + n_segs) % TX_RING_SIZE;
  
     __asm__ volatile("" ::: "memory");   // compiler barrier
  
     // Kick the NIC: write TDT to the NEXT free slot.
-    nic_write(E1000_TDT, (uint32_t)tx_idx);
+    nic_write(E1000_TDT, (uint32_t)tx_tail);
  
     // Poll only the last descriptor for DD.
     for (uint32_t t = 0; t < E1000_TX_TIMEOUT; t++) {
@@ -531,9 +536,8 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
 SECURE_DRIVER_CODE int e1000_send_raw(uint64_t mmio_base, void *data, uint16_t len) {
     (void)mmio_base;  /* ignored; driver uses e1000_mmio_base_phys */
 
-    static int tx_idx = 0;
     // capture the index we are using for this packet
-    int current_idx = tx_idx;
+    int current_idx = tx_tail;
 
     // map data
     tx_ring[current_idx].addr   = (uint64_t)(uintptr_t)data;
@@ -546,7 +550,7 @@ SECURE_DRIVER_CODE int e1000_send_raw(uint64_t mmio_base, void *data, uint16_t l
 
     /* Advance the software tail index for the next call. */
     // update Tail to the next available slot
-    tx_idx = (tx_idx + 1) % TX_RING_SIZE;
+    tx_tail = (tx_tail + 1) % TX_RING_SIZE;
 
     /* Compiler memory barrier — all descriptor stores must reach RAM before
      * the TDT write that notifies the NIC.  On x86 the Total Store Order
@@ -557,7 +561,7 @@ SECURE_DRIVER_CODE int e1000_send_raw(uint64_t mmio_base, void *data, uint16_t l
     __asm__ volatile("" ::: "memory");
 
     /* Writing TDT is the kick that causes the NIC to start DMA. */
-    nic_write(E1000_TDT, (uint32_t)tx_idx); // TDT
+    nic_write(E1000_TDT, (uint32_t)tx_tail); // TDT
 
     /* Poll for DD (Descriptor Done) with a bounded timeout.
      * An unbounded spin would freeze the kernel if the NIC wedges. */
