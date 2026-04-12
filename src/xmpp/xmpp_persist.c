@@ -65,7 +65,7 @@ extern void serial_print_hex(uint64_t n);
  * Disk layout constants
  * ------------------------------------------------------------------ */
 #define PERSIST_MAGIC 0xA6E71C3Du
-#define PERSIST_VERSION 3u
+#define PERSIST_VERSION 4u
 
 #define LBA_HEADER 0u
 #define LBA_PRIVATE_START 1u
@@ -73,7 +73,7 @@ extern void serial_print_hex(uint64_t n);
 #define LBA_ROSTER_START 43u
 #define LBA_ROSTER_SECTORS 56u
 #define LBA_ROOMS_START 99u
-#define LBA_ROOMS_SECTORS 1u
+#define LBA_ROOMS_SECTORS 8u
 #define LBA_OFFLINE_START 100u
 #define LBA_OFFLINE_SECTORS 79u   /* 32 x 1252 B = 40064 B, ceil to 79 sectors */
 #define LBA_PENDING_SUBS_START 179u
@@ -103,15 +103,25 @@ _Static_assert(sizeof(persist_header_t) == 512, "persist_header_t must be exactl
  * Padded to 128 bytes so 4 entries fit exactly in one 512-byte sector.
  * ------------------------------------------------------------------ */
 typedef struct {
-    char name[MAX_ROOM_NAME_LEN];   /* room local name (e.g. "lobby")  */
-    char creator_jid[64];           /* bare JID of the room owner      */
-    int32_t semi_anon;                 /* 1 = semi-anon, 0 = non-anon     */
-    int32_t locked;                    /* 1 = locked (not yet configured) */
-    int32_t active;                    /* 1 = room exists                 */
-    uint8_t _pad[20];                  /* reserved, zero on write         */
+    char    name[MAX_ROOM_NAME_LEN];              /* room local name           */
+    char    creator_jid[64];                       /* bare JID of room owner    */
+    int32_t semi_anon;                             /* 1=semi-anon, 0=non-anon   */
+    int32_t locked;                                /* 1=locked (unconfigured)   */
+    int32_t active;                                /* 1=room exists             */
+    int32_t persistent;                            /* 1=survives empty room     */
+    int32_t moderated;                             /* 1=voice required to speak */
+    int32_t members_only;                          /* 1=member gate enforced    */
+    int32_t banned_count;                          /* # entries in banned_jids  */
+    char    banned_jids[MAX_BANNED_PER_ROOM][64];  /* bare JIDs: 8 × 64 = 512B */
+    char    subject[256];                          /* current room subject      */
+    uint8_t _pad[0];                               /* struct now exactly 960 B  */
 } __attribute__((packed)) persist_room_entry_t;
 
-_Static_assert(sizeof(persist_room_entry_t) == 128, "persist_room_entry_t must be exactly 128 bytes");
+/* 32+64+4+4+4+4+4+4+4+512+256 = 892 bytes. Pad to 1024 so future fields fit
+ * within one sector boundary and we can store MAX_ROOMS=4 in ≤ 8 sectors.
+ * Total: 4 × 1024 = 4096 bytes = 8 sectors                                 */
+_Static_assert(sizeof(persist_room_entry_t) <= 1024,
+    "persist_room_entry_t must fit in 1024 bytes");
 _Static_assert(sizeof(persist_room_entry_t) * MAX_ROOMS <= LBA_ROOMS_SECTORS * 512, "rooms do not fit in allocated sectors");
 
 /* ------------------------------------------------------------------
@@ -163,7 +173,7 @@ _Static_assert(sizeof(persist_pending_sub_entry_t) * MAX_PENDING_SUBS
  * ------------------------------------------------------------------ */
 static uint8_t private_buf[LBA_PRIVATE_SECTORS * 512];
 static uint8_t roster_buf [LBA_ROSTER_SECTORS * 512];
-static uint8_t rooms_buf        [LBA_ROOMS_SECTORS * 512];
+static uint8_t rooms_buf        [LBA_ROOMS_SECTORS * 512];  /* 8 * 512 = 4096 bytes */
 static uint8_t offline_buf      [LBA_OFFLINE_SECTORS * 512];
 static uint8_t pending_subs_buf [LBA_PENDING_SUBS_SECTORS * 512];
 
@@ -208,10 +218,19 @@ static uint32_t compute_full_crc(void) {
 
         strncpy(e.name, rooms[i].name, sizeof(e.name) - 1);
         strncpy(e.creator_jid, rooms[i].creator_jid, sizeof(e.creator_jid) - 1);
+        strncpy(e.subject, rooms[i].subject, sizeof(e.subject) - 1);
 
-        e.semi_anon = (int32_t)rooms[i].semi_anon;
-        e.locked = (int32_t)rooms[i].locked;
-        e.active = (int32_t)rooms[i].active;
+        e.semi_anon    = (int32_t)rooms[i].semi_anon;
+        e.locked       = (int32_t)rooms[i].locked;
+        e.active       = (int32_t)rooms[i].active;
+        e.persistent   = (int32_t)rooms[i].persistent;
+        e.moderated    = (int32_t)rooms[i].moderated;
+        e.members_only = (int32_t)rooms[i].members_only;
+        e.banned_count = (int32_t)rooms[i].banned_count;
+        for (int bi = 0; bi < rooms[i].banned_count && bi < MAX_BANNED_PER_ROOM; bi++) {
+            strncpy(e.banned_jids[bi], rooms[i].banned_jids[bi],
+                    sizeof(e.banned_jids[bi]) - 1);
+        }
 
         p = (const uint8_t *)&e;
         len = (uint32_t)sizeof(e);
@@ -325,12 +344,23 @@ void xmpp_persist_save_rooms(void) {
     persist_room_entry_t *entries = (persist_room_entry_t *)rooms_buf;
     
     for (int i = 0; i < MAX_ROOMS; i++) {
+        memset(&entries[i], 0, sizeof(entries[i]));
         strncpy(entries[i].name, rooms[i].name, sizeof(entries[i].name) - 1);
         strncpy(entries[i].creator_jid, rooms[i].creator_jid, sizeof(entries[i].creator_jid) - 1);
+        strncpy(entries[i].subject, rooms[i].subject, sizeof(entries[i].subject) - 1);
 
-        entries[i].semi_anon = (int32_t)rooms[i].semi_anon;
-        entries[i].locked = (int32_t)rooms[i].locked;
-        entries[i].active = (int32_t)rooms[i].active;
+        entries[i].semi_anon     = (int32_t)rooms[i].semi_anon;
+        entries[i].locked        = (int32_t)rooms[i].locked;
+        entries[i].active        = (int32_t)rooms[i].active;
+        entries[i].persistent    = (int32_t)rooms[i].persistent;
+        entries[i].moderated     = (int32_t)rooms[i].moderated;
+        entries[i].members_only  = (int32_t)rooms[i].members_only;
+        entries[i].banned_count  = (int32_t)rooms[i].banned_count;
+
+        for (int bi = 0; bi < rooms[i].banned_count && bi < MAX_BANNED_PER_ROOM; bi++) {
+            strncpy(entries[i].banned_jids[bi], rooms[i].banned_jids[bi],
+                    sizeof(entries[i].banned_jids[bi]) - 1);
+        }
     }
 
     if (disk_write_sectors(LBA_ROOMS_START, LBA_ROOMS_SECTORS, rooms_buf) != 0) {
@@ -503,10 +533,24 @@ static int try_load(void) {
         strncpy(rooms[i].name, entries[i].name, sizeof(rooms[i].name) - 1);
         strncpy(rooms[i].creator_jid, entries[i].creator_jid,
                 sizeof(rooms[i].creator_jid) - 1);
+        strncpy(rooms[i].subject, entries[i].subject,
+                sizeof(rooms[i].subject) - 1);
 
-        rooms[i].semi_anon = (int)entries[i].semi_anon;
-        rooms[i].locked    = (int)entries[i].locked;
-        rooms[i].active    = (int)entries[i].active;
+        rooms[i].semi_anon    = (int)entries[i].semi_anon;
+        rooms[i].locked       = (int)entries[i].locked;
+        rooms[i].active       = (int)entries[i].active;
+        rooms[i].persistent   = (int)entries[i].persistent;
+        rooms[i].moderated    = (int)entries[i].moderated;
+        rooms[i].members_only = (int)entries[i].members_only;
+        rooms[i].banned_count = (int)entries[i].banned_count;
+
+        if (rooms[i].banned_count > MAX_BANNED_PER_ROOM)
+            rooms[i].banned_count = MAX_BANNED_PER_ROOM;
+
+        for (int bi = 0; bi < rooms[i].banned_count; bi++) {
+            strncpy(rooms[i].banned_jids[bi], entries[i].banned_jids[bi],
+                    sizeof(rooms[i].banned_jids[bi]) - 1);
+        }
     }
 
     /* Restore offline_store — layout-compatible direct copy. */

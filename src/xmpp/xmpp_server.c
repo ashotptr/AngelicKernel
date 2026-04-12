@@ -4,7 +4,7 @@
 room_t rooms[MAX_ROOMS];
 
 /* ------------------------------------------------------------------
- * handle_handshake_logic
+  * handle_handshake_logic
  *
  * Called when the client opens (or re-opens after SASL) an XML stream.
  * We respond with our own opening <stream:stream> header followed by
@@ -65,26 +65,49 @@ room_t rooms[MAX_ROOMS];
  * ------------------------------------------------------------------ */
 static int extract_stream_attr(const char *buf, const char *attr_name,
                                 char *out, int out_max) {
-    /* Build search key: " attr_name=" */
     char key[64];
     snprintf(key, sizeof(key), " %s=", attr_name);
-
     const char *p = strstr(buf, key);
     if (!p) return 0;
-
-    p += strlen(key);           /* skip to the quote */
-    char q = *p;                /* opening quote: ' or " */
+    p += strlen(key);
+    char q = *p;
     if (q != '\'' && q != '"') return 0;
-    p++;                        /* skip opening quote */
-
+    p++;
     const char *end = strchr(p, q);
-    if (!end) return 0;         /* closing quote not yet received */
-
+    if (!end) return 0;
     int len = (int)(end - p);
     if (len >= out_max) len = out_max - 1;
     strncpy(out, p, len);
     out[len] = '\0';
     return 1;
+}
+
+/* ------------------------------------------------------------------
+ * send_stream_close_and_free
+ *
+ * RFC 6120 §4.4 — send </stream:stream> then release TLS and close TCP.
+ * Safe to call on a context where TLS was never established.
+ * ------------------------------------------------------------------ */
+static void send_stream_close_and_free(xmpp_client_ctx_t *ctx) {
+    const char *close_tag = "</stream:stream>";
+
+    if (ctx->tls_established) {
+        mbedtls_ssl_write(&ctx->tls_ssl,
+            (const unsigned char *)close_tag, strlen(close_tag));
+        if (ctx->pcb) tcp_output(ctx->pcb);
+        mbedtls_ssl_close_notify(&ctx->tls_ssl);
+    } else if (ctx->pcb && ctx->state >= STATE_SASL) {
+        /* Only send if we actually opened a stream (state advanced past CONNECTED) */
+        tcp_write(ctx->pcb, close_tag, strlen(close_tag), TCP_WRITE_FLAG_COPY);
+        tcp_output(ctx->pcb);
+    }
+
+    xmpp_tls_client_free(ctx);
+    if (ctx->pcb) {
+        tcp_close(ctx->pcb);
+    }
+    ctx->pcb   = NULL;
+    ctx->state = STATE_CONNECTED;
 }
 
 void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
@@ -105,10 +128,10 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
          * caller (xmpp_recv_callback) before invoking handle_handshake_logic().
          *
          * RFC 6120 §4.7.2 — https://datatracker.ietf.org/doc/html/rfc6120#section-4.7.2 */
-        char to_attr[96] = "";   /* empty → omit from snprintf */
-        if (ctx->client_from[0] != '\0') {
-            snprintf(to_attr, sizeof(to_attr), " to='%s'", ctx->client_from);
-        }
+    char to_attr[96] = "";
+    if (ctx->client_from[0] != '\0') {
+        snprintf(to_attr, sizeof(to_attr), " to='%s'", ctx->client_from);
+    }
 
     if (ctx->authenticated) {
         /* Post-SASL stream: offer bind (required) and session (legacy).
@@ -120,7 +143,6 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
          *   RFC 6120 §7 — Resource Binding is a one-time per-stream step.
          *   https://datatracker.ietf.org/doc/html/rfc6120#section-7 */
         ctx->state = STATE_BIND;
-
         snprintf(response, sizeof(response),
             "<?xml version='1.0'?>"
             "<stream:stream from='%s'%s id='%u' version='1.0' "
@@ -135,8 +157,7 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
               "<sm xmlns='urn:xmpp:sm:3'/>"
             "</stream:features>",
             XMPP_DOMAIN, to_attr, stream_id);
-    }
-    else if (ctx->tls_established) {
+    } else if (ctx->tls_established) {
         /* TLS is live — now safe to offer SASL PLAIN (RFC 6120 §13.8.4).
          * STARTTLS is NOT offered again per RFC 6120 §5.2 step 5c.
          * RFC 6120 §6.4.1 — server advertises available mechanisms.
@@ -154,8 +175,7 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
               "</mechanisms>"
             "</stream:features>",
             XMPP_DOMAIN, to_attr, stream_id);
-    }
-    else {
+    } else {
         /* Pre-TLS stream: offer STARTTLS as REQUIRED.
          *
          * RFC 6120 §5.3.1 — STARTTLS MUST be the first feature listed.
@@ -247,36 +267,17 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
     xmpp_client_ctx_t *ctx = (xmpp_client_ctx_t*)arg;
 
     if (!p) {
-        /* RFC 6120 §4.4 — remote closed TCP without </stream:stream>;
-         * clean up silently.
+        /* RFC 6120 §4.4 — remote closed TCP.
          *
-         *ctx->pcb must be set to NULL after tcp_close().
-         *
-         * lwIP calls this callback with p == NULL when the remote side
-         * closes the TCP connection.  All broadcaster loops in
-         * xmpp_handlers.c guard against dead slots by checking
-         * client_registry[i].pcb == NULL.  If we call tcp_close(pcb)
-         * but leave ctx->pcb pointing at the now-freed PCB, those
-         * loops will attempt to write to freed memory, causing undefined
-         * behaviour (typically a crash or silent data corruption).
-         *
-         * Zeroing ctx->pcb here is the single fix needed because every
-         * broadcast loop that iterates client_registry[] checks pcb for
-         * NULL before dereferencing it.
-         *
-         * Also reset state to STATE_CONNECTED so that any stale slot
-         * inspection (state >= STATE_SESSION checks) correctly treats
-         * this slot as inactive even before it is reclaimed by
-         * xmpp_accept_callback(). */
-        tcp_close(pcb);
-
-        /* Free mbedTLS resources before zeroing the context fields.
-         * Safe to call when TLS was never initialised. */
-        xmpp_tls_client_free(ctx);
-
-        ctx->pcb = NULL; 
-        ctx->state = STATE_CONNECTED; /* not SESSION — slot is inactive */
-
+         * Send </stream:stream> if a stream was opened, then close.
+         * We use pcb directly here because ctx->pcb may already be NULL
+         * from a previous call; re-bind it temporarily.             */
+        if (ctx->pcb == NULL) {
+            ctx->pcb = pcb;
+        }
+        send_stream_close_and_free(ctx);
+        ctx->pcb   = NULL;
+        ctx->state = STATE_CONNECTED;
         return ERR_OK;
     }
 
@@ -289,11 +290,8 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
      *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.2.3 */
     if (ctx->state == STATE_STARTTLS) {
         tcp_recved(pcb, p->len);
-
         xmpp_tls_handshake_step(ctx, (const uint8_t *)p->payload, (int)p->len);
-        
         pbuf_free(p);
-        
         return ERR_OK;
     }
 
@@ -305,30 +303,21 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
 
     if (ctx->tls_established) {
         tcp_recved(pcb, p->len);
-
         xmpp_tls_decrypt(ctx, (const uint8_t *)p->payload, (int)p->len);
-
         pbuf_free(p);
-        
         skip_plaintext_copy = 1;
     }
 
     if (!skip_plaintext_copy) {
         if (ctx->rx_pos + (int)p->len < (int)(sizeof(ctx->rx_buffer) - 1)) {
             memcpy(ctx->rx_buffer + ctx->rx_pos, p->payload, p->len);
-
             ctx->rx_pos += p->len;
             ctx->rx_buffer[ctx->rx_pos] = '\0';
-        }
-        else {
-            /* Buffer full — RFC 6120 §4.9.3.14 requires a
-             * <policy-violation/> stream error followed by closing the
-             * connection rather than silently dropping data. */
-            printf("[XMPP] Buffer Overflow! rx_pos=%d, incoming=%d — sending policy-violation and closing.\n",
+        } else {
+            /* RFC 6120 §4.9.3.14 — buffer overflow: policy-violation */
+            printf("[XMPP] Buffer Overflow! rx_pos=%d, incoming=%d\n",
                    ctx->rx_pos, p->len);
-
             tcp_recved(pcb, p->len);
-
             pbuf_free(p);
 
             const char *stream_err =
@@ -338,50 +327,36 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                 "</stream:stream>";
 
             /* RFC 6120 §4.9.3.14 — send stream error then close */
+
             tcp_write(pcb, stream_err, strlen(stream_err), TCP_WRITE_FLAG_COPY);
-
             tcp_output(pcb);
-
             tcp_close(pcb);
-
-            ctx->pcb = NULL;
+            ctx->pcb   = NULL;
             ctx->state = STATE_CONNECTED;
-
             return ERR_OK;
         }
 
         /* RFC 6120 §4.1 — acknowledge received bytes to the TCP stack */
         tcp_recved(pcb, p->len);
-
         pbuf_free(p);
     }
 
     while (ctx->rx_pos > 0) {
-        /* Strip leading whitespace; RFC 6120 §11.7 permits whitespace
-         * between top-level elements for keep-alive ("whitespace ping"). */
+        /* Strip leading whitespace (RFC 6120 §11.7 — whitespace ping) */
         int shift = 0;
-
         while (shift < ctx->rx_pos) {
             char c = ctx->rx_buffer[shift];
-
-            if (c != ' ' && c != '\n' && c != '\r' && c != '\t'){
-                break;
-            }
-
+            if (c != ' ' && c != '\n' && c != '\r' && c != '\t') break;
             shift++;
         }
-
         if (shift > 0) {
             memmove(ctx->rx_buffer, ctx->rx_buffer + shift, ctx->rx_pos - shift);
-
             ctx->rx_pos -= shift;
-
             ctx->rx_buffer[ctx->rx_pos] = '\0';
         }
+        if (ctx->rx_pos == 0) break;
 
-        if (ctx->rx_pos == 0) {
-            break;
-        }
+        
 
         /* STARTTLS element detection — RFC 6120 §5.2
          *
@@ -397,42 +372,29 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          *
          * If TLS init fails we send <failure/> and close (RFC 6120 §5.2.2).
          *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.2 */
-        if (ctx->state == STATE_CONNECTED && !ctx->tls_established && strncmp(ctx->rx_buffer, "<starttls", 9) == 0) {
+        if (ctx->state == STATE_CONNECTED && !ctx->tls_established &&
+            strncmp(ctx->rx_buffer, "<starttls", 9) == 0) {
             char *starttls_gt = strchr(ctx->rx_buffer, '>');
+            if (!starttls_gt) break;
 
-            if (!starttls_gt) {
-                break;
-            }
-
-            /* Send <proceed/> — RFC 6120 §5.2.2 */
             const char *proceed = "<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>";
-
             tcp_write(ctx->pcb, proceed, strlen(proceed), TCP_WRITE_FLAG_COPY);
-
             tcp_output(ctx->pcb);
 
-            /* Initialise per-client TLS session */
             if (xmpp_tls_client_init(ctx) != 0) {
                 /* TLS setup failed — RFC 6120 §5.2.2 send <failure/> */
                 const char *fail = "<failure xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>";
-                
                 tcp_write(ctx->pcb, fail, strlen(fail), TCP_WRITE_FLAG_COPY);
-                
                 tcp_output(ctx->pcb);
-                
                 tcp_close(ctx->pcb);
-                
-                ctx->pcb = NULL;
+                ctx->pcb   = NULL;
                 ctx->state = STATE_CONNECTED;
                 ctx->rx_pos = 0;
-                
                 return ERR_OK;
             }
 
-            /* All subsequent bytes from this client are TLS records */
-            ctx->state = STATE_STARTTLS;
-            ctx->rx_pos = 0; /* discard anything before the starttls tag */
-
+            ctx->state  = STATE_STARTTLS;
+            ctx->rx_pos = 0;
             return ERR_OK;
         }
 
@@ -491,29 +453,30 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
         if (strncmp(ctx->rx_buffer, "</stream:stream", 15) == 0 ||
             strncmp(ctx->rx_buffer, "</stream>", 9) == 0) {
 
-            /* Reply with our own close element */
             const char *close_tag = "</stream:stream>";
             if (ctx->tls_established) {
-                /* Send through TLS layer */
                 mbedtls_ssl_write(&ctx->tls_ssl,
                     (const unsigned char *)close_tag, strlen(close_tag));
                 if (ctx->pcb) tcp_output(ctx->pcb);
                 /* RFC 6120 §4.4 / TLS §7.2.1 — send close_notify */
                 mbedtls_ssl_close_notify(&ctx->tls_ssl);
             } else {
-                tcp_write(ctx->pcb, close_tag, strlen(close_tag),
-                          TCP_WRITE_FLAG_COPY);
+                tcp_write(ctx->pcb, close_tag, strlen(close_tag), TCP_WRITE_FLAG_COPY);
                 tcp_output(ctx->pcb);
             }
 
             xmpp_tls_client_free(ctx);
             tcp_close(ctx->pcb);
-            ctx->pcb = NULL;
+            ctx->pcb   = NULL;
             ctx->state = STATE_CONNECTED;
             ctx->rx_pos = 0;
             return ERR_OK;
         }
-        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_AUTHENTICATED) && (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 || strstr(ctx->rx_buffer, "<stream:stream"))) {
+
+        /* Stream (re-)open detection — only valid in CONNECTED or AUTHENTICATED */
+        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_AUTHENTICATED) &&
+            (strncmp(ctx->rx_buffer, "<?xml", 5) == 0 ||
+             strstr(ctx->rx_buffer, "<stream:stream"))) {
             /* ------------------------------------------------------------------
              * RFC 6120 §4.9.1 — validate the stream opening element
              * before accepting.  If required attributes are absent or wrong,
@@ -564,7 +527,6 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                                         stream_to, sizeof(stream_to));
                     if (stream_to[0] != '\0' &&
                         strcmp(stream_to, XMPP_DOMAIN) != 0) {
-                        /* Build the stream open so the client can parse our error */
                         char err[512];
                         snprintf(err, sizeof(err),
                             "<?xml version='1.0'?>"
@@ -577,24 +539,23 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                                 " xmlns='urn:ietf:params:xml:ns:xmpp-streams'/>"
                             "</stream:error>"
                             "</stream:stream>");
-                        tcp_write(ctx->pcb, err, strlen(err),
-                                  TCP_WRITE_FLAG_COPY);
+                        tcp_write(ctx->pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
                         tcp_output(ctx->pcb);
                         tcp_close(ctx->pcb);
-                        ctx->pcb = NULL;
+                        ctx->pcb    = NULL;
                         ctx->rx_pos = 0;
                         return ERR_OK;
                     }
                 }
-                /* Check for required xmlns='jabber:client' */
-                int bad_ns = (strstr(ctx->rx_buffer, "xmlns='jabber:client'") == NULL && strstr(ctx->rx_buffer, "xmlns=\"jabber:client\"") == NULL);
 
-                /* Check for required xmlns:stream namespace URI */
-                int bad_stream_ns = (strstr(ctx->rx_buffer, "xmlns:stream='http://etherx.jabber.org/streams'") == NULL &&
-                                     strstr(ctx->rx_buffer, "xmlns:stream=\"http://etherx.jabber.org/streams\"") == NULL);
-
+                int bad_ns = (strstr(ctx->rx_buffer, "xmlns='jabber:client'") == NULL &&
+                              strstr(ctx->rx_buffer, "xmlns=\"jabber:client\"") == NULL);
+                int bad_stream_ns =
+                    (strstr(ctx->rx_buffer, "xmlns:stream='http://etherx.jabber.org/streams'") == NULL &&
+                     strstr(ctx->rx_buffer, "xmlns:stream=\"http://etherx.jabber.org/streams\"") == NULL);
                 /* Check for version='1.0' (RFC 6120 §4.7.5: MUST be "1.0") */
-                int bad_ver = (strstr(ctx->rx_buffer, "version='1.0'") == NULL && strstr(ctx->rx_buffer, "version=\"1.0\"") == NULL);
+                     int bad_ver = (strstr(ctx->rx_buffer, "version='1.0'") == NULL &&
+                               strstr(ctx->rx_buffer, "version=\"1.0\"") == NULL);
 
                 if (bad_ns || bad_stream_ns) {
                     /* RFC 6120 §4.9.3.11 — <invalid-namespace/> */
@@ -608,16 +569,10 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                             "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
                         "</stream:error>"
                         "</stream:stream>";
-
-                    /* pbuf already freed above the while() loop */
                     tcp_write(ctx->pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
-
                     tcp_output(ctx->pcb);
-
                     tcp_close(ctx->pcb);
-
                     ctx->rx_pos = 0;
-
                     return ERR_OK;
                 }
 
@@ -634,28 +589,18 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                             "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
                         "</stream:error>"
                         "</stream:stream>";
-
                     tcp_write(ctx->pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
-
                     tcp_output(ctx->pcb);
-
                     tcp_close(ctx->pcb);
-
                     ctx->rx_pos = 0;
-
                     return ERR_OK;
                 }
-            }
-            else {
-                /* Only the <?xml?> declaration seen; <stream:stream> not yet
-                 * received.  Wait for the rest of the stream open. */
-                break;
+            } else {
+                break; /* waiting for <stream:stream> */
             }
 
             handle_handshake_logic(ctx);
-
             ctx->rx_pos = 0;
-
             return ERR_OK;
         }
 
@@ -676,42 +621,36 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
          * exchange, which now spans STATE_CONNECTED → STATE_SASL.
          *   RFC 6120 §6.4.4
          *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.4.4 */
-        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_SASL) && strncmp(ctx->rx_buffer, "<abort", 6) == 0) {
-            /* Find the end of the abort element (self-closing or with children) */
+        if ((ctx->state == STATE_CONNECTED || ctx->state == STATE_SASL) &&
+            strncmp(ctx->rx_buffer, "<abort", 6) == 0) {
             char *gt = strchr(ctx->rx_buffer, '>');
-
             if (gt) {
                 int abort_consumed = (int)((gt - ctx->rx_buffer) + 1);
-
                 const char *abort_resp =
                     "<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
                       "<aborted/>"
                     "</failure>";
-
                 send_raw(ctx, abort_resp);
-
-                /* Consume the abort element from the receive buffer */
-                memmove(ctx->rx_buffer, ctx->rx_buffer + abort_consumed, ctx->rx_pos - abort_consumed);
-
+                memmove(ctx->rx_buffer, ctx->rx_buffer + abort_consumed,
+                        ctx->rx_pos - abort_consumed);
                 ctx->rx_pos -= abort_consumed;
                 ctx->rx_buffer[ctx->rx_pos] = '\0';
-
-                continue; /* restart the parse loop */
+                continue;
             }
-
-            break; /* abort element incomplete — wait for more data */
+            break;
         }
 
-        // Handle XEP-0198 SM elements before stanza parsing
+        /* XEP-0198 SM element handling */
         if (ctx->state >= STATE_AUTHENTICATED) {
             if (xmpp_sm_handle_element(ctx)) {
-                continue;  // SM element consumed; restart loop
+                continue;
             }
         }
-        int bytes_consumed = 0;
 
+        int bytes_consumed = 0;
         parse_null_reason_t reason;
-        xmpp_stanza_t *stanza = parse_xml_stream(ctx->rx_buffer, ctx->rx_pos, &bytes_consumed, &reason);
+        xmpp_stanza_t *stanza = parse_xml_stream(ctx->rx_buffer, ctx->rx_pos,
+                                                  &bytes_consumed, &reason);
 
         if (stanza) {
             if (ctx->state == STATE_CONNECTED || ctx->state == STATE_SASL) {
@@ -729,24 +668,20 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                 if (strcmp(stanza->xmlns, "urn:ietf:params:xml:ns:xmpp-sasl") == 0) {
                     handle_sasl(ctx, stanza);
                 }
-            }
-            else {
+            } else {
                 xmpp_route_stanza(ctx, stanza);
-
                 xmpp_sm_on_stanza_received(ctx);
             }
 
             xmpp_free_stanza(stanza);
 
-            /* Slide the consumed bytes out of the buffer */
             if (bytes_consumed > 0) {
-                memmove(ctx->rx_buffer, ctx->rx_buffer + bytes_consumed, ctx->rx_pos - bytes_consumed);
-
+                memmove(ctx->rx_buffer, ctx->rx_buffer + bytes_consumed,
+                        ctx->rx_pos - bytes_consumed);
                 ctx->rx_pos -= bytes_consumed;
                 ctx->rx_buffer[ctx->rx_pos] = '\0';
             }
-        }
-        else {
+        } else {
             /* If parse_xml_stream returned NULL because
              * xmpp_alloc_stanza() exhausted the pool (bytes_consumed > 0
              * but stanza is NULL), send RFC 6120 §4.9.3.17 resource-constraint
@@ -754,33 +689,26 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
              * If NULL is due to an incomplete stanza, wait for more data. */
             if (reason == PARSE_NO_MEMORY) {
                 /* Pool exhausted — RFC 6120 §4.9.3.17 */
-                printf("[XMPP] Stanza pool exhausted — sending resource-constraint and closing.\n");
-
+                printf("[XMPP] Stanza pool exhausted — resource-constraint.\n");
                 const char *stream_err =
                     "<stream:error>"
                       "<resource-constraint xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
                     "</stream:error>"
                     "</stream:stream>";
-
                 tcp_write(pcb, stream_err, strlen(stream_err), TCP_WRITE_FLAG_COPY);
-                
                 tcp_output(pcb);
-                
                 tcp_close(pcb);
-                
-                ctx->pcb = NULL;
+                ctx->pcb   = NULL;
                 ctx->state = STATE_CONNECTED;
-
                 return ERR_OK;
             }
-
-            /* Incomplete stanza — wait for more data */
             break;
         }
     }
 
     return ERR_OK;
 }
+
 
 /* ------------------------------------------------------------------
  * xmpp_accept_callback
@@ -821,25 +749,17 @@ err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
     xmpp_client_ctx_t *ctx = &client_registry[client_idx];
     client_idx = (client_idx + 1) % MAX_USERS;
 
-    /* Close the old connection if the slot is still
-     * in use, then zero the entire context to prevent state bleed. */
     if (ctx->pcb != NULL) {
-        /* Evict the previous occupant before reusing this slot.
-         * Free TLS context BEFORE tcp_close() and memset() so mbedTLS
-         * can release its pool allocations cleanly. */
         xmpp_tls_client_free(ctx);
-
         tcp_close(ctx->pcb);
     }
 
     memset(ctx, 0, sizeof(*ctx));
-
-    ctx->pcb = newpcb;
-    ctx->state = STATE_CONNECTED;
+    ctx->pcb         = newpcb;
+    ctx->state       = STATE_CONNECTED;
     ctx->authenticated = 0;
 
     tcp_arg(newpcb, ctx);
-
     tcp_recv(newpcb, xmpp_recv_callback);
 
     return ERR_OK;

@@ -33,6 +33,9 @@ typedef enum {
 #define MAX_ROOM_NAME_LEN 32
 #define MAX_USERS 10
 
+/* Per-room ban list capacity */
+#define MAX_BANNED_PER_ROOM 8
+
 #define TLS_RX_BUF_SIZE 32768
 
 /* Domain used as the server's authoritative domain in JIDs and the
@@ -45,6 +48,9 @@ typedef enum {
  *   https://datatracker.ietf.org/doc/html/rfc6120#section-4.7.1 */
 #define XMPP_DOMAIN "angelic.local"
 #define SERVER_JID(user) user "@" XMPP_DOMAIN
+
+/* SASL brute-force limit (RFC 6120 §6.5) */
+#define SASL_MAX_FAILURES 5
 
 /* ------------------------------------------------------------------
  * Stanza types
@@ -244,7 +250,7 @@ typedef struct {
      * If the client omitted 'from=', this field stays empty and 'to=' is
      * omitted from the server's response per the same section.
      * ------------------------------------------------------------------ */
-     char client_from[64];   /* bare JID from client's <stream:stream from='...'> */
+    char client_from[64];  /* bare JID from client's <stream:stream from='...'> */
  /* ------------------------------------------------------------------
      * RFC 6121 §4.6 — Client's actual presence content.
      *
@@ -261,6 +267,11 @@ typedef struct {
      * ------------------------------------------------------------------ */
      char presence_payload[512]; /* verbatim inner XML of last <presence/> */
 
+    /* RFC 6120 §6.5 — SASL failure counter (brute-force protection).
+     * After SASL_MAX_FAILURES consecutive failures the stream is closed
+     * with <policy-violation/>.
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-6.5 */
+    int sasl_failures;
 
     /* ------------------------------------------------------------------
      * TLS state (RFC 6120 §5 — STARTTLS negotiation)
@@ -363,7 +374,56 @@ typedef struct {
      *   XEP-0045 §10.1.2 https://xmpp.org/extensions/xep-0045.html#createroom-instant
      *   XEP-0045 §10.1.3 https://xmpp.org/extensions/xep-0045.html#createroom-reserved */
     int locked;
+
     int active;
+
+    /* ------------------------------------------------------------------
+     * Room configuration fields — persisted to disk.
+     *
+     * XEP-0045 §10.2 — these fields are set by the owner via the room
+     * configuration form and affect room behaviour and disco#info responses.
+     * ------------------------------------------------------------------ */
+
+    /* muc#roomconfig_persistentroom — XEP-0045 §10.2.3
+     * When 1, the room remains active (active=1) even when all occupants
+     * have left.  When 0 (default), room is destroyed on last exit.
+     *   https://xmpp.org/extensions/xep-0045.html#roomconfig */
+    int persistent;
+
+    /* muc#roomconfig_moderatedroom — XEP-0045 §10.2.3
+     * When 1, only occupants with voice (role>=participant) may send
+     * groupchat messages.  Visitors are silenced.
+     *   https://xmpp.org/extensions/xep-0045.html#roomconfig */
+    int moderated;
+
+    /* muc#roomconfig_membersonly — XEP-0045 §10.2.3
+     * When 1, only registered members (affiliation=member|admin|owner)
+     * may enter the room.
+     *   https://xmpp.org/extensions/xep-0045.html#roomconfig */
+    int members_only;
+
+    /* ------------------------------------------------------------------
+     * Per-room ban list — XEP-0045 §9.4
+     *
+     * Stores bare JIDs of users with affiliation='outcast'.
+     * Checked during join (handle_muc_presence) to enforce bans across
+     * disconnections.  Persisted to disk so bans survive a restart.
+     *
+     * XEP-0045 §9.4 — https://xmpp.org/extensions/xep-0045.html#ban
+     * ------------------------------------------------------------------ */
+    char banned_jids[MAX_BANNED_PER_ROOM][64];
+    int  banned_count;
+
+    /* ------------------------------------------------------------------
+     * Room subject — XEP-0045 §7.2.15 / §7.4
+     *
+     * The current room subject broadcast to all joining occupants.
+     * Updated when a groupchat message contains a <subject> child.
+     * Persisted so the subject survives a server restart.
+     *
+     * XEP-0045 §7.4 — https://xmpp.org/extensions/xep-0045.html#subject
+     * ------------------------------------------------------------------ */
+    char subject[256];
 } room_t;
 
 extern room_t rooms[MAX_ROOMS];
@@ -623,6 +683,19 @@ typedef struct {
 extern roster_entry_t roster_store[MAX_ROSTER_ENTRIES];
 
 /* ------------------------------------------------------------------
+ * RFC 6121 §2.6 — Roster version counter.
+ *
+ * Incremented on every successful roster IQ-set (add/update/remove).
+ * Returned as ver='N' in roster get results.  Zero-initialised at boot.
+ * Persisted with the roster sectors so clients need not re-download
+ * the full roster across sessions when they send a matching ver=.
+ *
+ * Defined in xmpp_store.c; declared extern here for handle_roster_request.
+ *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.6
+ * ------------------------------------------------------------------ */
+extern int roster_version;
+
+/* ------------------------------------------------------------------
  * xmpp_persist.c — ATA disk persistence for XMPP stores
  *
  * Replaces EFI NVRAM with direct ATA PIO sector I/O to a dedicated
@@ -662,25 +735,13 @@ void mpk_benchmark(void);
  * ------------------------------------------------------------------ */
 
 /* XEP-0160 Offline Message Queue */
-int offline_msg_enqueue(const char *to_bare, const char *from_jid, const char *msg_id,  const char *payload);
+int offline_msg_enqueue(const char *to_bare, const char *from_jid, const char *msg_id, const char *payload);
 void offline_msg_drain(xmpp_client_ctx_t *ctx);
 int offline_msg_is_full(const char *to_user);
 
 /* RFC 6121 §2 Roster Store */
-int roster_store_upsert_item (const char *username, const char *item_xml);
+int roster_store_upsert_item(const char *username, const char *item_xml);
 void roster_store_set_from_payload(const char *username, const char *payload);
-int roster_store_get_items (const char *username, char *buf, int buf_len);
+int roster_store_get_items(const char *username, char *buf, int buf_len);
 
-#endif
-
-#ifdef XMPP_CORE_PATCH_VERIFY
-#include "xmpp_core.h"
-#include <stddef.h>
-static void verify_patch(void) {
-    xmpp_client_ctx_t _t;
-    (void)_t.initial_presence_sent;
-    (void)_t.sm_enabled;
-    (void)_t.sm_inbound_h;
-    (void)_t.sm_outbound_count;
-}
 #endif

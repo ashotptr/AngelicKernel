@@ -180,7 +180,7 @@ void offline_msg_drain(xmpp_client_ctx_t *ctx) {
                   "%s"
                   "<delay xmlns='urn:xmpp:delay'"
                          " from='" XMPP_DOMAIN "'"
-                         " stamp='1970-01-01T00:00:00Z'>"
+                         " stamp='2024-01-01T00:00:00Z'>"
                     "Offline Storage"
                   "</delay>"
                 "</message>",
@@ -195,7 +195,7 @@ void offline_msg_drain(xmpp_client_ctx_t *ctx) {
                   "%s"
                   "<delay xmlns='urn:xmpp:delay'"
                          " from='" XMPP_DOMAIN "'"
-                         " stamp='1970-01-01T00:00:00Z'>"
+                         " stamp='2024-01-01T00:00:00Z'>"
                     "Offline Storage"
                   "</delay>"
                 "</message>",
@@ -266,6 +266,18 @@ int offline_msg_is_full(const char *to_user) {
 /* MAX_ROSTER_ENTRIES, ROSTER_ITEM_MAX_LEN, and roster_entry_t are
  * defined in xmpp_core.h so that xmpp_persist.c can also use them.
  * Do NOT redefine them here. */
+
+/* RFC 6121 §2.6 — Roster version counter.
+ *
+ * Incremented on each successful roster IQ-set by handle_roster_request().
+ * Returned as ver='N' in roster get results so clients can skip re-fetching
+ * an unchanged roster.  Zero-initialised at boot; persisted via roster sectors
+ * (we store it in the last int32_t of the roster sector padding).
+ *
+ * Declared extern in xmpp_core.h so handle_roster_request() can increment it.
+ *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.6
+ */
+int roster_version = 0;
 
 /* Non-static: xmpp_persist.c accesses this array via the extern
  * declaration in xmpp_core.h to save/load it to the ATA data disk. */
