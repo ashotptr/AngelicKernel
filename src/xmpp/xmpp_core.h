@@ -299,6 +299,8 @@ typedef struct {
     int tls_rx_len;
     int tls_rx_pos;
     int tls_established;
+    int tls_initialised;   /* set in client_init, cleared in client_free */
+    int tls_want_write;
     // XEP-0198 Stream Management state (xmpp_sm.c)
     int      initial_presence_sent; // 1 after initial presence broadcast sent
     int      sm_enabled;         // 1 after <enable/> processed

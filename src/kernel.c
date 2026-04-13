@@ -10,6 +10,7 @@
 #include "mm/pmm.h" 
 #include "mm/vmm.h"
 #include "sys/mpk_gate.h"
+#include "xmpp/xmpp_core.h"
 
 // address is arbitrary, but safe in QEMU
 // #define GDB_MAGIC_ADDR  0x10000 
@@ -348,6 +349,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
             // a few times. 4 is usually enough to clear a burst.
             for(int i = 0; i < 4; i++) {
                 angelic_netif_poll();
+            }
+        }
+
+        /* Retry any TLS handshakes that stalled on WANT_WRITE */
+        for (int i = 0; i < MAX_USERS; i++) {
+            if (client_registry[i].pcb != NULL &&
+                client_registry[i].state == STATE_STARTTLS &&
+                client_registry[i].tls_want_write) {
+                xmpp_tls_handshake_step(&client_registry[i], NULL, 0);
             }
         }
 

@@ -103,6 +103,11 @@ static void send_stream_close_and_free(xmpp_client_ctx_t *ctx) {
     }
 
     xmpp_tls_client_free(ctx);
+    /* NEVER call tcp_close() if ctx->pcb is NULL.
+    * pcb is NULL either because:
+    *   (a) tcp_err already fired and freed it (lwIP owns the PCB lifetime), OR
+    *   (b) this is a double-error path.
+    * The if-guard below is mandatory — do not collapse it. */
     if (ctx->pcb) {
         tcp_close(ctx->pcb);
     }
@@ -281,16 +286,35 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
         return ERR_OK;
     }
 
+    /* Log the first fragment length and total length so chained pbufs are
+     * visible in the trace.  p->tot_len == p->len for a single-fragment
+     * pbuf; they differ when lwIP chains multiple buffers for one segment. */
     xmpp_log("RECV", (char*)p->payload, p->len);
 
     /* ── TLS: handshake in progress (STATE_STARTTLS) ───────────────────────
      * All bytes arriving in this state are raw TLS records.  Route them
      * directly to the TLS staging buffer; do NOT touch rx_buffer.
      * RFC 6120 §5.2.3 — after <proceed/> both sides immediately begin TLS.
-     *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.2.3 */
+     *   https://datatracker.ietf.org/doc/html/rfc6120#section-5.2.3
+     *
+     * BUG FIX — pbuf chain iteration:
+     *   lwIP may deliver a TCP segment as a CHAIN of pbufs.  p->len is the
+     *   length of the FIRST pbuf only; p->tot_len is the total across all
+     *   chained pbufs.  The old code read only p->payload/p->len, silently
+     *   dropping all data after the first fragment.  For TLS the ClientHello
+     *   typically fits in one pbuf, but the second flight (ClientKeyExchange
+     *   + ChangeCipherSpec + Finished) can arrive chained, causing mbedTLS
+     *   to receive a truncated record and loop forever on WANT_READ.
+     *
+     *   Fix: use p->tot_len in tcp_recved() and iterate the chain with q->next.
+     *   Each fragment is fed to xmpp_tls_handshake_step() which accumulates
+     *   data in the staging buffer before calling mbedtls_ssl_handshake().
+     * -------------------------------------------------------------------- */
     if (ctx->state == STATE_STARTTLS) {
-        tcp_recved(pcb, p->len);
-        xmpp_tls_handshake_step(ctx, (const uint8_t *)p->payload, (int)p->len);
+        tcp_recved(pcb, p->tot_len);   /* ← was p->len; must ack entire chain */
+        for (struct pbuf *q = p; q != NULL && ctx->pcb != NULL; q = q->next) {
+            xmpp_tls_handshake_step(ctx, (const uint8_t *)q->payload, (int)q->len);
+        }
         pbuf_free(p);
         return ERR_OK;
     }
@@ -298,26 +322,39 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
     /* ── TLS: established — decrypt encrypted bytes into rx_buffer ─────────
      * After decryption, fall through to the normal parse loop.  The
      * skip_plaintext_copy flag prevents the raw (still-encrypted) bytes
-     * from being appended to rx_buffer a second time. */
+     * from being appended to rx_buffer a second time.
+     *
+     * Same pbuf chain fix as above: ack tot_len and iterate all fragments. */
     int skip_plaintext_copy = 0;
 
     if (ctx->tls_established) {
-        tcp_recved(pcb, p->len);
-        xmpp_tls_decrypt(ctx, (const uint8_t *)p->payload, (int)p->len);
+        tcp_recved(pcb, p->tot_len);   /* ← was p->len */
+        for (struct pbuf *q = p; q != NULL && ctx->pcb != NULL; q = q->next) {
+            xmpp_tls_decrypt(ctx, (const uint8_t *)q->payload, (int)q->len);
+        }
         pbuf_free(p);
         skip_plaintext_copy = 1;
     }
 
     if (!skip_plaintext_copy) {
-        if (ctx->rx_pos + (int)p->len < (int)(sizeof(ctx->rx_buffer) - 1)) {
-            memcpy(ctx->rx_buffer + ctx->rx_pos, p->payload, p->len);
-            ctx->rx_pos += p->len;
-            ctx->rx_buffer[ctx->rx_pos] = '\0';
-        } else {
+        /* Iterate the pbuf chain so every fragment is copied into rx_buffer.
+         * On overflow, send the stream error and abort immediately. */
+        int overflow = 0;
+        for (struct pbuf *q = p; q != NULL && !overflow; q = q->next) {
+            if (ctx->rx_pos + (int)q->len < (int)(sizeof(ctx->rx_buffer) - 1)) {
+                memcpy(ctx->rx_buffer + ctx->rx_pos, q->payload, q->len);
+                ctx->rx_pos += q->len;
+                ctx->rx_buffer[ctx->rx_pos] = '\0';
+            } else {
+                overflow = 1;
+            }
+        }
+
+        if (overflow) {
             /* RFC 6120 §4.9.3.14 — buffer overflow: policy-violation */
             printf("[XMPP] Buffer Overflow! rx_pos=%d, incoming=%d\n",
-                   ctx->rx_pos, p->len);
-            tcp_recved(pcb, p->len);
+                   ctx->rx_pos, (int)p->tot_len);
+            tcp_recved(pcb, p->tot_len);   /* ← was p->len */
             pbuf_free(p);
 
             const char *stream_err =
@@ -336,8 +373,10 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
             return ERR_OK;
         }
 
-        /* RFC 6120 §4.1 — acknowledge received bytes to the TCP stack */
-        tcp_recved(pcb, p->len);
+        /* RFC 6120 §4.1 — acknowledge received bytes to the TCP stack.
+         * Use p->tot_len (total across all chained pbufs), not p->len
+         * (first fragment only), so the full receive window is restored. */
+        tcp_recved(pcb, p->tot_len);   /* ← was p->len */
         pbuf_free(p);
     }
 
@@ -709,6 +748,50 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
     return ERR_OK;
 }
 
+/* ------------------------------------------------------------------
+ * xmpp_err_callback
+ *
+ * lwIP TCP error callback — called when the PCB is aborted due to
+ * a RST from the remote, a timeout, or internal OOM.
+ *
+ * CRITICAL: When tcp_err fires, lwIP has ALREADY freed the PCB.
+ * The application MUST NOT call tcp_close(), tcp_write(), or any
+ * other tcp_* function on that PCB after this point.
+ * ctx->pcb is set to NULL here so all other code paths that guard
+ * on (ctx->pcb != NULL) become safe automatically.
+ *
+ * Common reasons this fires during STARTTLS:
+ *   - Client rejects self-signed certificate → sends TLS Alert → RST
+ *   - Client's TLS library times out waiting for server hello
+ *   - Client sends RST directly after certificate validation failure
+ *
+ * RFC 6120 §4.4 — either party may close the stream;
+ * an unexpected TCP RST is handled here, not in recv_callback.
+ * ------------------------------------------------------------------ */
+static void xmpp_err_callback(void *arg, err_t err) {
+    xmpp_client_ctx_t *ctx = (xmpp_client_ctx_t *)arg;
+
+    if (!ctx) {
+        return;
+    }
+
+    {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "[XMPP] TCP error %d on connection — cleaning up\n", (int)err);
+        serial_print(tmp);
+    }
+
+    /* PCB is already gone — NULL it before any cleanup function
+     * tries to use it (xmpp_tls_client_free does not touch pcb,
+     * but guard here for safety). */
+    ctx->pcb = NULL;
+
+    /* Release mbedTLS per-session memory back to the static pool. */
+    xmpp_tls_client_free(ctx);
+
+    /* Clear the slot so it can be reused. */
+    memset(ctx, 0, sizeof(xmpp_client_ctx_t));
+}
 
 /* ------------------------------------------------------------------
  * xmpp_accept_callback
@@ -744,6 +827,8 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
 xmpp_client_ctx_t client_registry[MAX_USERS];
 
 err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
+    (void)arg;
+    (void)err;
     static int client_idx = 0;
 
     xmpp_client_ctx_t *ctx = &client_registry[client_idx];
@@ -761,6 +846,7 @@ err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
 
     tcp_arg(newpcb, ctx);
     tcp_recv(newpcb, xmpp_recv_callback);
+    tcp_err(newpcb, xmpp_err_callback);   /* ← ADD: catches RST and OOM */
 
     return ERR_OK;
 }

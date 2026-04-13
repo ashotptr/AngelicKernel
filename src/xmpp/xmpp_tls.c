@@ -323,6 +323,89 @@ int xmpp_tls_server_init(void) {
     
     mbedtls_x509write_crt_set_authority_key_identifier(&crt_ctx);
 
+    /* ------------------------------------------------------------------
+     * Subject Alternative Name (SAN) — required by RFC 6125 and every
+     * modern TLS client (OpenSSL 1.1+, GnuTLS 3.x, Python 3.7+).
+     *
+     * Without a dNSName SAN that matches the server hostname, clients
+     * reject the certificate even if CN matches.  The CN field alone
+     * has been deprecated for hostname matching since RFC 2818 (2000)
+     * and is no longer checked by any modern TLS implementation.
+     *
+     * Structure (DER, right-justified in san_buf[]):
+     *   SEQUENCE {               30 <len>
+     *     [2] IMPLICIT IA5String    82 <len> <dns_bytes>
+     *   }
+     *
+     * mbedtls_x509write_crt_set_extension() takes the raw DER of the
+     * extension VALUE (the SEQUENCE), not the outer OID wrapper — that
+     * is added by the library.
+     *
+     * mbedtls_asn1_write_* functions write RIGHT-TO-LEFT into the buffer,
+     * so we start from the END and work backwards.  'p' is the current
+     * write cursor; san_len is the number of bytes written so far.
+     *
+     *   RFC 5280 §4.2.1.6 — Subject Alternative Name
+     *   RFC 6125 §6.4      — Matching against the SAN DNS-ID
+     * ------------------------------------------------------------------ */
+    {
+        unsigned char san_buf[128];
+        unsigned char *p_san = san_buf + sizeof(san_buf);
+        size_t san_len = 0;
+
+        const char *dns_name = XMPP_DOMAIN;
+        size_t      dns_len  = strlen(dns_name);
+
+        /* 1. Write the raw DNS name bytes */
+        if (dns_len > (size_t)(p_san - san_buf)) {
+            serial_print("[TLS] ERROR: XMPP_DOMAIN too long for SAN buffer\n");
+            mbedtls_x509write_crt_free(&crt_ctx);
+            return -1;
+        }
+        p_san   -= dns_len;
+        san_len += dns_len;
+        memcpy(p_san, dns_name, dns_len);
+
+        /* 2. Tag: context-specific primitive [2] = dNSName (0x82) */
+        ret = mbedtls_asn1_write_len(&p_san, san_buf, dns_len);
+        if (ret < 0) { mbedtls_x509write_crt_free(&crt_ctx); return ret; }
+        san_len += (size_t)ret;
+
+        ret = mbedtls_asn1_write_tag(&p_san, san_buf,
+                  MBEDTLS_ASN1_CONTEXT_SPECIFIC | 2);
+        if (ret < 0) { mbedtls_x509write_crt_free(&crt_ctx); return ret; }
+        san_len += (size_t)ret;
+
+        /* 3. Wrap in SEQUENCE { ... } */
+        ret = mbedtls_asn1_write_len(&p_san, san_buf, san_len);
+        if (ret < 0) { mbedtls_x509write_crt_free(&crt_ctx); return ret; }
+        san_len += (size_t)ret;
+
+        ret = mbedtls_asn1_write_tag(&p_san, san_buf,
+                  MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE);
+        if (ret < 0) { mbedtls_x509write_crt_free(&crt_ctx); return ret; }
+        san_len += (size_t)ret;
+
+        /* 4. Register the extension (OID 2.5.29.17, not critical) */
+        ret = mbedtls_x509write_crt_set_extension(
+                  &crt_ctx,
+                  MBEDTLS_OID_SUBJECT_ALT_NAME,
+                  MBEDTLS_OID_SIZE(MBEDTLS_OID_SUBJECT_ALT_NAME),
+                  0,        /* critical = false */
+                  p_san,    /* DER value (right-justified in san_buf) */
+                  san_len);
+        if (ret != 0) {
+            char errbuf[80];
+            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+            serial_print("[TLS] ERROR: SAN extension failed: ");
+            serial_print(errbuf);
+            serial_print("\n");
+            mbedtls_x509write_crt_free(&crt_ctx);
+            return ret;
+        }
+        serial_print("[TLS] SAN extension added (dNSName=" XMPP_DOMAIN ")\n");
+    }
+
     /* Write to DER — right-justified within g_cert_der[]. */
     serial_print("[TLS] Writing self-signed certificate...\n");
     
@@ -394,23 +477,20 @@ int xmpp_tls_client_init(xmpp_client_ctx_t *ctx) {
 
     if (ret != 0) {
         char errbuf[80];
-
         mbedtls_strerror(ret, errbuf, sizeof(errbuf));
-        
         serial_print("[TLS] ERROR: ssl_setup: ");
         serial_print(errbuf);
         serial_print("\n");
-        
         mbedtls_ssl_free(&ctx->tls_ssl);
-        
         return ret;
     }
 
     mbedtls_ssl_set_bio(&ctx->tls_ssl, ctx, tls_net_send, tls_net_recv, NULL);
 
-    ctx->tls_rx_len = 0;
-    ctx->tls_rx_pos = 0;
+    ctx->tls_rx_len      = 0;
+    ctx->tls_rx_pos      = 0;
     ctx->tls_established = 0;
+    ctx->tls_initialised = 1;
 
     return 0;
 }
@@ -425,12 +505,23 @@ int xmpp_tls_client_init(xmpp_client_ctx_t *ctx) {
  * so the pool allocator can reclaim the session's I/O buffers cleanly.
  * =========================================================================== */
 void xmpp_tls_client_free(xmpp_client_ctx_t *ctx) {
-    if (ctx->tls_established || ctx->state == STATE_STARTTLS) {
+    /* Guard on tls_initialised, NOT on tls_established or state.
+     *
+     * The old guard (tls_established || state==STATE_STARTTLS) missed
+     * the case where the handshake failed partway through:
+     *   - tls_initialised=1 (ssl_setup was called)
+     *   - tls_established=0 (handshake never completed)
+     *   - state was reset to STATE_CONNECTED on the error path
+     * That combination leaked the entire per-session allocation (~10 KB)
+     * from the static mbedTLS pool every time a client rejected the cert.
+     * With 288 KB pool, 29 such failures exhaust it permanently.
+     */
+    if (ctx->tls_initialised) {
         mbedtls_ssl_free(&ctx->tls_ssl);
-
         ctx->tls_established = 0;
-        ctx->tls_rx_len = 0;
-        ctx->tls_rx_pos = 0;
+        ctx->tls_initialised = 0;
+        ctx->tls_rx_len      = 0;
+        ctx->tls_rx_pos      = 0;
     }
 }
 
@@ -450,28 +541,20 @@ void xmpp_tls_handshake_step(xmpp_client_ctx_t *ctx, const uint8_t *data, int le
     tls_staging_compact(ctx);
 
     int space = (int)sizeof(ctx->tls_rx_buf) - ctx->tls_rx_len;
-    
+
     if (len > space) {
         serial_print("[TLS] ERROR: handshake staging buffer overflow\n");
-        
-        if (ctx->pcb) { 
-            tcp_close(ctx->pcb);
-            
-            ctx->pcb = NULL;
-        }
-
+        if (ctx->pcb) { tcp_close(ctx->pcb); ctx->pcb = NULL; }
         ctx->state = STATE_CONNECTED;
         ctx->tls_established = 0;
-        
         return;
     }
-    
+
     if (len > 0) {
         memcpy(ctx->tls_rx_buf + ctx->tls_rx_len, data, (size_t)len);
-
         ctx->tls_rx_len += len;
     }
-    
+
     int ret = mbedtls_ssl_handshake(&ctx->tls_ssl);
 
     {
@@ -483,39 +566,42 @@ void xmpp_tls_handshake_step(xmpp_client_ctx_t *ctx, const uint8_t *data, int le
     if (ctx->pcb) {
         tcp_output(ctx->pcb);
     }
-    
+
     tls_staging_compact(ctx);
-    
+
     if (ret == 0) {
         ctx->tls_established = 1;
-        ctx->state = STATE_CONNECTED;  /* RFC 6120 §5.2 step 5c — stream reset */
+        ctx->tls_want_write  = 0;
+        ctx->state  = STATE_CONNECTED;  /* RFC 6120 §5.2 step 5c — stream reset */
         ctx->rx_pos = 0;
-
         serial_print("[TLS] Handshake complete — stream reset pending\n");
-        
-        return;
-    }
-    
-    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
         return;
     }
 
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+        ctx->tls_want_write = 0;
+        return;   /* wait for more data from client */
+    }
+
+    if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+        /* tcp_write ran out of send-buffer space.  Mark the flag so
+         * the main loop can call us again (with len=0) after the
+         * next tcp_output drains the window. */
+        ctx->tls_want_write = 1;
+        return;
+    }
+
+    /* Fatal error */
+    ctx->tls_want_write = 0;
     {
         char errbuf[80];
-        
         mbedtls_strerror(ret, errbuf, sizeof(errbuf));
-
         serial_print("[TLS] Handshake failed: ");
         serial_print(errbuf);
         serial_print("\n");
     }
-    
-    if (ctx->pcb) { 
-        tcp_close(ctx->pcb);
-        
-        ctx->pcb = NULL;
-    }
 
+    if (ctx->pcb) { tcp_close(ctx->pcb); ctx->pcb = NULL; }
     ctx->state = STATE_CONNECTED;
     ctx->tls_established = 0;
 }

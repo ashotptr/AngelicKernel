@@ -391,61 +391,77 @@ int vsnprintf(char *str, size_t size, const char *format, va_list args) {
     size_t remaining = size;
 
     while (*format && remaining > 1) {
-        if (*format == '%') {
-            format++;
-            
-            if (*format == 'd') {
-                int val = va_arg(args, int);
-                
-                if (val < 0) {
-                    if (remaining > 1) {
-                        *out++ = '-'; remaining--;
-                    }
-
-                    val = -val;
-                }
-
-                simple_append_int(&out, &remaining, (unsigned long)(unsigned int)val);
-            }
-            else if (*format == 'u') {
-                /* Must read as unsigned int, not int — reading a value
-                 * with the high bit set as int then casting to unsigned long
-                 * sign-extends it to 64 bits, producing a 20-digit decimal.
-                 * This was causing stream IDs like 18446744073707137098
-                 * instead of the correct 32-bit value. */
-                unsigned int uval = va_arg(args, unsigned int);
-
-                simple_append_int(&out, &remaining, (unsigned long)uval);
-            }
-            else if (*format == 's') {
-                char *s = va_arg(args, char*);
-                
-                while (s && *s && remaining > 1) {
-                    *out++ = *s++;
-                    remaining--;
-                }
-            }
-            else if (*format == 'x') {
-                simple_append_hex(&out, &remaining, va_arg(args, unsigned long));
-            }
-            else if (*format == 'p') {
-                if (remaining > 2) {
-                    *out++ = '0'; *out++ = 'x'; remaining -= 2;
-                }
-                simple_append_hex(&out, &remaining, va_arg(args, unsigned long));
-            }
-        }
-        else {
-            *out++ = *format;
+        if (*format != '%') {
+            *out++ = *format++;
             remaining--;
+            continue;
         }
 
+        format++; /* skip '%' */
+
+        /* Handle optional 'l' or 'z' length modifier */
+        int is_long = 0;
+        int is_size = 0;
+        if (*format == 'l') { is_long = 1; format++; }
+        else if (*format == 'z') { is_size = 1; format++; }
+
+        switch (*format) {
+            case 'd':
+            case 'i': {
+                long val = is_long ? va_arg(args, long) : (long)va_arg(args, int);
+                if (val < 0 && remaining > 1) { *out++ = '-'; remaining--; val = -val; }
+                simple_append_int(&out, &remaining, (unsigned long)val);
+                break;
+            }
+            case 'u': {
+                unsigned long val = (is_long || is_size)
+                    ? va_arg(args, unsigned long)
+                    : (unsigned long)va_arg(args, unsigned int);
+                simple_append_int(&out, &remaining, val);
+                break;
+            }
+            case 'x':
+            case 'X': {
+                unsigned long val = (is_long || is_size)
+                    ? va_arg(args, unsigned long)
+                    : (unsigned long)va_arg(args, unsigned int);
+                simple_append_hex(&out, &remaining, val);
+                break;
+            }
+            case 'p': {
+                if (remaining > 2) { *out++ = '0'; *out++ = 'x'; remaining -= 2; }
+                simple_append_hex(&out, &remaining, va_arg(args, unsigned long));
+                break;
+            }
+            case 's': {
+                const char *s = va_arg(args, const char *);
+                if (!s) s = "(null)";
+                while (*s && remaining > 1) { *out++ = *s++; remaining--; }
+                break;
+            }
+            case 'c': {
+                int c = va_arg(args, int);
+                if (remaining > 1) { *out++ = (char)c; remaining--; }
+                break;
+            }
+            case '%': {
+                if (remaining > 1) { *out++ = '%'; remaining--; }
+                break;
+            }
+            default: {
+                /* Unknown specifier: emit literally and consume no arg.
+                 * This is imprecise but safe — better than corrupting
+                 * the va_list by consuming the wrong type. */
+                if (remaining > 1) { *out++ = '%'; remaining--; }
+                if (remaining > 1) { *out++ = *format; remaining--; }
+                break;
+            }
+        }
         format++;
     }
 
     *out = '\0';
-    
-    return out - str;
+    return (int)(out - str);
 }
 
 //review
