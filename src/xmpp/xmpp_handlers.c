@@ -4503,7 +4503,8 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     }
 
     char response[512];
-
+    int is_unavailable = (stanza->type == XMPP_PRESENCE_UNAVAILABLE);
+    
     /* ------------------------------------------------------------------
      * RFC 6121 §4.6 — Directed presence.
      *
@@ -4562,7 +4563,6 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
      * Using stanza->type is both correct and cheaper.
      *
      * Slots with pcb == NULL or state < STATE_SESSION are skipped. */
-    int is_unavailable = (stanza->type == XMPP_PRESENCE_UNAVAILABLE);
 
     for (int i = 0; i < MAX_USERS; i++) {
         if (client_registry[i].pcb == NULL) {

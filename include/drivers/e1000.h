@@ -28,5 +28,6 @@ struct e1000_tx_desc {
 int e1000_init(uint64_t mmio_base, uint8_t *mac_out);
 int e1000_send_raw(uint64_t mmio_base, void *data, uint16_t len);
 int e1000_poll_receive(uint64_t mmio_base, void *buffer, uint16_t max_len);
+int e1000_send_scatter(uint64_t mmio_base, const void **addrs, const uint16_t *lens, int n_segs);
 
 #endif

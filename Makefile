@@ -249,4 +249,7 @@ $(MBEDTLS_DIR)/library/aes.o: $(MBEDTLS_DIR)/library/aes.c
 $(MBEDTLS_DIR)/library/aesni.o: $(MBEDTLS_DIR)/library/aesni.c
 	$(CC) $(CFLAGS_AESNI) -c $< -o $@
 
+$(MBEDTLS_DIR)/library/gcm.o: $(MBEDTLS_DIR)/library/gcm.c
+	$(CC) $(CFLAGS_AESNI) -c $< -o $@
+
 .PHONY: all clean mbedtls-fetch

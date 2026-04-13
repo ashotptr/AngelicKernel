@@ -136,6 +136,7 @@ static uint8_t g_cert_der[2048];
  * =========================================================================== */
 
 static int tls_net_send(void *bio_ctx, const unsigned char *buf, size_t len) {
+    serial_print("[TLS-BIO] send called\n");
     xmpp_client_ctx_t *ctx = (xmpp_client_ctx_t *)bio_ctx;
 
     if (!ctx->pcb) {
@@ -472,6 +473,12 @@ void xmpp_tls_handshake_step(xmpp_client_ctx_t *ctx, const uint8_t *data, int le
     }
     
     int ret = mbedtls_ssl_handshake(&ctx->tls_ssl);
+
+    {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "[TLS] handshake ret=0x%x\n", (unsigned)-ret);
+        serial_print(tmp);
+    }
 
     if (ctx->pcb) {
         tcp_output(ctx->pcb);
