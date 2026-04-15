@@ -363,7 +363,7 @@ void send_raw(xmpp_client_ctx_t *ctx, const char *data) {
  *   https://datatracker.ietf.org/doc/html/rfc6121#section-2.1.6
  * ------------------------------------------------------------------ */
 void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
-    char response[512];
+    char response[1024];  /* Increased: was 512, presence_payload up to 1023B */
 
     /* ------------------------------------------------------------------
      * RFC 6121 §2.1.5 — Roster Set: client adds/updates/removes a contact.
@@ -421,7 +421,7 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             }
 
             /* This is another resource of the same account */
-            char push_with_to[768];
+            char push_with_to[1200];  /* Increased: was 768, payload up to 1023B + overhead */
 
             snprintf(push_with_to, sizeof(push_with_to),
                 "<iq type='set' to='%s'>"
@@ -534,7 +534,7 @@ void handle_roster_request(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   https://datatracker.ietf.org/doc/html/rfc6121#section-4.3.1
  * ------------------------------------------------------------------ */
 void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
-    char response[512];
+    char response[1024];  /* Increased: was 512, presence_payload up to 1023B */
 
 /* ------------------------------------------------------------------
 * RFC 6121 §4.6 — Store the client's actual presence content.
@@ -661,14 +661,30 @@ void handle_initial_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             *to_slash = '\0';
         }
 
-        snprintf(response, sizeof(response),
-            "<presence type='probe' from='%s' to='%s'/>",
-            bare_from, bare_to);
+        /* Bug fix #9: do NOT send a probe to the peer's TCP connection —
+         * clients do not respond to server-initiated probes. Instead,
+         * serve the peer's stored presence_payload directly to the new user
+         * (ctx). This ensures newly-logged-in users immediately see all
+         * currently-online contacts' presence without any round-trip. */
+        {
+            char peer_bare[64] = {0};
+            strncpy(peer_bare, client_registry[i].full_jid, sizeof(peer_bare) - 1);
+            char *peer_sl = strchr(peer_bare, '/');
+            if (peer_sl) *peer_sl = '\0';
 
-        /* Deliver the probe directly to the peer's TCP connection.
-         * The peer's client will respond with its current presence,
-         * which routes through handle_broadcast_presence() back to us. */
-        send_raw(&client_registry[i], response);
+            char probe_resp[1024];
+            if (client_registry[i].presence_payload[0] != '\0') {
+                snprintf(probe_resp, sizeof(probe_resp),
+                    "<presence from='%s' to='%s'>%s</presence>",
+                    client_registry[i].full_jid, ctx->full_jid,
+                    client_registry[i].presence_payload);
+            } else {
+                snprintf(probe_resp, sizeof(probe_resp),
+                    "<presence from='%s' to='%s'/>",
+                    client_registry[i].full_jid, ctx->full_jid);
+            }
+            send_raw(ctx, probe_resp);
+        }
     }
 
     /* RFC 6121 §4.3 — drain any subscription stanzas that were queued
@@ -1448,7 +1464,7 @@ void handle_blocklist(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   https://xmpp.org/extensions/xep-0092.html
  * ------------------------------------------------------------------ */
 void handle_version(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
-    char response[512];
+    char response[1024];  /* Increased: was 512, presence_payload up to 1023B */
 
     snprintf(response, sizeof(response),
         "<iq type='result' id='%s' from='angelic.local' to='%s'>"
@@ -1524,7 +1540,7 @@ void handle_ping(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
  *   XEP-0060 — Publish-Subscribe: https://xmpp.org/extensions/xep-0060.html
  * ------------------------------------------------------------------ */
 void handle_general_success(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
-    char response[512];
+    char response[1024];  /* Increased: was 512, presence_payload up to 1023B */
 
     snprintf(response, sizeof(response),
         "<iq type='result' id='%s' to='%s'/>",
@@ -1662,7 +1678,7 @@ void handle_core_bind(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         }
     }
 
-    char response[512];
+    char response[1024];  /* Increased: was 512, presence_payload up to 1023B */
 
     /* RFC 6120 §7.7 — bind result containing the full JID */
     snprintf(response, sizeof(response),
@@ -2462,7 +2478,7 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                     "<iq type='error' from='%s' to='%s' id='%s'>"
                       "<error type='cancel'>"
                         "<item-not-found xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>"
-                      "</e>"
+                      "</error>"
                     "</iq>",
                     stanza->to, ctx->full_jid, stanza->id);
             } else {
@@ -3055,7 +3071,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
      *   https://xmpp.org/extensions/xep-0045.html#exit
      * ------------------------------------------------------------------ */
     if (stanza->type == XMPP_PRESENCE_UNAVAILABLE) {
-        char response[512];
+        char response[1024];  /* Increased: was 512, presence_payload up to 1023B */
 
         for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
             if (!r->users[i].active) {
@@ -3432,13 +3448,21 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
 
             strncpy(r->users[i].nick, nick, MAX_NICK_LEN - 1);
 
+            /* Bug fix #10: store bare JID (not full JID) so ban checks,
+             * affiliation lookups, and nick-change detection all match correctly.
+             * participant_t.jid[64] holds localpart@domain without resource. */
             strncpy(r->users[i].jid, ctx->full_jid, 63);
+            r->users[i].jid[63] = '\0';
+            {
+                char *jid_slash = strchr(r->users[i].jid, '/');
+                if (jid_slash) *jid_slash = '\0';  /* strip /resource */
+            }
 
             break;
         }
     }
 
-    char response[512];
+    char response[1024];  /* Increased: was 512, presence_payload up to 1023B */
 
     /* Determine whether the new user is the room owner (creator).
      * Owners are always permitted to see real JIDs regardless of
@@ -4276,7 +4300,10 @@ static void subscription_update_roster(const char *owner_user,
  *   XEP-0384 (OMEMO Encryption)
  * ------------------------------------------------------------------ */
 void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
-    if (ctx->state < STATE_READY) {
+    /* Bug fix #8: only advance to READY from SESSION or higher.
+     * Old code fired from any state including STATE_BIND (before bind),
+     * which left ctx->full_jid empty and caused from='' in all sent stanzas. */
+    if (ctx->state >= STATE_SESSION && ctx->state < STATE_READY) {
         ctx->state = STATE_READY;
     }
 
@@ -4502,7 +4529,7 @@ void handle_broadcast_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         return;
     }
 
-    char response[512];
+    char response[1024];  /* Increased: was 512, presence_payload up to 1023B */
     int is_unavailable = (stanza->type == XMPP_PRESENCE_UNAVAILABLE);
     
     /* ------------------------------------------------------------------

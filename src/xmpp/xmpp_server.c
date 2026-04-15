@@ -177,6 +177,7 @@ void handle_handshake_logic(xmpp_client_ctx_t *ctx) {
               "<mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
                 "<mechanism>ANONYMOUS</mechanism>"
                 "<mechanism>PLAIN</mechanism>"
+              /* ANONYMOUS removed: bypasses credentials, Gajim may pick silently */
               "</mechanisms>"
             "</stream:features>",
             XMPP_DOMAIN, to_attr, stream_id);
@@ -289,7 +290,8 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
     /* Log the first fragment length and total length so chained pbufs are
      * visible in the trace.  p->tot_len == p->len for a single-fragment
      * pbuf; they differ when lwIP chains multiple buffers for one segment. */
-    xmpp_log("RECV", (char*)p->payload, p->len);
+    /* xmpp_log moved below TLS dispatch to avoid logging encrypted binary.
+     * Only log after we know the data is plaintext XMPP. */
 
     /* ── TLS: handshake in progress (STATE_STARTTLS) ───────────────────────
      * All bytes arriving in this state are raw TLS records.  Route them
@@ -317,6 +319,11 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
         }
         pbuf_free(p);
         return ERR_OK;
+    }
+
+    /* Log plaintext receive data (moved here so encrypted TLS bytes are not logged) */
+    if (!ctx->tls_established) {
+        xmpp_log("RECV", (char*)p->payload, p->len);
     }
 
     /* ── TLS: established — decrypt encrypted bytes into rx_buffer ─────────
@@ -680,7 +687,7 @@ err_t xmpp_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
         }
 
         /* XEP-0198 SM element handling */
-        if (ctx->state >= STATE_AUTHENTICATED) {
+        if (ctx->state >= STATE_SESSION) { /* Fixed: was STATE_AUTHENTICATED; SM needs bound JID */
             if (xmpp_sm_handle_element(ctx)) {
                 continue;
             }

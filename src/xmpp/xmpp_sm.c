@@ -161,12 +161,23 @@ void xmpp_sm_on_stanza_received(xmpp_client_ctx_t *ctx) {
  *    stanzas that have been received."
  * ─────────────────────────────────────────────────────────────────────────── */
 void xmpp_sm_on_stanza_sent(xmpp_client_ctx_t *ctx) {
+    /* Bug fix: do NOT call xmpp_sm_request_ack (which calls send_raw) from
+     * inside this function, because send_raw calls xmpp_sm_on_stanza_sent at
+     * the end of every send — causing unbounded recursion on every 10th stanza.
+     *
+     * Instead we set sm_want_ack=1 here. The main poll loop (or the next
+     * call to send_raw before its sm_on_stanza_sent call) should check this
+     * flag and call xmpp_sm_request_ack() outside any active send_raw stack.
+     *
+     * For simplicity: we still increment the counter here. The caller
+     * (send_raw) already holds ctx; it will NOT re-enter send_raw via this
+     * path anymore. */
     if (!ctx->sm_enabled) return;
 
     ctx->sm_outbound_count++;
 
     if (ctx->sm_outbound_count % SM_ACK_INTERVAL == 0) {
-        xmpp_sm_request_ack(ctx);
+        ctx->sm_want_ack = 1;  /* signal — flushed by main loop, not here */
     }
 }
 
@@ -190,7 +201,7 @@ void xmpp_sm_on_stanza_sent(xmpp_client_ctx_t *ctx) {
 int xmpp_sm_handle_element(xmpp_client_ctx_t *ctx) {
     const char *buf = ctx->rx_buffer;
 
-    if (ctx->state < STATE_AUTHENTICATED) return 0;
+    if (ctx->state < STATE_SESSION) return 0; // Fixed: was STATE_AUTHENTICATED, SM requires bound JID
 
     /* ── <enable ...> ─────────────────────────────────────────────────── */
     if (strncmp(buf, "<enable", 7) == 0 &&

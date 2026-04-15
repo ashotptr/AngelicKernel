@@ -361,6 +361,18 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
             }
         }
 
+        /* Flush deferred SM ack requests (Bug fix #4 — anti-recursion).
+         * xmpp_sm_on_stanza_sent sets sm_want_ack instead of calling
+         * xmpp_sm_request_ack directly (which would re-enter send_raw).
+         * We drain those here, safely outside any send_raw call stack. */
+        for (int i = 0; i < MAX_USERS; i++) {
+            if (client_registry[i].pcb != NULL &&
+                client_registry[i].sm_want_ack) {
+                client_registry[i].sm_want_ack = 0;
+                xmpp_sm_request_ack(&client_registry[i]);
+            }
+        }
+
         sys_check_timeouts();
     }
 

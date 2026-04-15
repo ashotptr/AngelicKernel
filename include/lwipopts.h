@@ -10,9 +10,9 @@
 #define MEM_SIZE                (128 * 1024) // 128KB Heap
 #define MEMP_NUM_PBUF           16
 #define MEMP_NUM_TCP_PCB        16
-#define PBUF_POOL_SIZE          32
+#define PBUF_POOL_SIZE          64  // Increased: 3 max TLS records need 36 pbufs; 64 gives margin
 
-#define MEMP_NUM_TCP_SEG        32
+#define MEMP_NUM_TCP_SEG        64  // Increased: 10 clients x 6 segs = 60 needed
 // MEMP_NUM_TCP_PCB_LISTEN
 // PBUF_POOL_BUFSIZE
 

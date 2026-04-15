@@ -65,7 +65,7 @@ extern void serial_print_hex(uint64_t n);
  * Disk layout constants
  * ------------------------------------------------------------------ */
 #define PERSIST_MAGIC 0xA6E71C3Du
-#define PERSIST_VERSION 4u
+#define PERSIST_VERSION 5u  // Bumped: forces fresh_start on images with corrupt layout
 
 #define LBA_HEADER 0u
 #define LBA_PRIVATE_START 1u
@@ -74,9 +74,9 @@ extern void serial_print_hex(uint64_t n);
 #define LBA_ROSTER_SECTORS 56u
 #define LBA_ROOMS_START 99u
 #define LBA_ROOMS_SECTORS 8u
-#define LBA_OFFLINE_START 100u
+#define LBA_OFFLINE_START 107u   // Fixed: was 100, overlapped rooms (99+8=107)
 #define LBA_OFFLINE_SECTORS 79u   /* 32 x 1252 B = 40064 B, ceil to 79 sectors */
-#define LBA_PENDING_SUBS_START 179u
+#define LBA_PENDING_SUBS_START 186u  // Fixed: was 179, moved past offline (107+79=186)
 #define LBA_PENDING_SUBS_SECTORS 8u    /* 32 x 116 B  =  3712 B, ceil to  8 sectors */
 
 /* ------------------------------------------------------------------
