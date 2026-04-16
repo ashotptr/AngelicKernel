@@ -136,23 +136,48 @@ static uint8_t g_cert_der[2048];
  * =========================================================================== */
 
 static int tls_net_send(void *bio_ctx, const unsigned char *buf, size_t len) {
-    serial_print("[TLS-BIO] send called\n");
     xmpp_client_ctx_t *ctx = (xmpp_client_ctx_t *)bio_ctx;
 
     if (!ctx->pcb) {
-        return -1; /* fatal: no PCB, cannot send */
+        return -1;
     }
 
-    /* tcp_write() buffers; tcp_output() in the callers flushes. */
+    {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "[TLS-BIO] send %d bytes\n", (int)len);
+        serial_print(tmp);
+    }
+
     err_t e = tcp_write(ctx->pcb, buf, (u16_t)len, TCP_WRITE_FLAG_COPY);
 
     if (e == ERR_MEM) {
+        serial_print("[TLS-BIO] tcp_write ERR_MEM -> WANT_WRITE\n");
         return MBEDTLS_ERR_SSL_WANT_WRITE;
     }
 
     if (e != ERR_OK) {
+        serial_print("[TLS-BIO] tcp_write FATAL\n");
         return -1;
     }
+
+    /* Flush each TLS record immediately.
+     *
+     * Without this, all four records of the ServerHello flight (ServerHello,
+     * Certificate, ServerKeyExchange, ServerHelloDone) sit in lwIP's TCP send
+     * queue until the single tcp_output call at the end of
+     * xmpp_tls_handshake_step.  Because we are still inside the tcp_recv
+     * callback at that point, the congestion window is the initial cwnd (~4KB)
+     * and the peer's receive window from the ClientHello segment was already
+     * partially consumed by earlier data.  Only the first TCP segment (~266
+     * bytes) is actually transmitted; the remaining ~500 bytes wait for an ACK
+     * that never arrives because the main loop cannot poll the NIC while we are
+     * inside the callback.
+     *
+     * Calling tcp_output here after each write ensures each TLS record is
+     * handed to the NIC driver before we return, so all four records reach the
+     * client before mbedtls_ssl_handshake returns WANT_READ.
+     */
+    tcp_output(ctx->pcb); //idk
 
     return (int)len;
 }

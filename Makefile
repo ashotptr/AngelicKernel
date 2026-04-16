@@ -113,6 +113,10 @@ CFLAGS = -I. -Iinclude -Isrc -Isrc/lwip/src/include \
 	-Wall -Wextra -DEFI_FUNCTION_WRAPPER -DGNU_EFI_USE_MS_ABI -g \
 	-DNO_SYS=1 -DUSE_MPK
 	
+CFLAGS += -DMBEDTLS_SSL_RENEGOTIATION #idk
+CFLAGS += -DMBEDTLS_SSL_EXTENDED_MASTER_SECRET #idk
+CFLAGS += -DMBEDTLS_SSL_SERVER_NAME_INDICATION #idk
+
 LWIP_CORE = src/lwip/src/core/init.c \
 	src/lwip/src/core/def.c \
 	src/lwip/src/core/dns.c \
