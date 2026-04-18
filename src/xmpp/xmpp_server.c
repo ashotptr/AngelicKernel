@@ -847,7 +847,7 @@ err_t xmpp_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
     }
 
     memset(ctx, 0, sizeof(*ctx));
-    tcp_nagle_disable(newpcb);   /* disable Nagle — send each segment immediately */
+    //tcp_nagle_disable(newpcb);   /* disable Nagle — send each segment immediately */
     ctx->pcb         = newpcb;
     ctx->state       = STATE_CONNECTED;
     ctx->authenticated = 0;

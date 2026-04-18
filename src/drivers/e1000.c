@@ -257,10 +257,9 @@ SECURE_DRIVER_CODE int e1000_send_scatter(uint64_t mmio_base,
         tx_ring[slot].cso    = 0;
         tx_ring[slot].css    = 0;
         tx_ring[slot].special = 0;
- 
-        // EOP + IFCS on all segments; RS only on the last (only one DD needed)
-        tx_ring[slot].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS |
-                            (is_last ? E1000_TXD_CMD_RS : 0);
+
+        tx_ring[slot].cmd = E1000_TXD_CMD_IFCS | E1000_TXD_CMD_RS |
+                    (is_last ? E1000_TXD_CMD_EOP : 0);
         tx_ring[slot].status = 0;   // clear DD
     }
  

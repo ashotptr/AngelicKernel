@@ -257,9 +257,9 @@ int vsnprintf(char *str, size_t size, const char *format, va_list args);
 #define MBEDTLS_SSL_TLS_C
 #define MBEDTLS_SSL_SRV_C              /* server-side handshake only          */
 #define MBEDTLS_SSL_PROTO_TLS1_2       /* TLS 1.3 requires PSA — not used     */
-#define MBEDTLS_SSL_EXTENDED_MASTER_SECRET //idk  /* RFC 7627 — required by GnuTLS ≥ 3.7.2 */
-#define MBEDTLS_SSL_RENEGOTIATION //idk           /* RFC 5746 — renegotiation_info extension */
-#define MBEDTLS_SSL_SERVER_NAME_INDICATION //idk
+//#define MBEDTLS_SSL_EXTENDED_MASTER_SECRET //idk  /* RFC 7627 — required by GnuTLS ≥ 3.7.2 */
+//#define MBEDTLS_SSL_RENEGOTIATION //idk           /* RFC 5746 — renegotiation_info extension */
+//#define MBEDTLS_SSL_SERVER_NAME_INDICATION //idk
 /* MBEDTLS_SSL_CLI_C intentionally undefined — server only                    */
 /* MBEDTLS_SSL_PROTO_TLS1_3 intentionally undefined — requires PSA crypto     */
 

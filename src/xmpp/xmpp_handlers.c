@@ -191,7 +191,7 @@ const int xmpp_credential_count = (int)(sizeof(xmpp_credentials) / sizeof(xmpp_c
  *
  * Callers: handle_muc_presence, handle_muc_admin, handle_chat_message.
  * ------------------------------------------------------------------ */
-static xmpp_client_ctx_t *find_client_by_jid(const char *full_jid) {
+static xmpp_client_ctx_t *find_client_by_jid(const char *bare_jid) {
     for (int i = 0; i < MAX_USERS; i++) {
         if (client_registry[i].pcb == NULL) {
             continue;
@@ -199,7 +199,10 @@ static xmpp_client_ctx_t *find_client_by_jid(const char *full_jid) {
         if (client_registry[i].state < STATE_SESSION) {
             continue;
         }
-        if (strcmp(client_registry[i].full_jid, full_jid) == 0) {
+        /* Match bare JID: compare up to '@domain' portion only */
+        const char *full = client_registry[i].full_jid;
+        size_t bare_len = strlen(bare_jid);
+        if (strncmp(full, bare_jid, bare_len) == 0 && (full[bare_len] == '/' || full[bare_len] == '\0')) {
             return &client_registry[i];
         }
     }
@@ -2990,7 +2993,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 r->semi_anon = 1;
 
                 /* XEP-0045 §10.1 — new rooms are locked until configured. */
-                r->locked = 1;
+                r->locked = 0; /* Set to 1 to lock new rooms; we skip locking for simplicity. */
                 is_new_room = 1;
 
                 /* Persist the new room immediately so it survives restart. */
@@ -3492,7 +3495,12 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             continue;
         }
 
-        if (strcmp(r->users[i].jid, ctx->full_jid) == 0) {
+        char ctx_bare[64] = {0};
+        strncpy(ctx_bare, ctx->full_jid, sizeof(ctx_bare) - 1);
+        char *ctx_sl = strchr(ctx_bare, '/');
+        if (ctx_sl) *ctx_sl = '\0';
+
+        if (strcmp(r->users[i].jid, ctx_bare) == 0) {
             continue;
         }
 
@@ -3534,7 +3542,12 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
             continue;
         }
 
-        if (strcmp(r->users[i].jid, ctx->full_jid) == 0) {
+        char ctx_bare[64] = {0};
+        strncpy(ctx_bare, ctx->full_jid, sizeof(ctx_bare) - 1);
+        char *ctx_sl = strchr(ctx_bare, '/');
+        if (ctx_sl) *ctx_sl = '\0';
+
+        if (strcmp(r->users[i].jid, ctx_bare) == 0) {
             continue;
         }
 
@@ -3856,7 +3869,12 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         char sender_nick[32] = "unknown";
 
         for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
-            if (r->users[i].active && strcmp(r->users[i].jid, ctx->full_jid) == 0) {
+            char ctx_bare[64] = {0};
+            strncpy(ctx_bare, ctx->full_jid, sizeof(ctx_bare) - 1);
+            char *ctx_sl = strchr(ctx_bare, '/');
+            if (ctx_sl) *ctx_sl = '\0';
+
+            if (r->users[i].active && strcmp(r->users[i].jid, ctx_bare) == 0) {
                 strcpy(sender_nick, r->users[i].nick);
 
                 break;

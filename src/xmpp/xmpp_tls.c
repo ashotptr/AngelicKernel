@@ -177,7 +177,7 @@ static int tls_net_send(void *bio_ctx, const unsigned char *buf, size_t len) {
      * handed to the NIC driver before we return, so all four records reach the
      * client before mbedtls_ssl_handshake returns WANT_READ.
      */
-    tcp_output(ctx->pcb); //idk
+    //tcp_output(ctx->pcb); //idk
 
     return (int)len;
 }
@@ -373,86 +373,86 @@ int xmpp_tls_server_init(void) {
      *   RFC 5280 §4.2.1.6 — Subject Alternative Name
      *   RFC 6125 §6.4      — Matching against the SAN DNS-ID
      * ------------------------------------------------------------------ */
-    {
-        /* Bug fix #17: expanded SAN to include localhost and 127.0.0.1
-         * so Gajim can connect via localhost or direct IP without hostname
-         * mismatch errors. Uses 256-byte buffer for three entries.
-         *
-         * DER layout (written right-to-left):
-         *   SEQUENCE {
-         *     [7] 127.0.0.1          -- iPAddress
-         *     [2] "localhost"         -- dNSName
-         *     [2] XMPP_DOMAIN        -- dNSName
-         *   }
-         */
-        unsigned char san_buf[256];
-        unsigned char *p_san = san_buf + sizeof(san_buf);
-        size_t san_len = 0;
+//    {
+//         /* Bug fix #17: expanded SAN to include localhost and 127.0.0.1
+//          * so Gajim can connect via localhost or direct IP without hostname
+//          * mismatch errors. Uses 256-byte buffer for three entries.
+//          *
+//          * DER layout (written right-to-left):
+//          *   SEQUENCE {
+//          *     [7] 127.0.0.1          -- iPAddress
+//          *     [2] "localhost"         -- dNSName
+//          *     [2] XMPP_DOMAIN        -- dNSName
+//          *   }
+//          */
+//         unsigned char san_buf[256];
+//         unsigned char *p_san = san_buf + sizeof(san_buf);
+//         size_t san_len = 0;
 
-#define SAN_CHECK(r) do { if ((r) < 0) { mbedtls_x509write_crt_free(&crt_ctx); return (r); } san_len += (size_t)(r); } while(0)
+// #define SAN_CHECK(r) do { if ((r) < 0) { mbedtls_x509write_crt_free(&crt_ctx); return (r); } san_len += (size_t)(r); } while(0)
 
-        /* --- iPAddress: 127.0.0.1 (tag [7]) --- */
-        {
-            unsigned char ip4[4] = { 127, 0, 0, 1 };
-            p_san -= 4; san_len += 4; memcpy(p_san, ip4, 4);
-            ret = mbedtls_asn1_write_len(&p_san, san_buf, 4);
-            SAN_CHECK(ret);
-            ret = mbedtls_asn1_write_tag(&p_san, san_buf,
-                      MBEDTLS_ASN1_CONTEXT_SPECIFIC | 7);
-            SAN_CHECK(ret);
-        }
+//         /* --- iPAddress: 127.0.0.1 (tag [7]) --- */
+//         {
+//             unsigned char ip4[4] = { 127, 0, 0, 1 };
+//             p_san -= 4; san_len += 4; memcpy(p_san, ip4, 4);
+//             ret = mbedtls_asn1_write_len(&p_san, san_buf, 4);
+//             SAN_CHECK(ret);
+//             ret = mbedtls_asn1_write_tag(&p_san, san_buf,
+//                       MBEDTLS_ASN1_CONTEXT_SPECIFIC | 7);
+//             SAN_CHECK(ret);
+//         }
 
-        /* --- dNSName: "localhost" (tag [2]) --- */
-        {
-            const char *loc = "localhost";
-            size_t loc_len = strlen(loc);
-            p_san -= loc_len; san_len += loc_len; memcpy(p_san, loc, loc_len);
-            ret = mbedtls_asn1_write_len(&p_san, san_buf, loc_len);
-            SAN_CHECK(ret);
-            ret = mbedtls_asn1_write_tag(&p_san, san_buf,
-                      MBEDTLS_ASN1_CONTEXT_SPECIFIC | 2);
-            SAN_CHECK(ret);
-        }
+//         /* --- dNSName: "localhost" (tag [2]) --- */
+//         {
+//             const char *loc = "localhost";
+//             size_t loc_len = strlen(loc);
+//             p_san -= loc_len; san_len += loc_len; memcpy(p_san, loc, loc_len);
+//             ret = mbedtls_asn1_write_len(&p_san, san_buf, loc_len);
+//             SAN_CHECK(ret);
+//             ret = mbedtls_asn1_write_tag(&p_san, san_buf,
+//                       MBEDTLS_ASN1_CONTEXT_SPECIFIC | 2);
+//             SAN_CHECK(ret);
+//         }
 
-        /* --- dNSName: XMPP_DOMAIN (tag [2]) --- */
-        {
-            const char *dns_name = XMPP_DOMAIN;
-            size_t dns_len = strlen(dns_name);
-            p_san -= dns_len; san_len += dns_len; memcpy(p_san, dns_name, dns_len);
-            ret = mbedtls_asn1_write_len(&p_san, san_buf, dns_len);
-            SAN_CHECK(ret);
-            ret = mbedtls_asn1_write_tag(&p_san, san_buf,
-                      MBEDTLS_ASN1_CONTEXT_SPECIFIC | 2);
-            SAN_CHECK(ret);
-        }
+//         /* --- dNSName: XMPP_DOMAIN (tag [2]) --- */
+//         {
+//             const char *dns_name = XMPP_DOMAIN;
+//             size_t dns_len = strlen(dns_name);
+//             p_san -= dns_len; san_len += dns_len; memcpy(p_san, dns_name, dns_len);
+//             ret = mbedtls_asn1_write_len(&p_san, san_buf, dns_len);
+//             SAN_CHECK(ret);
+//             ret = mbedtls_asn1_write_tag(&p_san, san_buf,
+//                       MBEDTLS_ASN1_CONTEXT_SPECIFIC | 2);
+//             SAN_CHECK(ret);
+//         }
 
-        /* Wrap all three entries in SEQUENCE { ... } */
-        ret = mbedtls_asn1_write_len(&p_san, san_buf, san_len);
-        SAN_CHECK(ret);
-        ret = mbedtls_asn1_write_tag(&p_san, san_buf,
-                  MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE);
-        SAN_CHECK(ret);
+//         /* Wrap all three entries in SEQUENCE { ... } */
+//         ret = mbedtls_asn1_write_len(&p_san, san_buf, san_len);
+//         SAN_CHECK(ret);
+//         ret = mbedtls_asn1_write_tag(&p_san, san_buf,
+//                   MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE);
+//         SAN_CHECK(ret);
 
-#undef SAN_CHECK
+// #undef SAN_CHECK
 
-        ret = mbedtls_x509write_crt_set_extension(
-                  &crt_ctx,
-                  MBEDTLS_OID_SUBJECT_ALT_NAME,
-                  MBEDTLS_OID_SIZE(MBEDTLS_OID_SUBJECT_ALT_NAME),
-                  0,
-                  p_san,
-                  san_len);
-        if (ret != 0) {
-            char errbuf[80];
-            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
-            serial_print("[TLS] ERROR: SAN extension failed: ");
-            serial_print(errbuf);
-            serial_print("\n");
-            mbedtls_x509write_crt_free(&crt_ctx);
-            return ret;
-        }
-        serial_print("[TLS] SAN extension added: " XMPP_DOMAIN ", localhost, 127.0.0.1\n");
-    }
+//         ret = mbedtls_x509write_crt_set_extension(
+//                   &crt_ctx,
+//                   MBEDTLS_OID_SUBJECT_ALT_NAME,
+//                   MBEDTLS_OID_SIZE(MBEDTLS_OID_SUBJECT_ALT_NAME),
+//                   0,
+//                   p_san,
+//                   san_len);
+//         if (ret != 0) {
+//             char errbuf[80];
+//             mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+//             serial_print("[TLS] ERROR: SAN extension failed: ");
+//             serial_print(errbuf);
+//             serial_print("\n");
+//             mbedtls_x509write_crt_free(&crt_ctx);
+//             return ret;
+//         }
+//         serial_print("[TLS] SAN extension added: " XMPP_DOMAIN ", localhost, 127.0.0.1\n");
+//    }
 
     /* Write to DER — right-justified within g_cert_der[]. */
     serial_print("[TLS] Writing self-signed certificate...\n");
