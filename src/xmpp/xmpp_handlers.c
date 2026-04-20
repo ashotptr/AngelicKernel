@@ -3989,7 +3989,7 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 continue;
             }
 
-            if (client_registry[i].state < STATE_SESSION) {
+            if (client_registry[i].state < STATE_READY) { // STATE_SESSION
                 continue;
             }
 

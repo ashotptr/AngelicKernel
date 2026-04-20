@@ -31,7 +31,7 @@ typedef enum {
 #define MAX_USERS_PER_ROOM 8
 #define MAX_NICK_LEN 32
 #define MAX_ROOM_NAME_LEN 32
-#define MAX_USERS 10
+#define MAX_USERS   20
 
 /* Per-room ban list capacity */
 #define MAX_BANNED_PER_ROOM 8

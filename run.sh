@@ -71,6 +71,7 @@ if [ "${DISK_BACKEND}" = "ata" ]; then
         -device e1000,netdev=n0 \
         -netdev user,id=n0,hostfwd=tcp::5222-:5222 \
         \
+        -serial file:serial.log \
         -debugcon file:uefi_debug.log \
         -global isa-debugcon.iobase=0x402
 
@@ -97,6 +98,7 @@ elif [ "${DISK_BACKEND}" = "ahci" ]; then
         -device e1000,netdev=n0 \
         -netdev user,id=n0,hostfwd=tcp::5222-:5222 \
         \
+        -serial file:serial.log \
         -debugcon file:uefi_debug.log \
         -global isa-debugcon.iobase=0x402
 
