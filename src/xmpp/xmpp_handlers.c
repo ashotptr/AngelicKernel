@@ -3192,10 +3192,21 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
      * ------------------------------------------------------------------ */
     {
         int occupant_idx = -1;
-        
+
+        /* Bug fix: r->users[i].jid stores the BARE JID (resource stripped
+         * at join time).  ctx->full_jid is the FULL JID.  We must strip
+         * the resource before comparing, otherwise nick-change (XEP-0045 §7.6)
+         * and in-room presence update (§7.7) are never detected. */
+        char sender_bare_jid[64] = {0};
+        strncpy(sender_bare_jid, ctx->full_jid, sizeof(sender_bare_jid) - 1);
+        {
+            char *_sl = strchr(sender_bare_jid, '/');
+            if (_sl) *_sl = '\0';
+        }
+
         for (int i = 0; i < MAX_USERS_PER_ROOM; i++) {
             if (r->users[i].active &&
-                strcmp(r->users[i].jid, ctx->full_jid) == 0) {
+                strcmp(r->users[i].jid, sender_bare_jid) == 0) {
                 occupant_idx = i;
                 break;
             }
@@ -3989,7 +4000,7 @@ void handle_chat_message(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                 continue;
             }
 
-            if (client_registry[i].state < STATE_READY) { // STATE_SESSION
+            if (client_registry[i].state < STATE_SESSION) { // was STATE_READY (unused), fixed
                 continue;
             }
 

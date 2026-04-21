@@ -1109,6 +1109,9 @@ def main():
                 for r in results
             ]
         }
+        # Auto-create parent directory so paths like graphs/data/compliance.json work
+        import os as _os
+        _os.makedirs(_os.path.dirname(_os.path.abspath(args.json)), exist_ok=True)
         with open(args.json, "w") as f:
             json.dump(data, f, indent=2)
         print(f"\nJSON results written to: {args.json}")

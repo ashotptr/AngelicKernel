@@ -126,7 +126,7 @@ class TestClient(ClientXMPP):
         self._port = port
 
         self.received_messages: List[slixmpp.Message] = []
-        self._session_started   = asyncio.Event()
+        self._session_ready    = asyncio.Event()   # renamed: avoids slixmpp 1.14 collision
         self._session_failed    = False
 
         # Plugins
@@ -152,11 +152,11 @@ class TestClient(ClientXMPP):
 
     def _on_failed_auth(self, _event):
         self._session_failed = True
-        self._session_started.set()
+        self._session_ready.set()
 
     def _on_conn_failed(self, _event):
         self._session_failed = True
-        self._session_started.set()
+        self._session_ready.set()
 
     def _on_message(self, msg: slixmpp.Message):
         if msg["type"] in ("chat", "groupchat", "normal"):
@@ -170,7 +170,7 @@ class TestClient(ClientXMPP):
             return False
 
         try:
-            await asyncio.wait_for(self._session_started.wait(), timeout=timeout)
+            await asyncio.wait_for(self._session_ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             warn(f"Session timed out for {self.boundjid}")
             return False

@@ -27,7 +27,7 @@ from datetime import datetime
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TESTING_DIR = os.path.dirname(SCRIPT_DIR)
 
-SUITE_TIMEOUT = 300   # seconds — generous for slow QEMU-TCG runs
+SUITE_TIMEOUT = 600   # seconds — generous for slow QEMU-TCG runs
 
 
 REPORT_TEMPLATE = """# XMPP Compliance Report
@@ -130,7 +130,8 @@ def run_suite(cmd: list, timeout: int, label: str) -> tuple[str, int]:
         print(f"  exit code: {result.returncode}")
         return output, result.returncode
     except subprocess.TimeoutExpired as e:
-        out = (e.stdout or "") + (e.stderr or "")
+        out = (e.stdout or b"").decode("utf-8", errors="replace") + \
+              (e.stderr or b"").decode("utf-8", errors="replace")
         print(f"  TIMEOUT after {timeout}s")
         return str(out), -1
     except Exception as e:

@@ -3,9 +3,6 @@
 ## Quick Start
 
 ```bash
-bash testing/src_patches/apply_patches.sh
-make clean && make
-bash run.sh &
 cd testing && bash run_all_benchmarks.sh
 ```
 
@@ -28,35 +25,22 @@ testing/
 
 ## Test Suites
 
-### Layer 1 — Raw TCP (24 RFC assertions)
+### Layer 1 — Raw TCP
 
 ```bash
-pip install colorama pyopenssl
-
 python3 raw_tests/raw_xmpp_tester.py --host angelic.local --port 5222
 python3 raw_tests/raw_xmpp_tester.py --host angelic.local --port 5222 --filter 6120
 python3 raw_tests/raw_xmpp_tester.py --host angelic.local --port 5222 --filter 6121
 python3 raw_tests/raw_xmpp_tester.py --host angelic.local --port 5222 --filter 0045
-# With JSON output for graphs:
-python3 raw_tests/raw_xmpp_tester.py --host angelic.local --port 5222 \
-    --json graphs/data/compliance.json
+python3 raw_tests/raw_xmpp_tester.py --host angelic.local --port 5222 --json graphs/data/compliance.json
 ```
 
-**Expected: 49 tests, ~47 pass** (offline message + roster subscription require C patches first).
-
-Covers: stream negotiation, SASL, TLS, IQ errors, roster, presence, messages, MUC join/nick/private/broadcast.
-
-### Layer 2 — slixmpp Async (10 scenarios)
+### Layer 2 — slixmpp Async
 
 ```bash
-pip install slixmpp colorama
 python3 slixmpp_tests/slixmpp_suite.py --host angelic.local --port 5222
 python3 slixmpp_tests/slixmpp_suite.py --host angelic.local --port 5222 --filter muc
 ```
-
-**Expected: 10 tests, ~8 pass.**
-
-Covers: session, roster, subscription flow, direct message, MUC, ping (XEP-0199), disco (XEP-0030), version (XEP-0092), offline delivery.
 
 ### Layer 3 — Compliance Report
 
@@ -84,9 +68,7 @@ mvn -Pdist clean install -DskipTests
 ### Boot Time
 
 ```bash
-python3 testing/benchmarks/boot_time_measure.py \
-    --host 127.0.0.1 --port 5222 --runs 5 \
-    --output testing/graphs/data/boot_times.csv
+python3 testing/benchmarks/boot_time_measure.py --host 127.0.0.1 --port 5222 --runs 5 --output testing/graphs/data/boot_times.csv
 ```
 
 **Target: < 500 ms** (use `--accel kvm`; QEMU-TCG adds ~1-2 s overhead).
