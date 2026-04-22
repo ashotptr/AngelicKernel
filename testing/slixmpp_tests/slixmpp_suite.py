@@ -13,6 +13,14 @@ FIXES vs original:
   4. Fixed MUC room config: use get_room_config / set_room_config instead of
      deprecated configure_muc() call.
   5. Added inter-test sleep to avoid hitting the server's MAX_USERS limit.
+  6. Renamed _session_started → _session_ready to avoid slixmpp 1.14 internal
+     attribute collision (slixmpp overwrites _session_started with a bool).
+  7. Set use_aiodns=False to bypass aiodns for both SRV and hostname resolution.
+     angelic.local is a .local mDNS domain. aiodns goes straight to DNS and
+     bypasses the system NSS/mDNS stack, so both SRV lookup and hostname
+     resolution time out after 60 s. use_aiodns=False makes slixmpp use
+     Python socket.getaddrinfo() instead, which honours /etc/nsswitch.conf
+     and resolves angelic.local via Avahi/mDNS instantly.
 
 Usage:
     pip install slixmpp colorama
@@ -126,8 +134,21 @@ class TestClient(ClientXMPP):
         self._port = port
 
         self.received_messages: List[slixmpp.Message] = []
-        self._session_ready    = asyncio.Event()   # renamed: avoids slixmpp 1.14 collision
-        self._session_failed    = False
+        self._session_ready  = asyncio.Event()   # renamed: avoids slixmpp 1.14 internal attr collision
+        self._session_failed = False
+
+        # Disable aiodns completely.
+        #
+        # angelic.local is a .local (mDNS) domain.  slixmpp uses aiodns for
+        # both SRV lookup (_xmpp-client._tcp.angelic.local) and plain hostname
+        # resolution.  aiodns goes straight to the DNS resolver and bypasses
+        # the system's NSS / mDNS stack, so both lookups time out after 60 s.
+        #
+        # use_aiodns=False makes slixmpp fall back to standard Python socket
+        # resolution (getaddrinfo), which honours /etc/nsswitch.conf and the
+        # system mDNS plugin (nss-mdns / Avahi), so angelic.local resolves
+        # instantly.  SRV lookup is also skipped in this path.
+        self.use_aiodns = False
 
         # Plugins
         self.register_plugin("xep_0030")   # Service Discovery
@@ -148,7 +169,7 @@ class TestClient(ClientXMPP):
         except Exception as e:
             warn(f"session_start error: {e}")
         finally:
-            self._session_started.set()
+            self._session_ready.set()
 
     def _on_failed_auth(self, _event):
         self._session_failed = True
@@ -162,7 +183,7 @@ class TestClient(ClientXMPP):
         if msg["type"] in ("chat", "groupchat", "normal"):
             self.received_messages.append(msg)
 
-    async def start(self, timeout: float = 15.0) -> bool:
+    async def start(self, timeout: float = 60.0) -> bool:  # bumped: QEMU-TCG TLS is slow
         try:
             _connect_compat(self, self._host, self._port)
         except Exception as e:
