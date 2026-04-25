@@ -97,7 +97,7 @@ docker run -d \
     --name "${CONTAINER_NAME}" \
     -p "${PROSODY_PORT}:5222" \
     -v /tmp/prosody_bench.cfg.lua:/etc/prosody/prosody.cfg.lua:ro \
-    prosody/prosody:0.12 \
+    prosody/prosody:latest \
     >/dev/null
 
 ok "Prosody container started (ID: $(docker ps -q --filter name=${CONTAINER_NAME}))"

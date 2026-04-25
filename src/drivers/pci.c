@@ -1,6 +1,9 @@
 /* ===========================================================================
  * pci.c — PCI Configuration Space scanner (Mechanism #1)
  *
+ * Scans for any NIC in the Intel 8254x family by probing the device IDs
+ * listed in config.h (ANGELIC_NIC_IDS).  All 8254x chips share the same
+ * register layout, so the e1000 driver works on all of them without change.
  * Used by the E1000 NIC driver to locate the NIC's MMIO BAR.  Runs entirely
  * post-ExitBootServices: no EFI protocols, no libc — only x86 I/O ports.
  *
@@ -13,6 +16,7 @@
  * =========================================================================== */
 
 #include "drivers/pci.h"
+#include "config.h"
 #include <stdint.h>
 
 /* =========================================================================
@@ -118,6 +122,27 @@ static void pci_enable_device(uint8_t bus, uint8_t dev, uint8_t fn) {
     pci_cfg_write32(bus, dev, fn, PCI_CFG_COMMAND, cmd);
 }
 
+/* ---------------------------------------------------------------------------
+ * device_id_matches — check vid:did against the config.h ID table
+ * --------------------------------------------------------------------------- */
+static int device_id_matches(uint16_t vid, uint16_t did) {
+    if (vid != ANGELIC_NIC_VENDOR) return 0;
+    static const uint16_t ids[] = ANGELIC_NIC_IDS;
+    for (int i = 0; ids[i] != 0x0000u; i++) {
+        if (ids[i] == did) return 1;
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * pci_get_bar — scan PCI bus for any supported NIC and return its BAR0
+ *
+ * Scans all buses/devices/functions.  Accepts any device ID listed in
+ * ANGELIC_NIC_IDS (config.h) under vendor ANGELIC_NIC_VENDOR.
+ *
+ * The original single-ID overload is kept for callers that still pass
+ * explicit IDs (e.g. AHCI scanner).
+ * --------------------------------------------------------------------------- */
 /* =========================================================================
  * pci_get_bar
  *
@@ -209,4 +234,27 @@ uint64_t pci_get_bar(uint16_t vendor_id, uint16_t device_id) {
     }
 
     return 0;  /* device not found */
+}
+
+/* ---------------------------------------------------------------------------
+ * pci_find_nic — scan for any NIC in the ANGELIC_NIC_IDS table
+ *
+ * Replaces the hardcoded pci_get_bar(0x8086, 0x100E) call in kernel.c.
+ * Returns the MMIO BAR0 address, or 0 if no supported NIC is found.
+ * Also writes the matched device_id into *matched_did if non-NULL, which
+ * is useful for logging which physical chip was detected.
+ * --------------------------------------------------------------------------- */
+uint64_t pci_find_nic(uint16_t *matched_did) {
+    static const uint16_t ids[] = ANGELIC_NIC_IDS;
+
+    for (int i = 0; ids[i] != 0x0000u; i++) {
+        uint64_t bar = pci_get_bar(ANGELIC_NIC_VENDOR, ids[i]);
+        if (bar != 0) {
+            if (matched_did) *matched_did = ids[i];
+            return bar;
+        }
+    }
+
+    if (matched_did) *matched_did = 0;
+    return 0;
 }

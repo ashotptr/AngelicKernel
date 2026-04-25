@@ -1,4 +1,5 @@
 #include "net/lwip_glue.h"
+#include "config.h"
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/etharp.h"
@@ -152,10 +153,39 @@ void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
     global_mmio_base = mmio_base;
     
     ip4_addr_t ip, netmask, gw;
-    
-    IP4_ADDR(&ip, 10, 0, 2, 15);
-    IP4_ADDR(&netmask, 255, 255, 255, 0);
-    IP4_ADDR(&gw, 10, 0, 2, 2);
+
+    /* All network values come from config.h — edit that file, not this one. */
+    IP4_ADDR(&ip, ANGELIC_IP_0, ANGELIC_IP_1, ANGELIC_IP_2, ANGELIC_IP_3);
+    IP4_ADDR(&netmask, ANGELIC_NM_0, ANGELIC_NM_1, ANGELIC_NM_2, ANGELIC_NM_3);
+    IP4_ADDR(&gw, ANGELIC_GW_0, ANGELIC_GW_1, ANGELIC_GW_2, ANGELIC_GW_3);
+
+    serial_print("[NET] IP:      " 
+        /* stringification helper — we just print at runtime below */
+        "\n");
+    /* Print the actual IP to serial so the operator knows the address. */
+    {
+        char buf[16];
+        /* simple itoa for one octet */
+        #define OCT(n) ((uint8_t)(n))
+        extern void serial_print_hex(uint64_t);
+        serial_print("[NET] IP:      ");
+        /* lwIP's ip4addr_ntoa requires a full ip4_addr_t — just print octets */
+        serial_print_hex(ANGELIC_IP_0); serial_print(".");
+        serial_print_hex(ANGELIC_IP_1); serial_print(".");
+        serial_print_hex(ANGELIC_IP_2); serial_print(".");
+        serial_print_hex(ANGELIC_IP_3); serial_print("\n");
+        serial_print("[NET] Netmask: ");
+        serial_print_hex(ANGELIC_NM_0); serial_print(".");
+        serial_print_hex(ANGELIC_NM_1); serial_print(".");
+        serial_print_hex(ANGELIC_NM_2); serial_print(".");
+        serial_print_hex(ANGELIC_NM_3); serial_print("\n");
+        serial_print("[NET] Gateway: ");
+        serial_print_hex(ANGELIC_GW_0); serial_print(".");
+        serial_print_hex(ANGELIC_GW_1); serial_print(".");
+        serial_print_hex(ANGELIC_GW_2); serial_print(".");
+        serial_print_hex(ANGELIC_GW_3); serial_print("\n");
+        (void)buf;
+    }
     
     serial_print("[DEBUG] Calling lwip_init()...\n");
     lwip_init();

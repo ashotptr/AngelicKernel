@@ -1,5 +1,21 @@
-CC = gcc
-NASM = nasm
+CC ?= gcc
+NASM ?= nasm
+
+# EFI toolchain paths — override if your distro puts them elsewhere
+EFI_INC ?= /usr/include/efi
+EFI_LIB ?= /usr/lib
+EFI_CRT ?= $(EFI_LIB)/crt0-efi-x86_64.o
+
+# ---------------------------------------------------------------------------
+# Validate required tools at the start of every build
+# ---------------------------------------------------------------------------
+REQUIRED_TOOLS := $(CC) $(NASM) objcopy ld qemu-img
+_check := $(foreach t,$(REQUIRED_TOOLS),\
+    $(if $(shell command -v $(t) 2>/dev/null),,\
+        $(error Required tool '$(t)' not found. Run: sudo apt install build-essential nasm qemu-utils)))
+
+_check_efi := $(if $(wildcard $(EFI_INC)/efi.h),,\
+    $(error EFI headers not found at $(EFI_INC). Run: sudo apt install gnu-efi))
 
 # maybe add but are for c++: -fno-exceptions -fno-rtti, also reviwew fno-stack-protector, -mcmodel=large
 # ---------------------------------------------------------------------------
@@ -96,7 +112,7 @@ MBEDTLS_SRCS = \
 	$(MBEDTLS_DIR)/library/x509write_csr.c
 
 MBEDTLS_OBJS = $(MBEDTLS_SRCS:.c=.o)
-LIBGCC := $(shell gcc --print-libgcc-file-name)
+LIBGCC := $(shell $(CC) --print-libgcc-file-name)
 
 # ---------------------------------------------------------------------------
 # Compiler flags
@@ -105,17 +121,13 @@ LIBGCC := $(shell gcc --print-libgcc-file-name)
 #   Must use the unique name -- see the explanation in MBEDTLS_SRCS above.
 # ---------------------------------------------------------------------------
 CFLAGS = -I. -Iinclude -Isrc -Isrc/lwip/src/include \
-	-I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol \
+	-I$(EFI_INC) -I$(EFI_INC)/x86_64 -I$(EFI_INC)/protocol \
 	-I$(MBEDTLS_DIR)/include \
 	-DMBEDTLS_CONFIG_FILE='"angelic_mbedtls_config.h"' \
 	-fno-stack-protector -ffreestanding -fpic -fshort-wchar -mno-red-zone \
 	-mno-mmx -mno-sse -mno-avx \
 	-Wall -Wextra -DEFI_FUNCTION_WRAPPER -DGNU_EFI_USE_MS_ABI -g \
 	-DNO_SYS=1 -DUSE_MPK
-	
-# CFLAGS += -DMBEDTLS_SSL_RENEGOTIATION #idk
-# CFLAGS += -DMBEDTLS_SSL_EXTENDED_MASTER_SECRET #idk
-# CFLAGS += -DMBEDTLS_SSL_SERVER_NAME_INDICATION #idk
 
 LWIP_CORE = src/lwip/src/core/init.c \
 	src/lwip/src/core/def.c \
@@ -175,7 +187,7 @@ OBJS = src/kernel.o \
 	src/xmpp/xmpp_log.o \
 	src/xmpp/xmpp_memory.o \
 	src/xmpp/xmpp_tls.o \
-    src/xmpp/mbedtls_port.o \
+	src/xmpp/mbedtls_port.o \
 	src/xmpp/yxml.o \
 	src/xmpp/mpk_benchmark.o \
 	src/xmpp/xmpp_sm.o \
@@ -196,8 +208,8 @@ unikernel.efi: unikernel.so
 # --no-undefined
 # -z muldefs
 unikernel.so: $(OBJS)
-	ld -shared -Bsymbolic -nostdlib -znocombreloc -L/usr/lib --no-undefined -L/usr/lib64 -T linker.ld \
-		/usr/lib/crt0-efi-x86_64.o $(OBJS) -o $@ -lefi -lgnuefi $(LIBGCC)
+	ld -shared -Bsymbolic -nostdlib -znocombreloc -L$(EFI_LIB) --no-undefined -T linker.ld \
+		 $(EFI_CRT) $(OBJS) -o $@ -lefi -lgnuefi $(LIBGCC)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -214,6 +226,7 @@ mbedtls-fetch:
 	cd $(MBEDTLS_DIR) && git checkout v3.6.4
 
 CFLAGS_SSE42 = $(filter-out -mno-sse -mno-avx -mno-mmx, $(CFLAGS)) -msse4.2
+CFLAGS_AESNI = $(CFLAGS_SSE42) -maes -mpclmul
 
 src/xmpp/yxml_sse.o: src/xmpp/yxml_sse.c
 	$(CC) $(CFLAGS_SSE42) -c $< -o $@
@@ -245,8 +258,6 @@ src/xmpp/yxml_sse.o: src/xmpp/yxml_sse.c
 # ExitBootServices and long before any TLS call — so AES-NI is always
 # live by the time mbedtls_aesni_has_support() runs its CPUID check.
 # ---------------------------------------------------------------------------
-CFLAGS_AESNI = $(filter-out -mno-sse -mno-avx -mno-mmx, $(CFLAGS)) -msse4.2 -maes -mpclmul
-
 $(MBEDTLS_DIR)/library/aes.o: $(MBEDTLS_DIR)/library/aes.c
 	$(CC) $(CFLAGS_AESNI) -c $< -o $@
 
@@ -256,4 +267,26 @@ $(MBEDTLS_DIR)/library/aesni.o: $(MBEDTLS_DIR)/library/aesni.c
 $(MBEDTLS_DIR)/library/gcm.o: $(MBEDTLS_DIR)/library/gcm.c
 	$(CC) $(CFLAGS_AESNI) -c $< -o $@
 
-.PHONY: all clean mbedtls-fetch
+# Check hardware PKU support
+check-pku:
+	@grep -q pku /proc/cpuinfo \
+		&& echo "PKU supported — real-hardware MPK testing is possible" \
+		|| echo "PKU NOT found — this CPU cannot run MPK in hardware"
+
+# Check KVM availability
+check-kvm:
+	@[ -e /dev/kvm ] \
+		&& echo "KVM available — use ACCEL=kvm bash run.sh for near-native speed" \
+		|| echo "KVM not available — check BIOS VT-x/AMD-V settings"
+
+# Print effective build configuration
+info:
+	@echo "CC = $(CC)"
+	@echo "NASM = $(NASM)"
+	@echo "EFI_INC = $(EFI_INC)"
+	@echo "EFI_LIB = $(EFI_LIB)"
+	@echo "EFI_CRT = $(EFI_CRT)"
+	@echo "LIBGCC = $(LIBGCC)"
+	@echo "MBEDTLS = $(MBEDTLS_DIR)"
+
+.PHONY: all clean mbedtls-fetch check-pku check-kvm info

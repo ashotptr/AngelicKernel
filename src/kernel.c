@@ -155,13 +155,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     Print(L"AngelicKernel Phase 1: Preparing for Exodus...\n");
     
-    global_mmio_base = pci_get_bar(0x8086, 0x100E);
-    
+    uint16_t nic_did = 0;
+    global_mmio_base = pci_find_nic(&nic_did);
+
     if (global_mmio_base == 0) {
-        Print(L"[WARNING] e1000 Card not found\n");
+        Print(L"[WARNING] No supported NIC found (checked all 8254x IDs)\n");
     }
     else {
-        Print(L"[SUCCESS] e1000 MMIO found at 0x%lx\n", global_mmio_base);
+        Print(L"[SUCCESS] NIC 8086:%04x MMIO at 0x%lx\n", (UINTN)nic_did, global_mmio_base);
     }
 
     uint8_t mac[6] = {0, 0, 0, 0, 0, 0};

@@ -138,15 +138,3 @@ Then submit to:
 Update `XMPP_DOMAIN` in `src/xmpp/xmpp_core.h` to your real domain before testing.
 
 ---
-
-## Recommended Fix Order (from GAP_ANALYSIS.md)
-
-1. `</stream:stream>` on all disconnect paths — RFC 6120 §4.4
-2. Forward `<show>/<status>/<priority>` — RFC 6121 §4.6
-3. MUC private messages — XEP-0045 §7.13
-4. MUC in-room presence updates — XEP-0045 §7.16
-5. MUC nick change — XEP-0045 §7.6
-6. Directed presence — RFC 6121 §4.6
-7. Subscription state machine — RFC 6121 §3
-
-Run tests in order: RFC 6120 → 6121 → XEP-0045 → slixmpp → compliance report → TTS-NG → online testers.
