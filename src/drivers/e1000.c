@@ -23,14 +23,34 @@
  *
  * INITIALISATION SEQUENCE — SDM §14.3 "General Configuration":
  *   1.  Software reset via CTRL.RST (bit 26, self-clearing)
- *   2.  Set CTRL.SLU and CTRL.ASDE (link up + auto-speed detection)
+ *   2.  Set CTRL.FD, CTRL.SLU, and CTRL.ASDE (full-duplex, link up,
+ *       auto-speed detection)
  *   3.  Read MAC from RAL[0] / RAH[0]
+ *   3a. Clear the 128-entry Multicast Table Array (MTA) to zero
  *   4.  Set up receive descriptor ring (RDBAL/RDBAH/RDLEN/RDH/RDT)
  *   5.  Set up transmit descriptor ring (TDBAL/TDBAH/TDLEN/TDH/TDT)
  *   6.  Write TIPG with 802.3-compliant inter-packet gap values
  *   7.  Configure RCTL (receive control)
  *   8.  Configure TCTL (transmit control)
  *   9.  Unmask required interrupts in IMS; clear ICR
+ *
+ * INTEGRATION NOTE (i825xx driver — Joshua Cornutt, MIT licence):
+ *   Two hardening improvements were taken from the reference i825xx driver
+ *   (https://github.com/01000101/Intel-8254x-Ethernet-Driver) after a
+ *   compatibility audit.  Everything else in that driver is architecturally
+ *   incompatible with this kernel (it relies on net_device_t / pci_device_t
+ *   abstraction layers, malloc(), a different interrupt-handler ABI, and
+ *   PIC helper functions that do not exist here) and was deliberately
+ *   excluded.  The two safe additions are:
+ *
+ *   (A) CTRL.FD — explicit full-duplex bit set during CTRL configuration
+ *       (step 2).  Harmless on QEMU, correct per SDM for real hardware.
+ *
+ *   (B) MTA zeroing — the 128-entry Multicast Table Array at 0x5200 must
+ *       be cleared to zero before the receiver is enabled.  If the MTA
+ *       contains garbage after reset, the NIC can match spurious multicast
+ *       hashes and deliver unwanted frames to the ring.  Added as step 3a
+ *       between MAC read and RX ring setup.  Source: SDM §14.7 step 2.
  * =========================================================================== */
 
 #include "drivers/e1000.h"
@@ -84,10 +104,17 @@ extern void serial_print_hex(uint64_t n);
 #define E1000_RAH0    0x5404u  /* Receive Address High [0]: MAC bytes 4–5 — §13.148 */
                                /*   bit 31 = Address Valid (AV) bit        */
 
+/* ---- Multicast Table Array (128 entries × 4 bytes = 512 bytes) ---- */
+/* Added from i825xx reference driver audit — see integration note at top of file. */
+#define E1000_MTA     0x5200u  /* Multicast Table Array base           — SDM §13.141 */
+#define E1000_MTA_ENTRIES  128 /* 128 32-bit entries — SDM §14.7 step 2              */
+
 /* =========================================================================
  * CTRL register bits — SDM §13.3 Table 13-3
  * ========================================================================= */
-#define E1000_CTRL_FD      (1u <<  0)  /* Full Duplex                              */
+#define E1000_CTRL_FD      (1u <<  0)  /* Full Duplex — explicit set avoids
+                                        * default-off ambiguity on real HW.
+                                        * Added per i825xx driver audit.    */
 #define E1000_CTRL_ASDE    (1u <<  5)  /* Auto-Speed Detection Enable              */
 #define E1000_CTRL_SLU     (1u <<  6)  /* Set Link Up — must set on real hardware  */
 #define E1000_CTRL_ILOS    (1u <<  7)  /* Invert Loss-of-Signal (rarely needed)    */
@@ -221,8 +248,6 @@ SECURE_DRIVER_CODE static inline uint32_t nic_read(uint32_t reg) {
     return *(volatile uint32_t *)(e1000_mmio_base_phys + reg);
 }
 
-/* ─── Put this function in src/drivers/e1000.c ───────────────────────────── */
-
 SECURE_DRIVER_CODE int e1000_send_scatter(uint64_t mmio_base,
                                            const void **addrs,
                                            const uint16_t *lens,
@@ -236,6 +261,7 @@ SECURE_DRIVER_CODE int e1000_send_scatter(uint64_t mmio_base,
     // A descriptor is free when its DD (Descriptor Done) bit is set,
     // meaning the NIC finished DMAing the previous packet from that slot.
     int first_idx = tx_tail;
+    (void)first_idx;
     for (int i = 0; i < n_segs; i++) {
         int slot = (tx_tail + i) % TX_RING_SIZE;
         if (!(tx_ring[slot].status & E1000_TXD_STAT_DD)) {
@@ -320,7 +346,12 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
     }
 
     /* -----------------------------------------------------------------
-     * Step 2: Set Link Up + Auto-Speed Detection.
+     * Step 2: Set Full Duplex + Link Up + Auto-Speed Detection.
+     *
+     * CTRL.FD (bit 0) explicitly selects full-duplex operation.  The
+     * NIC's power-on default is implementation-defined; setting FD
+     * explicitly is unambiguous on both real hardware and QEMU.
+     * Source: SDM §13.3 Table 13-3; i825xx driver audit.
      *
      * CTRL.SLU (bit 6) asserts the link to the PHY.  On real hardware
      * the link will not come up without this.  QEMU forces the link up
@@ -331,7 +362,7 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
      * when FRCSPD is not set.
      * Source: SDM §14.3 step 3.
      * ----------------------------------------------------------------- */
-    nic_write(E1000_CTRL, nic_read(E1000_CTRL) | E1000_CTRL_SLU | E1000_CTRL_ASDE);
+    nic_write(E1000_CTRL, nic_read(E1000_CTRL) | E1000_CTRL_FD | E1000_CTRL_SLU | E1000_CTRL_ASDE);
 
     /* -----------------------------------------------------------------
      * Step 3: Read MAC address from RAL[0] / RAH[0].
@@ -351,6 +382,31 @@ SECURE_DRIVER_CODE int e1000_init(uint64_t mmio_base, uint8_t *mac_out) {
         mac_out[3] = (uint8_t)((ral >> 24) & 0xFFu);
         mac_out[4] = (uint8_t)( rah        & 0xFFu);
         mac_out[5] = (uint8_t)((rah >>  8) & 0xFFu);
+    }
+
+    /* -----------------------------------------------------------------
+     * Step 3a: Clear the Multicast Table Array (MTA).
+     *
+     * The MTA is a 128-entry hash filter for multicast MAC addresses.
+     * Its contents are undefined after reset — on real hardware, EEPROM
+     * or firmware may leave entries set.  Any set bit causes the NIC to
+     * accept multicast frames whose destination hash matches, delivering
+     * them into the RX ring as if they were addressed to us.  Zeroing
+     * the table disables all multicast filtering and ensures that only
+     * frames matching the unicast address in RAL[0]/RAH[0] (or broadcast,
+     * when RCTL.BAM is set) are received.
+     *
+     * The MTA base is at offset 0x5200; each entry is 4 bytes, and there
+     * are 128 entries (0x5200 – 0x53FC).
+     *
+     * This step must be done BEFORE writing RCTL.EN.  The SDM documents
+     * it as part of receive initialisation (§14.7 step 2).
+     *
+     * Source: SDM §14.7 "Receive Initialization" step 2;
+     *         i825xx reference driver (Joshua Cornutt, MIT licence).
+     * ----------------------------------------------------------------- */
+    for (int i = 0; i < E1000_MTA_ENTRIES; i++) {
+        nic_write(E1000_MTA + (uint32_t)(i * 4), 0u);
     }
 
     /* -----------------------------------------------------------------
