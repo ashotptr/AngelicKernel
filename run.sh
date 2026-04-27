@@ -1,11 +1,8 @@
 #!/bin/bash
 set -e
 
-DISK_BACKEND="ata"   # change to "ahci" for SATA
+DISK_BACKEND="ata"   # "ahci" for SATA
 
-# ---------------------------------------------------------------------------
-# KVM auto-detection
-# ---------------------------------------------------------------------------
 if [ -z "${ACCEL}" ]; then
     if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] && \
        grep -qw pku /proc/cpuinfo; then
@@ -23,9 +20,6 @@ fi
 
 ACCEL="tcg"
 
-# ---------------------------------------------------------------------------
-# OVMF firmware discovery
-# ---------------------------------------------------------------------------
 OVMF_CODE=""
 for d in /usr/share/OVMF /usr/share/edk2/ovmf /usr/share/edk2-ovmf /usr/share/qemu /usr/share/ovmf; do
     for name in OVMF_CODE_4M.fd OVMF_CODE.fd OVMF.fd; do
@@ -51,19 +45,15 @@ done
 echo "[INFO]  OVMF code: $OVMF_CODE"
 echo "[INFO]  OVMF vars: $OVMF_VARS_TEMPLATE (template)"
 
-# compile
 make
 
-# filesystem
 mkdir -p internal-fs/EFI/BOOT
 cp unikernel.efi internal-fs/EFI/BOOT/BOOTX64.EFI
 
-# OVMF variable store — copy once, preserve across runs so EFI settings survive
 if [ ! -f OVMF_VARS.fd ]; then
     cp "$OVMF_VARS_TEMPLATE" OVMF_VARS.fd
 fi
 
-# Persistent data disk
 if [ ! -f data.img ]; then
     echo "Creating data.img (1 MB raw — persistent XMPP store)..."
     qemu-img create -f raw data.img 1M
