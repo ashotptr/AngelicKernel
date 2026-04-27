@@ -88,11 +88,14 @@ The Extensible Messaging and Presence Protocol (XMPP) is defined in RFC 6120 (Co
 | XEP-0045 | Multi-User Chat: full room lifecycle (join, leave, nick change, kick, ban, private messages, role changes) |
 | XEP-0049 | Private XML Storage |
 | XEP-0160 | Offline Message Delivery with XEP-0203 delay stamps |
+| XEP-0191 | Blocklist (stub handler; full policy enforcement is future work) |
 | XEP-0198 | Stream Management (stanza acknowledgement) |
 | XEP-0199 | XMPP Ping |
 | XEP-0030 | Service Discovery (disco#info and disco#items) |
 | XEP-0092 | Software Version |
 | XEP-0012 | Last Activity |
+
+The following extensions were surveyed during design but are not yet implemented and are candidates for future work: XEP-0048 (Bookmark Storage), XEP-0071 (XHTML-IM rich text), XEP-0077 (In-Band Registration), XEP-0085 (Chat State Notifications), XEP-0107 (User Mood), XEP-0115 (Entity Capabilities), XEP-0153 (vCard-Based Avatars), XEP-0201 (Message Threads), XEP-0313 (Message Archive Management), XEP-0333 (Chat Markers), XEP-0359 (Unique and Stable Stanza IDs), and XEP-0384 (OMEMO end-to-end encryption).
 
 ---
 
@@ -132,7 +135,11 @@ The Extensible Messaging and Presence Protocol (XMPP) is defined in RFC 6120 (Co
 └───────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Boot Sequence: From UEFI to First Connection
+### 3.2 Toolchain and Build System
+
+AngelicKernel uses the GNU-EFI toolkit rather than a dedicated cross-compiler. GCC compiles all C and NASM source to ELF64 object files; `objcopy` then converts the final ELF binary to a UEFI-compatible PE32+ executable. This works correctly for a single-component unikernel image. A dedicated cross-compiler (targeting `x86_64-w64-mingw32` or a PE/COFF target directly) would be required if the build ever needed to produce user-mode UEFI applications that link against host Linux libraries, or if `objcopy` section conversion produced incorrect section attributes for a future image layout. The host OS is Linux (Ubuntu 24); QEMU with OVMF (`sudo apt install ovmf`) is used for development and automated testing. Secure-boot signing (`sbsigntool`) is available but is not part of the current build because the self-signed kernel image would not pass Secure Boot verification on stock firmware.
+
+### 3.3 Boot Sequence: From UEFI to First Connection
 
 The boot sequence is strictly ordered. Each step builds on the last, and the ordering of steps (c) vmm_protect_driver and (d) mpk_set_pkru is not arbitrary — it has a security-critical meaning documented below.
 
@@ -732,7 +739,16 @@ testing/raw_tests/raw_xmpp_tester.py drives the protocol over raw TCP using Pyth
 - XMPP Ping → IQ result (XEP-0199)
 - Offline message stored and delivered with delay stamp (XEP-0160)
 
-### 10.3 Section 9.2 Metric Summary
+### 10.3 External Compliance Validation (Future Work)
+
+Two public automated test suites can provide independent compliance signals beyond the internal raw TCP harness:
+
+- **compliance.conversations.im** — a web-based XMPP compliance tester that connects to a publicly routable server and checks feature advertisement and protocol conformance for a curated set of XEPs, including XEP-0115 (Entity Capabilities), XEP-0333 (Chat Markers), XEP-0313 (MAM), and XEP-0384 (OMEMO).
+- **connect.xmpp.net** — a connection diagnostics tool that verifies TLS certificate validity, cipher suite selection, and STARTTLS negotiation against RFC 6120 requirements.
+
+AngelicKernel is not yet publicly routable and uses a self-signed certificate; both tools would require DNS, a CA-signed certificate, and a public IPv4/IPv6 address before they can produce useful results. These are tracked as future milestones.
+
+### 10.4 Section 9.2 Metric Summary
 
 | Metric | Target | Result | Status |
 |--------|--------|--------|--------|
@@ -772,6 +788,9 @@ The current throughput bottleneck in the AngelicKernel TX path is that, for a 10
 | Self-signed TLS certificate | Clients cannot verify server identity |
 | No SASL retry limit | Brute-force login not rate-limited |
 | Fixed offline message timestamp | XEP-0203 delay stamp shows 2024-01-01 |
+| Hardcoded XML string formatting | Stanzas are assembled via snprintf rather than typed stanza objects; adding new XEPs requires careful string discipline instead of a structured builder API |
+| Monolithic XEP routing | All handlers share a single flat routing table in xmpp_handlers.c; mature servers (ejabberd, Prosody) isolate each extension in its own module with a registered hook |
+| SASL PLAIN only | SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) and SASL channel binding to TLS (RFC 5056) are not implemented |
 
 ### 11.3 Protocol Security Properties
 
@@ -799,11 +818,13 @@ Stream IDs are generated from RDRAND hardware entropy (RFC 6120 §4.7.3). If RDR
 
 ## 12. Related Work
 
-**Unikernels:** MirageOS (Madhavapeddy et al., ASPLOS 2014) uses OCaml type safety to eliminate memory corruption. LightVM (Manco et al., SOSP 2017) reduces KVM boot time to ~5 ms. EbbRT (Schatzberg et al., OSDI 2016) is a C++ library OS for high-performance kernels. HermiTux runs unmodified POSIX binaries as unikernels. OSv supports a JVM runtime directly on bare metal or KVM. None applies MPK-based intra-unikernel driver isolation.
+**Unikernels:** MirageOS (Madhavapeddy et al., ASPLOS 2014) uses OCaml type safety to eliminate memory corruption and is the closest architectural peer to AngelicKernel. LightVM (Manco et al., SOSP 2017) reduces KVM boot time to ~5 ms. EbbRT (Schatzberg et al., OSDI 2016) is a C++ library OS for high-performance kernels. HermiTux runs unmodified POSIX binaries as unikernels. OSv supports a JVM runtime directly on bare metal or KVM. ClickOS achieves sub-5 ms boot with click modular router payloads. IncludeOS is a C++ unikernel targeting cloud services. Unikraft provides a POSIX-compatible unikernel build framework based on modular micro-libraries. Nabla containers use a library OS (rumprun) to provide strong syscall-level isolation between container and host. Rumprun combines NetBSD rump kernels with a hardware abstraction layer to run POSIX applications on bare Xen or KVM. HaLVM is a Haskell adaptation of MirageOS ideas running on Xen. None of these systems applies MPK-based intra-unikernel driver isolation on commodity x86.
 
 **MPK Systems:** ERIM (Vahldiek-Oberwagner et al., USENIX Security 2019) uses MPK for intra-process isolation of sensitive data, achieving sub-100 ns switching in user space on Linux. Hodor (Hedayati et al., USENIX ATC 2019) provides formal analysis of MPK isolation policies. PKRU-Safe (Koning et al., EuroSys 2017) provides compiler-assisted enforcement of MPK domain boundaries. All three operate in Linux user space; AngelicKernel applies the same hardware primitive at ring 0 without an OS. Unlike PKRU-Safe, AngelicKernel takes the manual assembly approach for the trampolines, giving precise control over register-saving order and avoiding any compiler dependency, at the cost of requiring careful manual verification.
 
-**Bare-Metal XMPP:** No prior published work implements a full XMPP server on bare-metal x86-64 without an OS. The closest prior systems are OpenWRT-hosted Prosody on embedded MIPS routers (still running on a full Linux kernel) and experimental Erlang/OTP-based servers. AngelicKernel is the first bare-metal UEFI XMPP server with automated protocol compliance verification.
+**Bare-Metal XMPP:** No prior published work implements a full XMPP server on bare-metal x86-64 without an OS. The closest prior systems are OpenWRT-hosted Prosody on embedded MIPS routers (still running on a full Linux kernel) and experimental Erlang/OTP-based servers. AngelicKernel is the first bare-metal UEFI XMPP server with automated protocol compliance verification. The closest conceptual predecessor is mirage-xmpp (Amzallag, 2019), an OCaml MirageOS unikernel XMPP server [mirage-xmpp]. That work demonstrates XMPP on a unikernel but targets the MirageOS type-safe OCaml environment rather than bare-metal C on UEFI and does not address intra-component isolation.
+
+**XMPP Server Implementations:** AngelicKernel was designed after a detailed study of three mature XMPP servers. ejabberd (ProcessOne) is an Erlang/OTP server with a modular architecture: each XEP is implemented as a separate `gen_server` behaviour in its own `.erl` module (e.g., `mod_roster.erl`, `mod_muc.erl`), connected via a hook-and-handler dispatch system. This plugin model — absent in AngelicKernel's monolithic handler table — is the primary architectural difference. Prosody (Lua) adopts a similar event-driven plugin architecture with clean separation between the XMPP core stream (`xmpp_stream.lua`) and protocol handlers. Openfire (Java) implements a layered packet router: `PacketRouterImpl` delegates to type-specific routers (`MessageRouter`, `PresenceRouter`, `IQRouter`), which resolve the MUC subdomain and forward packets to `MultiUserChatServiceImpl`. The study of these systems informed AngelicKernel's routing table design and motivated the architectural limitations noted in §11.2.
 
 ---
 
@@ -815,7 +836,23 @@ The security-performance Pareto frontier for intra-kernel driver isolation on x8
 
 Key engineering insights surfaced during implementation: PTE_USER must be set at all four paging levels for PKRU to apply to ring-0 accesses; vmm_protect_driver() must precede mpk_set_pkru() to avoid a correctness window; the snapshot-and-drain pattern prevents a lwIP PCB corruption race; deferred XEP-0198 acks prevent recursive send_raw() calls; and the SASL namespace must be excluded from the routing table to block post-authentication SASL re-injection.
 
-Future work: Intel CET shadow stacks to protect trampoline call sites; XEP-0198 session resumption with full stanza queue persistence; RTC integration for accurate XEP-0203 delay stamps; real-hardware validation of all five section 9.2 metrics.
+**Future Work.** Several directions are prioritised:
+
+*Security hardening:* Intel CET shadow stacks to protect trampoline call sites against return-oriented programming; ASLR for the kernel image and static allocations; stack canaries; a per-session SASL retry counter to rate-limit brute-force attempts.
+
+*SASL and TLS improvements:* SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) to eliminate transmission of cleartext credentials even over TLS; SASL channel binding to TLS (RFC 5056) to bind authentication to the specific TLS session.
+
+*Protocol extensions:* XEP-0313 (Message Archive Management) for client-side history sync; XEP-0384 (OMEMO) for end-to-end encrypted messaging; XEP-0359 (Unique and Stable Stanza IDs) as a prerequisite for MAM; XEP-0333 (Chat Markers); XEP-0085 (Chat State Notifications); XEP-0115 (Entity Capabilities) for feature advertisement caching; XEP-0077 (In-Band Registration) to allow self-service account creation; XEP-0048 (Bookmark Storage via private XML, already partially served by XEP-0049); XEP-0198 session resumption with full stanza queue persistence.
+
+*Architectural extensibility:* Replace the monolithic `xmpp_handlers.c` routing table with a per-XEP module structure and a hook-and-handler dispatch system similar to ejabberd's `gen_mod` architecture. Replace hardcoded `snprintf`-assembled stanzas with typed stanza builder objects, reducing the risk of malformed XML and simplifying addition of new extensions.
+
+*Memory management:* Replace the bump allocator with a buddy allocator or slab allocator to support `free()` and sub-page allocations. Explore 2 MB hugepages in the identity map to reduce TLB pressure (currently 1,000,000 PTEs for the 4 GB identity map; 2 MB pages would reduce this to 2,048 PDEs).
+
+*Hardware and platform:* RTC integration for accurate XEP-0203 delay stamps; APIC timer to replace TSC-based timekeeping; SMP support (LAPIC + IPI-based TLB shootdown for multi-core isolation); real-hardware validation of all five section 9.2 metrics on an Ice Lake or Alder Lake system.
+
+*Disk and I/O:* IDE Bus-Master DMA (~100 MB/s) or full AHCI (~300–600 MB/s) to replace the current ATA PIO path (~16 MB/s); these require approximately 200 and 700 lines of additional driver code respectively.
+
+*External compliance:* Evaluate against compliance.conversations.im and connect.xmpp.net once a public IPv4/IPv6 address and CA-signed certificate are obtained (see §10.3).
 
 ---
 
@@ -833,7 +870,13 @@ Future work: Intel CET shadow stacks to protect trampoline call sites; XEP-0198 
 
 [Schatzberg2016] D. Schatzberg et al., "EbbRT: A Framework for Building Per-Application Library Operating Systems," USENIX OSDI 2016.
 
+[Martins2014] J. Martins et al., "ClickOS and the Art of Network Function Virtualization," USENIX NSDI 2014.
+
 [IntelSDM] Intel Corporation, "Intel 64 and IA-32 Architectures Software Developer's Manuals," Vols. 1-4, 2024. https://www.intel.com/sdm
+
+[IntelE1000] Intel Corporation, "PCI/PCI-X Family of Gigabit Ethernet Controllers Software Developer's Manual," 2009. https://www.intel.com/content/dam/www/public/us/en/documents/manuals/pcie-gbe-controllers-open-source-manual.pdf
+
+[ACPI66] ACPI Workgroup, "Advanced Configuration and Power Interface (ACPI) Specification, Revision 6.6," 2023. https://uefi.org/sites/default/files/resources/ACPI_Spec_6.6.pdf
 
 [RFC6120] P. Saint-Andre, "XMPP: Core," RFC 6120, IETF, March 2011.
 
@@ -841,15 +884,27 @@ Future work: Intel CET shadow stacks to protect trampoline call sites; XEP-0198 
 
 [RFC4616] K. Zeilenga, "The PLAIN SASL Mechanism," RFC 4616, IETF, August 2006.
 
+[RFC5802] C. Newman et al., "Salted Challenge Response Authentication Mechanism (SCRAM) SASL and GSS-API Mechanisms," RFC 5802, IETF, July 2010.
+
+[RFC5056] N. Williams, "On the Use of Channel Bindings to Secure Channels," RFC 5056, IETF, November 2007.
+
+[RFC4122] P. Leach, M. Mealling, R. Salz, "A Universally Unique Identifier (UUID) URN Namespace," RFC 4122, IETF, July 2005.
+
 [XEP0045] P. Saint-Andre, "Multi-User Chat," XEP-0045, XMPP Standards Foundation, v1.34.6, 2023.
 
 [XEP0049] P. Saint-Andre, "Private XML Storage," XEP-0049, XMPP Standards Foundation, 2004.
 
 [XEP0160] J. Hildebrand, P. Saint-Andre, "Offline Messages," XEP-0160, XMPP Standards Foundation, 2006.
 
+[XEP0191] P. Saint-Andre, "Blocking Command," XEP-0191, XMPP Standards Foundation, 2015.
+
 [XEP0198] J. Karneges et al., "Stream Management," XEP-0198, XMPP Standards Foundation, v1.6, 2018.
 
 [XEP0203] P. Saint-Andre, "Delayed Delivery," XEP-0203, XMPP Standards Foundation, 2009.
+
+[XEP0313] M. Wild, "Message Archive Management," XEP-0313, XMPP Standards Foundation, 2021.
+
+[XEP0384] A. Husain et al., "OMEMO Encryption," XEP-0384, XMPP Standards Foundation, 2023.
 
 [mbedTLS] Mbed TLS Development Team, "Mbed TLS 3.6.4 Documentation," 2024. https://mbed-tls.readthedocs.io
 
@@ -858,6 +913,20 @@ Future work: Intel CET shadow stacks to protect trampoline call sites; XEP-0198 
 [Vigna2016] S. Vigna, "An experimental exploration of Marsaglia's xorshift generators, scrambled," ACM Trans. Math. Software, vol. 42, no. 4, 2016.
 
 [gnuefi] GNU-EFI Project, "Toolkit for building EFI applications." https://sourceforge.net/projects/gnu-efi/
+
+[ejabberd] ProcessOne, "ejabberd XMPP Server (Erlang/OTP)." https://github.com/processone/ejabberd
+
+[Prosody] Prosody Community, "Prosody XMPP Server (Lua)." https://hg.prosody.im/trunk/
+
+[Openfire] Ignite Realtime, "Openfire XMPP Server (Java)." https://github.com/igniterealtime/Openfire
+
+[mirage-xmpp] J. Amzallag, "mirage-xmpp: An XMPP Server written in OCaml using MirageOS," 2019. https://github.com/jeffa5/mirage-xmpp
+
+[Unikraft] S. Lankes et al., "Unikraft: Fast, Specialized Unikernels the Easy Way," ACM EuroSys, 2021. https://unikraft.org/
+
+[Nabla] Nabla Containers Project. https://nabla-containers.github.io/
+
+[Rumprun] Rump Kernel Project, "Rumprun: Bare-metal and cloud unikernel based on rump kernels." https://github.com/rumpkernel/rumprun
 
 ---
 
