@@ -135,13 +135,40 @@ The following extensions were surveyed during design but are not yet implemented
 └───────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Toolchain and Build System
+### 3.3 Toolchain and Build System
 
-AngelicKernel uses the GNU-EFI toolkit rather than a dedicated cross-compiler. GCC compiles all C and NASM source to ELF64 object files; `objcopy` then converts the final ELF binary to a UEFI-compatible PE32+ executable. This works correctly for a single-component unikernel image. A dedicated cross-compiler (targeting `x86_64-w64-mingw32` or a PE/COFF target directly) would be required if the build ever needed to produce user-mode UEFI applications that link against host Linux libraries, or if `objcopy` section conversion produced incorrect section attributes for a future image layout. The host OS is Linux (Ubuntu 24); QEMU with OVMF (`sudo apt install ovmf`) is used for development and automated testing. Secure-boot signing (`sbsigntool`) is available but is not part of the current build because the self-signed kernel image would not pass Secure Boot verification on stock firmware.
+AngelicKernel uses the GNU-EFI toolkit rather than a dedicated cross-compiler. GCC compiles all C and NASM source to ELF64 object files; `objcopy` then converts the final ELF binary to a UEFI-compatible PE32+ executable [gnuefi]. This works correctly for a single-component unikernel image. A dedicated cross-compiler targeting `x86_64-w64-mingw32` or a PE/COFF target would be required only if the build needed to produce user-mode UEFI applications that link against host Linux libraries, or if `objcopy` section conversion produced incorrect attributes for a future image layout [OSDev_CC]. The host OS is Linux (Ubuntu 24); QEMU with OVMF (`sudo apt install ovmf`) is used for development and automated testing. For source-level debugging, QEMU's GDB stub (`-s -S` flags) combined with a GDB hardware-watchpoint script can single-step through UEFI boot code [OSDev_GDB]. Secure-boot signing (`sbsigntool`) is available but not used because the self-signed image would not pass firmware verification.
 
-### 3.3 Boot Sequence: From UEFI to First Connection
+The custom linker script (`linker.ld`) uses GNU Binutils LD to place `.secure_driver_code` and `.secure_driver_data` into contiguous output sections with explicit start/end boundary symbols (`__secure_driver_code_start`, `__secure_driver_code_end`, `__secure_driver_data_start`, `__secure_driver_data_end`). These symbols are consumed by `vmm_protect_driver()` to determine exactly which pages to tag with Key 1 [GNUldScript].
+
+**Debug output and graphics.** UEFI provides the Graphics Output Protocol (GOP, `EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID`) for framebuffer-level pixel drawing [OSDev_GOP]. AngelicKernel chose serial output over GOP: the UART at COM1 (I/O base 0x3F8) continues to function via raw port instructions indefinitely after ExitBootServices(), produces machine-readable line-by-line output forwarded directly to the QEMU host terminal, and is compatible with GDB remote-serial debugging. GOP output is confined to the boot-services phase without explicit framebuffer address retention and requires additional code to remain usable post-ExitBootServices. A framebuffer console is tracked as a future addition for bare-metal display diagnostics.
+
+**Alternative bootloaders surveyed.** UEFI direct boot (current approach) is one of several viable entry strategies. The Limine bootloader [Limine] is a modern, feature-rich multiboot2-compatible bootloader that can load a 64-bit ELF kernel from a FAT32 ESP without requiring GNU-EFI; it handles the GDT, paging, and higher-half mapping before transferring control. For XMPP server use this offers no advantage over direct UEFI entry — UEFI already provides the EFI System Table, memory map, and PCI services that Limine would otherwise abstract. GRUB 2 (multiboot2) was also considered and rejected for the same reason. The OSDev wiki's "Bare Bones" and "Meaty Skeleton" tutorial sequences [OSDev_BareBones] [OSDev_MeatySkel] use GRUB multiboot as their entry model; AngelicKernel's UEFI entry is documented as an alternative path in [OSDev_LimineBareBones].
+
+**Local hostname.** During development and automated testing, the hostname `angelic.local` is registered in the test machine's `/etc/hosts` as an alias for `127.0.0.1`. The XMPP server domain is hard-coded as `angelic.local`; every test client, every raw TCP harness script, and every Tsung scenario file connects to `angelic.local:5222`. This avoids requiring a real DNS entry and allows the test suite to run fully offline.
+
+### 3.4 Boot Sequence: From UEFI to First Connection
 
 The boot sequence is strictly ordered. Each step builds on the last, and the ordering of steps (c) vmm_protect_driver and (d) mpk_set_pkru is not arbitrary — it has a security-critical meaning documented below.
+
+**Bootloader responsibilities.** A bootloader's four canonical duties are: (1) bring the kernel and all bootstrap data into memory; (2) provide the kernel with the information it needs to operate (memory map, ACPI tables, etc.); (3) switch to an environment the kernel expects (64-bit long mode, paging enabled, A20 line active); and (4) transfer control to the kernel entry point [OSDev_Bootloader]. UEFI firmware performs all four duties before calling `efi_main()`: it loads the PE32+ image, provides the EFI System Table (memory map, configuration tables), and enters long mode with a flat identity map. The A20 line is always enabled by UEFI — the historical 8042 keyboard controller toggle is a BIOS-only concern [OSDev_A20].
+
+**CPU feature verification and enablement.** Before any subsystem initialises, `efi_main()` verifies and enables the following CPU features. CPUID is called first to confirm each feature is present before writing control registers [OSDev_CPUID]:
+
+| Feature | Register / Instruction | AngelicKernel Action |
+|---------|----------------------|----------------------|
+| SSE / OSFXSR | CR0.EM=0, CR0.MP=1, CR4.OSFXSR=1, CR4.OSXMMEXCPT=1 | Enabled by `enable_sse()` — required for yxml_sse.c |
+| NX/XD (Execute Disable) | EFER.NXE=1 | Set by UEFI before entry; verified, not re-set |
+| MPK / PKE | CR4.PKE=1 | Enabled by `mpk_enable()` in mpk.asm |
+| RDRAND | CPUID EAX=1 ECX[30] | Checked in `secure_random_u32()`; falls back to xorshift64* if absent |
+| AES-NI | CPUID EAX=1 ECX[25] | Detected by mbedTLS; AES-CBC hardware-accelerated if present |
+| x87 FPU | CR0.NE=1, `FINIT` | Implicitly enabled by UEFI; not explicitly touched |
+| PCID | CR4.PCIDE — not enabled | Future: improves TLB efficiency on context switch |
+| SMEP | CR4.SMEP — not enabled | Future: prevents ring-0 executing user-page code |
+| SYSCALL/SYSRET | EFER.SCE — not enabled | Not applicable: no user-mode code |
+| Global Pages | CR4.PGE — not enabled | Future: marks kernel PTEs global to avoid TLB flush on CR3 reload |
+
+Features intentionally not enabled: SMEP (no user-mode code to protect against), PCID (no process switches), Global Pages (no address-space switches), SYSCALL (no user/supervisor boundary). APIC configuration is deferred to future work (§13).
 
 ```
 efi_main() [kernel.c]
@@ -264,6 +291,70 @@ efi_main() [kernel.c]
 **The snapshot-and-drain pattern** prevents a race condition discovered during development. The original code cleared `packet_pending` after polling. If the e1000 IRQ fired again mid-burst, the handler set packet_pending=1, the loop cleared it post-burst, and the new packet was lost until the next interrupt. In some cases lwIP's PCB list received the same TCP segment twice, causing the internal assertion `tcp_input: pcb->next != pcb`. The fix: clear packet_pending=0 before the first poll. If a new interrupt fires between the clear and the poll, packet_pending becomes 1 and the next iteration handles it — zero loss, no double processing.
 
 **The deferred Stream Management ack pattern** (`sm_want_ack`) prevents re-entrant send_raw() calls. xmpp_sm_on_stanza_sent() is called from inside send_raw() to count outbound stanzas. If it immediately called xmpp_sm_request_ack(), that function would call send_raw() again — recursion into the TCP write path. Instead, it sets ctx->sm_want_ack = 1 and returns. The event loop drains all pending ack requests at the top of each iteration, safely outside any send_raw() call stack.
+
+### 3.5 UEFI Memory Map and ACPI Discovery
+
+`pmm_init()` receives the EFI memory map from UEFI's `GetMemoryMap()` service. The map is an array of `EFI_MEMORY_DESCRIPTOR` structures. Each descriptor carries a type field that maps to an ACPI address-range type [ACPI66, §15, Table 15.6]:
+
+| EFI Type | Mnemonic | ACPI Range Type | PMM Treatment |
+|----------|----------|-----------------|---------------|
+| 0 | EfiReservedMemoryType | AddressRangeReserved | Skip |
+| 1–4 | EfiLoader/BootServices Code/Data | AddressRangeMemory | Skip (kernel lives here) |
+| 5–6 | EfiRuntimeServices Code/Data | AddressRangeReserved | Skip |
+| 7 | EfiConventionalMemory | AddressRangeMemory | **Usable — PMM selects largest** |
+| 8 | EfiUnusableMemory | AddressRangeReserved | Skip |
+| 9 | EfiACPIReclaimMemory | AddressRangeACPI | Skip |
+| 10 | EfiACPIMemoryNVS | AddressRangeNVS | Skip |
+| 11–12 | EfiMemoryMappedIO / PortSpace | AddressRangeReserved | Skip (MMIO regions) |
+| 14 | EfiPersistentMemory | AddressRangePersistentMemory | Skip |
+
+The PMM selects the single largest `EfiConventionalMemory` region and treats it as its allocation pool, starting no lower than physical address 0x200000.
+
+**ACPI table discovery.** The UEFI System Table's EFI Configuration Table contains a pointer to the Root System Description Pointer (RSDP), identified by the ACPI GUID (ACPI 2.0+) [ACPI66, §5.2.5.2]. The RSDP points to the XSDT (Extended System Description Table) or the older RSDT, which in turn lists all other system description table headers. Key tables present on a QEMU/KVM system:
+
+- **MADT** (Multiple APIC Description Table): lists local APIC and I/O APIC entries needed to configure SMP and replace the legacy 8259 PIC. AngelicKernel does not currently parse the MADT; APIC configuration is tracked as future work.
+- **FADT** (Fixed ACPI Description Table): contains the PM1a/PM1b control blocks and ACPI enable register (SCI_EN bit). AngelicKernel does not write SCI_EN=1 to enter ACPI mode; all power management is bypassed.
+- **MCFG** (Memory-Mapped PCI Configuration): describes the PCIe extended configuration space base address. AngelicKernel uses legacy PCI type-1 I/O port config space access (0xCF8/0xCFC) for the BAR scan; MCFG is not consumed. Full MCFG support would enable PCIe extended capabilities (MSI/MSI-X) in a future NIC driver.
+
+The deliberate non-implementation of AML (ACPI Machine Language) interpretation is a scope decision: a full AML interpreter (required by OSPM/ACPI §1.7.3) would add tens of thousands of lines of code and is unnecessary for a single-purpose XMPP server that never needs dynamic device enumeration, thermal management, or OS-directed power state transitions [ACPI66, §1.7.3] [OSDev_AML].
+
+**Other ACPI/firmware tables deliberately not consumed:**
+
+- **DSDT / SSDT** (Differentiated/Secondary System Description Tables): contain AML bytecode describing peripheral devices. Since AngelicKernel statically enumerates exactly one NIC and one IDE disk, DSDT parsing is unnecessary [OSDev_DSDT].
+- **GPT** (GUID Partition Table, OSDev §GPT): the data image (`data.img`) is a raw 1 MB disk without a GPT or MBR partition table. The disk driver accesses absolute LBA sectors directly. A GPT header would be required for real deployments where the OS image and data image share a single physical disk [OSDev_GPT].
+- **SMM** (System Management Mode): Intel x86 CPUs enter SMM invisibly when firmware services request it — the CPU saves its state, executes firmware code in SMRAM, and resumes. SMM execution is entirely transparent to the running kernel and cannot be disabled from ring 0. For AngelicKernel, SMM activity during e1000 IRQ handling or during PKRU-sensitive trampoline execution could theoretically introduce timing jitter but cannot corrupt kernel state (SMRAM is separate). A full formal analysis of SMM interference is out of scope [OSDev_SMM] [IntelSDM, Vol. 3C §34].
+- **LBA addressing** (Logical Block Addressing): the ATA PIO driver uses 28-bit LBA mode (maximum 128 GB addressable) rather than 48-bit LBA. The 1 MB data image uses at most 2,048 sectors, well within the 28-bit range [WikipediaLBA] [ATA8ACS].
+
+### 3.6 Interrupt Subsystem Design
+
+**8259 PIC configuration.** AngelicKernel uses the legacy dual-8259 PIC (master + slave cascade). The master is programmed to deliver IRQ 0–7 as INT 0x20–0x27; the slave delivers IRQ 8–15 as INT 0x28–0x2F. This remapping moves PIC vectors above the CPU exception range (INT 0–31) to avoid vector conflicts [OSDev_PIC].
+
+The PIC is configured for **Manual EOI** (End-of-Interrupt command, not Automatic AEOI). With AEOI, the PIC clears the In-Service Register (ISR) bit automatically on the trailing edge of the INTA cycle, before the handler has finished executing. If a higher-priority IRQ arrives before the handler returns, the PIC may deliver it before the first handler completes, producing nested interrupt handling. Manual EOI sends an explicit OCW2 byte (`0x20`) to the PIC at the end of each handler, giving the handler full control over when the ISR bit is cleared. Automatic Rotation and Specific Rotation priority modes are not needed for AngelicKernel's single-device workload.
+
+**Edge vs. level triggering.** The 8259 PIC supports both edge-triggered and level-triggered interrupt inputs. The e1000 uses a legacy PCI INTx line, which is **level-triggered**: the IRQ line is held asserted until the ICR (Interrupt Cause Read) register is cleared by the handler. Reading ICR in the e1000 handler both clears the cause bits and deasserts the IRQ line. Edge-triggered mode would only signal once on the rising edge; if the handler missed the event, the IRQ would be lost.
+
+**IDT gate types.** Three gate types are defined in the x86-64 architecture [IntelSDM, Vol. 3A §6.14.1]:
+
+| Gate Type | Vector IF Flag | Use in AngelicKernel |
+|-----------|---------------|----------------------|
+| Interrupt Gate | Clears IF on entry (disables further interrupts) | **Used for all ISRs** |
+| Trap Gate | Preserves IF (interrupts remain enabled) | Not used |
+| Task Gate | Switches hardware task contexts via TSS | Not applicable (no TSS) |
+
+Interrupt Gates are chosen for all ISR entries: the CPU automatically clears the IF flag on entry, preventing a re-entrant interrupt from corrupting the handler's stack before it has had a chance to save registers. The IDT register (IDTR) is loaded via the `LIDT` instruction with a 10-byte operand (limit + 64-bit base pointer).
+
+**GDT and flat memory model.** A minimal flat GDT with a 64-bit code segment (type 0x9A) and data segment (type 0x92) is configured. Segmentation is not used for memory protection — the x86-64 flat model is in effect, with protection delegated entirely to PTE flags (W, U/S, NX) and MPK [OSDev_GDT]. A Task State Segment (TSS) is not configured; no privilege-level-3 code exists to require ring-0 stack switching on exception entry. Segmentation as a protection mechanism is deliberately avoided: it is a legacy model, incompatible with the flat 64-bit address space required for MMIO identity mapping, and its page-granularity successor (PTE flags) is strictly more expressive [IntelSDM, Vol. 3A §5; OSDev_Segmentation].
+
+**CR2 register and page fault handling philosophy.** When the CPU raises a page-fault exception (#PF, vector 14), it stores the *linear address* that caused the fault into the CR2 register before invoking the IDT handler [IntelSDM, Vol. 3A §6.15]. The error code pushed to the stack encodes: bit 0 (P — page present), bit 1 (W/R — write vs. read), bit 2 (U/S — user vs. supervisor), bit 4 (I/D — instruction fetch), and bit 5 (PK — protection-key violation). AngelicKernel's page-fault handler reads CR2 and the error code to classify the fault:
+
+- **PK bit (bit 5) set:** MPK protection-key violation — expected during Tier-3 self-test. The handler clears the violation, increments the recovery counter, and resumes (see §4.4).
+- **All other page faults:** treated as fatal kernel errors. The handler prints `KERNEL PANIC: Page Fault at [CR2]=0x...` via serial and halts with `CLI; HLT`. There is no virtual-memory swap, no demand paging, and no page-fault recovery for production faults. The page fault is the architectural mechanism that connects the VMM (paging subsystem) to the IDT (interrupt subsystem): an incorrect page table entry immediately produces a catchable exception rather than silent memory corruption [OSDev_PF].
+
+**PIC special modes not used.** The following 8259 PIC operating modes are not applicable to AngelicKernel's single-device workload and are explicitly not configured: Special Fully Nested Mode (used to allow a slave-cascade IRQ to be pre-empted by a lower-priority slave IRQ — irrelevant with one device), Buffered Mode (used in large cascaded systems where the /SP-/EN pin is repurposed — not applicable on QEMU/pc), Poll Mode (software-polling the ISR instead of hardware interrupt delivery — slower than interrupt-driven reception), and Special Mask Mode (allows an ISR bit to be temporarily masked during handler execution — not needed with a single active IRQ line) [OSDev_PIC] [IntelSDM, Vol. 3A §8.8].
+
+**Programmable Interval Timer (PIT).** The PIT (Intel 8253/8254) is not programmed by AngelicKernel. The TSC-based `sys_now()` implementation provides sufficient timer resolution for lwIP retransmission timeouts. PIT-based timekeeping would require calibration against the TSC and add interrupt-driven overhead; TSC polling in the event loop is simpler and introduces no additional interrupt latency.
+
+**APIC (Advanced Programmable Interrupt Controller).** The Local APIC (LAPIC) and I/O APIC [OSDev_APIC] replace the dual-8259 PIC in SMP configurations and on modern UEFI systems. AngelicKernel uses the legacy 8259 PIC because it is simpler (no MADT parsing required) and works correctly on QEMU's default pc and q35 machine types. A future SMP implementation would require: parsing the MADT to discover LAPIC base addresses and I/O APIC base, writing the I/O APIC redirect table to route PCI IRQs to specific LAPICs, programming the LAPIC timer for per-core periodic ticks, and implementing IPI (Inter-Processor Interrupts) for TLB shootdown coordination across cores [OSDev_APIC] [IntelSDM, Vol. 3A §10].
 
 ---
 
@@ -397,9 +488,70 @@ This tier deliberately issues a memory read into Key-1 memory without a trampoli
 
 This tier requires a single addition to idt.c's page-fault handler. It cannot be enabled until that addition is in place; otherwise the fault halts the system rather than recovering.
 
----
+### 4.5 Paging Architecture and Control Register Roles
 
-## 5. Network Stack Integration
+AngelicKernel uses the standard IA-32e four-level paging hierarchy [IntelSDM, Vol. 3A §4.5]:
+
+```
+CR3 → PML4 (Page Map Level 4, 512 entries)
+        └→ PDPT (Page Directory Pointer Table, 512 entries)
+              └→ PD (Page Directory, 512 entries — or 2MB leaf)
+                    └→ PT (Page Table, 512 entries — 4KB leaf)
+```
+
+Each level is a 4 KB page of 64-bit entries. The `vmm_map_page()` function walks this hierarchy, allocating new table pages from the PMM as needed. All tables are allocated with `PTE_PRESENT | PTE_WRITE | PTE_USER` — the `PTE_USER` bit is critical at every level because Intel SDM §4.6.2 requires U/S=1 in all ancestor entries for PKRU enforcement to apply to a leaf page.
+
+**Control registers relevant to AngelicKernel:**
+
+| Register | Bit / Field | Role |
+|----------|-------------|------|
+| CR0 | bit 31 (PG) | Enables paging; set by UEFI long-mode entry before `efi_main()` |
+| CR0 | bit 16 (WP) | Write-protect: prevents ring-0 writes to read-only user pages; not currently set |
+| CR3 | [51:12] | Physical base address of the active PML4; written by `vmm_init()` |
+| CR4 | bit 22 (PKE) | Enables PKRU / WRPKRU / RDPKRU; set by `mpk_enable()` |
+| CR4 | bit 24 (PKS) | Enables PKRS for **supervisor**-mode protection keys; **NOT set** in AngelicKernel |
+| CR4 | bits OSFXSR/OSXMMEXCPT | Enable SSE; set by `enable_sse()` |
+| EFER | bit 11 (NXE) | Enables the XD/NX bit in PTEs; set by UEFI before long mode |
+
+**PKS (Protection Key Supervisor, CR4 bit 24) is deliberately not enabled.** PKS would allow the PKRS MSR to gate supervisor-mode accesses the same way PKRU gates user-mode accesses. AngelicKernel does not enable PKS because all code runs in ring 0, and the PKRU register already provides the needed user-page-based enforcement at ring 0 when U/S=1 at all levels. Enabling PKS would require configuring an additional MSR (IA32_PKRS) and would introduce a second path of protection-key enforcement to audit — complexity without benefit in a single-privilege unikernel.
+
+**XD/NX bit (Execute Disable).** When `EFER.NXE=1`, bit 63 of a PTE is the XD (Execute Disable) flag. Pages with XD=1 raise #PF on instruction fetch. AngelicKernel's `vmm_map_page()` does not currently set XD on data pages — a security improvement tracked in future work that would prevent code injection into XMPP data buffers.
+
+**PAT (Page Attribute Table).** The PAT MSR allows associating each page with a caching type (WB, WT, UC, WC, etc.) via three bits in the PTE. AngelicKernel uses the default PAT configuration established by UEFI firmware, which maps MMIO BAR regions as Uncacheable (UC) before ExitBootServices(). No explicit PAT reprogramming is performed; a future enhancement for high-throughput I/O would assign Write-Combining (WC) to PCIe prefetchable regions for improved DMA throughput [IntelSDM, Vol. 3A §11.12].
+
+**TLB management.** The TLB (Translation Lookaside Buffer) is a purely hardware structure — software cannot directly read or write individual TLB entries. The software responsibility is to issue `INVLPG <addr>` after modifying a PTE, forcing the hardware to discard any cached translation for that address. AngelicKernel issues `INVLPG` in `vmm_set_pkey()` after every key-assignment PTE modification. A future SMP implementation would need IPI-based TLB shootdowns: modifying a page table on one core invalidates only that core's TLB; other cores must be interrupted and made to issue their own `INVLPG` or `MOV CR3` [IntelSDM, Vol. 3A §4.10.4.2] [OSDev_TLB].
+
+### 4.6 Physical Memory Allocator
+
+**Memory allocation taxonomy [OSDev_ProgramMemAllocTypes].** Four categories of memory allocation exist in a kernel; AngelicKernel handles each differently:
+
+| Category | Mechanism | AngelicKernel Treatment |
+|----------|-----------|------------------------|
+| Global / static memory | Linker (`.data`, `.bss` sections) | All XMPP state, lwIP pools, mbedTLS pool — placed by linker, zero-init at startup |
+| Read-only constants | Linker (`.rodata` section) | String literals, lookup tables |
+| Stack memory | CPU stack pointer; set up before `efi_main()` | UEFI firmware establishes the initial stack; kernel does not re-establish it |
+| Dynamic heap memory | PMM (`pmm_alloc_page()`) | Page-table pages only; no general-purpose heap |
+
+The absence of a general-purpose `malloc()` / `free()` is intentional: static pools eliminate heap fragmentation and time-variable allocation latency, both critical for a real-time messaging server.
+
+**Current design — linear bump allocator.** `pmm_alloc_page()` maintains a single global pointer `free_memory_start`. Each call returns the current pointer value and advances it by `PAGE_SIZE` (4 KB). Each returned page is zero-initialised with `memset`. The allocator is O(1) and produces no fragmentation, making it appropriate for a system with no dynamic heap. Its fundamental limitation is that memory cannot be freed: there is no `pmm_free_page()`, and the pointer never retreats.
+
+**No virtual address allocator.** The identity map covers the entire first 4 GB, so every physical address is also a valid virtual address. There is no separate VA range allocator; `vmm_map_page()` is only called during `vmm_init()` to build the identity map and during `vmm_protect_driver()` to re-tag driver pages.
+
+**Sub-page allocation limitation.** Every allocation from `pmm_alloc_page()` consumes exactly one 4 KB page, regardless of how many bytes are actually needed. The lwIP memory pool, mbedTLS pool, and XMPP static arrays are all declared as C global arrays and placed in BSS by the linker — they do not go through the PMM at all. The PMM is used only to allocate page-table pages. This means the sub-page allocation limitation has no practical impact on the current codebase, but any future dynamic feature (e.g., per-session heap) would require a proper allocator.
+
+**Alternatives surveyed for future work [OSDev_MemAlloc] [OSDev_BrendanMMGuide]:**
+
+| Allocator | Supports free? | Complexity | Notes |
+|-----------|---------------|-----------|-------|
+| Linear bump (current) | No | O(1) alloc | Suitable for boot-time only |
+| Stack/list of pages | Yes (pages only) | O(1) | Simple; no sub-page support |
+| Bitmap | Yes (pages only) | O(n) scan | Common for PMM; no sub-page |
+| Buddy system | Yes | O(log n) | Power-of-two block sizes |
+| Slab allocator | Yes (typed objects) | O(1) amortised | Ideal for typed kernel objects [Slab] |
+| Linked-list heap | Yes (arbitrary) | O(n) worst | General malloc replacement |
+
+Recursive paging (mapping the PML4 into itself as one of its own entries) is an alternative page-table traversal strategy that would allow the kernel to access any PTE via a fixed virtual address formula without the current explicit four-level walk. It is not implemented but is documented as a future optimisation [OSDev_RecursivePaging].
 
 ### 5.1 lwIP in NO_SYS=1 Mode
 
@@ -430,9 +582,34 @@ For unusually deep chains (more than 8 fragments), a static fallback buffer tx_b
 
 A bug fixed during development: the original source had `static char tx_buffer[1514];#define MAX_TX_SEGS 8` on one line — the #define concatenated onto the variable declaration, creating a syntax error. Fixed by splitting onto separate lines.
 
----
+### 5.4 e1000 NIC Driver: Hardware Initialisation Sequence
 
-## 6. XMPP Protocol Implementation
+The Intel 82540EM (e1000) is initialised before ExitBootServices() for BAR discovery, then fully configured after vmm_init() completes [IntelE1000]. The sequence:
+
+1. **PCI bus scan.** `pci_get_bar()` iterates bus/device/function triples writing to I/O port 0xCF8 (CONFIG_ADDRESS) and reading from 0xCFC (CONFIG_DATA), searching for vendor ID 0x8086 / device ID 0x100E. On match, BAR0 (Base Address Register 0) yields the MMIO base address for the NIC's register file.
+
+2. **MMIO base extraction.** BAR0 is a 32-bit or 64-bit memory BAR. The lower 4 bits (type flags) are masked off with `& ~0xF` to get `global_mmio_base`. All subsequent register accesses use `volatile uint32_t *` reads/writes to this base plus fixed offsets. The `volatile` qualifier is mandatory — without it, GCC may reorder or eliminate MMIO reads/writes as "dead stores" [OSDev_MMIO].
+
+3. **MAC address detection.** The hardware MAC is read from the Receive Address Low (RAL) and Receive Address High (RAH) registers in the NIC EEPROM. RAL holds bytes 0–3 of the MAC; RAH holds bytes 4–5 plus a validity bit. If RAH bit 31 is clear, the address is invalid.
+
+4. **RX/TX descriptor rings.** Both rings are allocated from the PMM: 32 descriptors each, statically sized at 16-byte alignment per descriptor. The Receive Descriptor Base Address Low/High registers point to the physical address of the RX ring; RDLEN holds ring size in bytes; RDH and RDT are the hardware head and software tail pointers. The NIC advances RDH on successful receipt; software advances RDT to hand new descriptors back. TX ring configuration is symmetric: TDBAL/TDBAH/TDLEN/TDH/TDT.
+
+5. **Interrupt mask.** The Interrupt Mask Set register (IMS) enables two cause bits: bit 7 (RXT0 — Receiver Timer Interrupt, fires after a configurable delay following packet receipt) and bit 2 (LSC — Link Status Change). The Interrupt Cause Read (ICR) register is read at the start of every IRQ handler; reading it atomically clears all set bits, deasserts the PCI INTx line, and returns the bitmask of pending causes. This is the "read-to-clear" pattern required for level-triggered PCI interrupts.
+
+6. **PIO vs. MMIO vs. DMA.** The e1000 uses MMIO for control registers (BAR0) and DMA for packet data. DMA buffers — the memory regions pointed to by RX/TX descriptors — must be declared `volatile` and must not be placed in cached memory regions if the NIC's DMA controller bypasses the CPU cache. In the identity-mapped PAT-default configuration, these buffers reside in Write-Back cacheable memory; the e1000's DMA engine performs cache-coherent transactions on Nehalem and later CPUs, so no explicit cache flush is required. On older hardware or with MMIO-typed regions, explicit `clflush` or PAT write-through would be needed [OSDev_MMIO].
+
+**lwIP driver glue (bare-metal porting).** The lwIP Ethernet driver interface requires four functions [lwIPBMPort]:
+
+| Function | Role |
+|----------|------|
+| `low_level_init()` | Calls e1000 init; sets `netif->hwaddr`, `netif->mtu` |
+| `low_level_output()` | Called by ARP / IP to send one frame; routes through MPK trampoline to `e1000_send_raw()` |
+| `low_level_output_zerocopy()` | Extended variant; passes pbuf scatter list through trampoline to `e1000_send_scatter()` |
+| `low_level_input()` / `angelic_netif_poll()` | Polls the RX descriptor ring through trampoline; wraps received bytes in a pbuf |
+| `ethernetif_init()` | Registers the netif and calls `low_level_init()` |
+| `ethernet_input()` | Called on received pbuf; dispatches ARP vs. IPv4 |
+
+The porting contract (`lwipopts.h`, `cc.h`, `sys_arch.h`) configures lwIP for the bare-metal environment: no threads, no locking primitives (`SYS_LIGHTWEIGHT_PROT=0`), no dynamic allocation beyond the static pool, and `LWIP_NETIF_STATUS_CALLBACK=1` for link-state events [lwIPBMPort] [OSDev_lwIP].
 
 ### 6.1 Connection Lifecycle
 
@@ -511,11 +688,22 @@ The urn:ietf:params:xml:ns:xmpp-sasl namespace is intentionally absent. SASL `<a
 
 ### 6.4 XML Parsing
 
-Stanzas are parsed by a modified yxml streaming parser. yxml maintains state across multiple recv callbacks — essential because XMPP stanzas may arrive fragmented across TCP segments. The parser fills xmpp_stanza_t: name[64], xmlns[128], type[32], id[64], to[96], from[96], payload[1024].
+Stanzas are parsed by a modified yxml streaming parser [yxml]. yxml maintains state across multiple recv callbacks — essential because XMPP stanzas may arrive fragmented across TCP segments. The parser fills xmpp_stanza_t: name[64], xmlns[128], type[32], id[64], to[96], from[96], payload[1024].
 
 A SIMD-accelerated variant (yxml_sse.c) uses SSE 4.2 PCMPESTRI for substring searches in large stanzas, compiled with -msse4.2 separately from the rest of the kernel. SSE is valid because enable_sse() runs before any yxml call.
 
 The static stanza pool (xmpp_memory.c) holds MAX_STANZAS entries. If xmpp_alloc_stanza() finds no free slot, xmpp_recv_callback() sends `<stream:error><resource-constraint/></stream:error>` and closes the connection (RFC 6120 §4.9.3.17).
+
+**Alternative XML parsers surveyed.** Three other parsers were evaluated before selecting yxml:
+
+| Parser | Size | Streaming? | Bare-metal? | Verdict |
+|--------|------|-----------|-------------|---------|
+| yxml (current) [yxml] | ~800 lines | Yes | Yes — zero stdlib deps | Selected |
+| Mini-XML (mxml) [mxml] | ~5,000 lines | Partial | Requires malloc | Rejected — needs heap |
+| libexpat [libexpat] | ~25,000 lines | Yes | Requires POSIX | Rejected — too large |
+| Hand-rolled (initial) | ~200 lines | No | Yes | Rejected — correctness risk |
+
+yxml was chosen because it is a single-file streaming parser with zero stdlib dependencies, making it trivially portable to a freestanding environment. Its state is a small struct that survives across `recv()` call boundaries — exactly the fragmentation model imposed by lwIP's callback interface. Mini-XML supports a pull-parser API but requires `malloc()` for the tree; libexpat is a production-grade streaming parser but pulls in POSIX I/O headers. A hand-rolled parser was the initial implementation but was retired after it failed to handle deeply nested MUC `<x>` payloads correctly.
 
 ### 6.5 Stream ID and Entropy Source
 
@@ -556,6 +744,18 @@ The fixed timestamp 2024-01-01T00:00:00Z is a known limitation: no wall-clock RT
 ### 6.8 ATA Disk Persistence Layout
 
 All durable state is persisted to a 1 MB raw disk image (data.img) connected as IDE slave. disk_init() selects AHCI DMA (q35 chipset) or ATA PIO (pc chipset) automatically. The disk layout (version 5):
+
+**ATA PIO implementation detail.** The ATA PIO driver (primary channel: I/O ports 0x1F0–0x1F7, secondary: 0x170–0x177) implements the 28-bit LBA addressing scheme. After selecting a drive (master/slave bit in the Drive/Head register at 0x1F6), the driver reads the Status register (0x1F7) **fifteen times** and uses only the last value — this creates a deliberate 14-read delay (~420 ns at 30 ns per I/O read) that allows the selected drive time to assert correct voltages on the bus before the status is trusted [OSDev_ATAPI]. Without this delay, a fast controller may read stale status from the previously selected drive.
+
+The three I/O modes evaluated during development [ATA8ACS]:
+
+| Mode | Throughput | Complexity | Status |
+|------|-----------|-----------|--------|
+| ATA PIO (current) | ~16 MB/s | Low | Implemented |
+| IDE Bus-Master DMA | ~100 MB/s | Medium (~200 lines) | Future work |
+| AHCI (native SATA) | ~300–600 MB/s | Hard (~700 lines) | Future work — AHCI scan present for q35 |
+
+For AngelicKernel's workload — sector-sized persistence writes on login/logout and message delivery — ATA PIO throughput is not a bottleneck. The 1 MB raw image fits entirely in 2,048 sectors; even at 16 MB/s, a full image read completes in under 1 ms. AHCI support remains valuable for large-scale deployments where message archive growth could exceed a few megabytes.
 
 | LBA Range | Sectors | Content |
 |-----------|---------|---------|
@@ -621,6 +821,50 @@ Because no libc exists after ExitBootServices(), every standard C function is im
 - **secure_random_u32():** RDRAND (10 retries) with xorshift64* fallback; see §6.5.
 
 The calloc/free stubs in mbedtls_port.c are marked __attribute__((weak)) so mbedTLS's platform layer can override them with its static pool allocator.
+
+### 8.1 Serial Debug Subsystem (UART / COM1)
+
+All kernel diagnostics, boot log output, and the test harness's expected-response channel use the PC16550D-compatible UART at COM1 [PC16550D]. COM1 is universally available on both real hardware and QEMU, requires no firmware cooperation after ExitBootServices(), and produces output that the host terminal reads directly via QEMU's `-serial stdio` option.
+
+**Physical connector.** The PC serial port uses a DE-9 (often called "DB-9") 9-pin D-sub connector [RS232]. The two signal pins used by AngelicKernel:
+
+- **Pin 3 — TD (Transmit Data):** this is the computer's *output* wire. `outb(0x3F8, c)` shifts character `c` out on this pin.
+- **Pin 2 — RD (Receive Data):** this is the computer's *input* wire. `inb(0x3F8)` reads a byte received on this pin.
+
+The apparently backwards naming is a DTE/DCE artefact: "Transmit Data" names the function from the DTE's perspective (the computer transmits on pin 3), but that same pin 3 is *received* by the DCE (modem). QEMU's Null Modem emulation swaps TX↔RX and RTS↔CTS so that the guest's outbound data reaches the host terminal's inbound channel.
+
+**UART initialisation sequence (8N1 at 115200 baud):**
+
+```
+1. Write 0x00 to IER (0x3F9)  — disable all UART interrupts (polling mode)
+2. Write 0x80 to LCR (0x3FB)  — set DLAB=1 (Divisor Latch Access Bit)
+3. Write 0x01 to DLL (0x3F8)  — divisor low byte  (115200 baud: 115200/115200 = 1)
+4. Write 0x00 to DLH (0x3F9)  — divisor high byte
+5. Write 0x03 to LCR (0x3FB)  — clear DLAB; set 8 data bits, no parity, 1 stop bit (8N1)
+6. Write 0xC7 to FCR (0x3FA)  — enable and clear FIFO, 14-byte threshold
+7. Write 0x0B to MCR (0x3FC)  — set RTS and DTR (Data Terminal Equipment ready)
+```
+
+**UART frame format — 8N1 dissected.** Every character on the wire is wrapped in a frame [OSDev_Serial]:
+
+| Component | Width | Value / Meaning |
+|-----------|-------|-----------------|
+| Start bit | 1 bit | Always low (space) — signals start of frame |
+| Data bits | 8 bits | Character byte, LSB transmitted first |
+| Parity bit | 0 bits | "N" = None — no parity check |
+| Stop bit | 1 bit | Always high (mark) — signals end of frame |
+
+Total frame: 10 bits per character. At 115200 baud = 115,200 bits/second → 11,520 characters/second maximum throughput.
+
+**Baud rate formula.** The PC16550D uses an internal clock of 1.8432 MHz divided by 16, giving a base tick rate of 115,200 Hz. The divisor register (DLL + DLH) is loaded with `115200 / desired_baud`. At 115200 baud: divisor = 1. At 9600 baud: divisor = 12. AngelicKernel uses 115200 baud throughout.
+
+**DLAB (Divisor Latch Access Bit).** Setting LCR bit 7 (DLAB=1) redirects the I/O addresses 0x3F8 and 0x3F9 from the data/interrupt registers to the baud rate divisor registers (DLL and DLH). This multiplexing means baud rate programming and data transmission cannot happen simultaneously; DLAB must be cleared (bit 7 = 0) before transmitting characters.
+
+**DTE/DCE terminology.** The UART is "Data Terminal Equipment" (DTE) — the computer side. A modem is "Data Communication Equipment" (DCE). QEMU simulates a Null Modem cable between the guest UART and the host terminal, swapping TX↔RX and RTS↔CTS so that the guest's transmit output reaches the host's receive input [QEMUNet].
+
+**Why COM1 over COM2/3/4:** COM1 (0x3F8, IRQ 4) is the only port guaranteed to be present and functional in QEMU's default configuration. COM2 (0x2F8, IRQ 3), COM3 (0x3E8), and COM4 (0x2E8) may not be emulated without explicit QEMU flags. AngelicKernel uses polling mode (busy-wait on THR Empty flag) rather than IRQ-driven TX because serial output volume is low and an additional IRQ vector would add interrupt-routing complexity for marginal benefit.
+
+**Legacy address space landmarks.** The UART at 0x3F8 coexists with other fixed-function regions in the PC I/O address space. For reference, these legacy regions exist below 1 MB in physical memory but are not used by AngelicKernel: EBDA (Extended BIOS Data Area, typically 0x80000–0x9FFFF), BDA (BIOS Data Area, 0x400–0x4FF), IVT (Interrupt Vector Table, 0x000–0x3FF, real-mode only), and VGA text buffer (0xB8000). AngelicKernel runs entirely in long mode and never accesses any of these regions; they are noted here because firmware may mark them as EfiReservedMemoryType, causing the PMM to correctly skip them during conventional-memory selection [OSDev_MemMap].
 
 ---
 
@@ -778,6 +1022,13 @@ The current throughput bottleneck in the AngelicKernel TX path is that, for a 10
 
 **Scope:** MPK provides isolation between components within one kernel, not kernel integrity protection. An attacker with arbitrary ring-0 code execution can write PKRU directly. The threat model is a memory-safety bug in the XMPP layer, not a complete kernel compromise.
 
+**Relationship to prior MPK research.** Three closely related systems were studied [Park2019] [Vahldiek-Oberwagner2019] [Hedayati2019]:
+
+- **ERIM** (Vahldiek-Oberwagner et al., USENIX Security 2019) applies MPK within a Linux process to isolate sensitive heap data (e.g., TLS private keys) from the rest of the application. AngelicKernel applies the same PKRU-gate mechanism at the kernel level to isolate a hardware driver from a protocol stack, with no OS below it.
+- **Hodor** (Hedayati et al., USENIX ATC 2019) uses MPK to isolate in-process libraries. Hodor's trampoline design — a narrow entry point that switches PKRU, performs the call, and restores PKRU — is architecturally identical to AngelicKernel's `mpk_trampoline_N` stubs in mpk.asm.
+- **PKRU-Safe** (Koning et al., EuroSys 2017) automatically assigns heap allocations to protected key domains based on type safety annotations. AngelicKernel's protection-key assignments are static and manual, which is appropriate for its fixed driver boundary.
+- **Park et al. (USENIX ATC 2019)** [Park2019] demonstrates MPK applied to data-plane library isolation in a user-space context; the latency characterisation methodology (RDTSC-bracketed with CPUID serialisation) is the same approach used in AngelicKernel's `mpk_benchmark.c`.
+
 ### 11.2 Known Limitations
 
 | Limitation | Impact |
@@ -818,13 +1069,25 @@ Stream IDs are generated from RDRAND hardware entropy (RFC 6120 §4.7.3). If RDR
 
 ## 12. Related Work
 
-**Unikernels:** MirageOS (Madhavapeddy et al., ASPLOS 2014) uses OCaml type safety to eliminate memory corruption and is the closest architectural peer to AngelicKernel. LightVM (Manco et al., SOSP 2017) reduces KVM boot time to ~5 ms. EbbRT (Schatzberg et al., OSDI 2016) is a C++ library OS for high-performance kernels. HermiTux runs unmodified POSIX binaries as unikernels. OSv supports a JVM runtime directly on bare metal or KVM. ClickOS achieves sub-5 ms boot with click modular router payloads. IncludeOS is a C++ unikernel targeting cloud services. Unikraft provides a POSIX-compatible unikernel build framework based on modular micro-libraries. Nabla containers use a library OS (rumprun) to provide strong syscall-level isolation between container and host. Rumprun combines NetBSD rump kernels with a hardware abstraction layer to run POSIX applications on bare Xen or KVM. HaLVM is a Haskell adaptation of MirageOS ideas running on Xen. None of these systems applies MPK-based intra-unikernel driver isolation on commodity x86.
+**Unikernels:** MirageOS (Madhavapeddy et al., ASPLOS 2014) uses OCaml type safety to eliminate memory corruption and is the closest architectural peer to AngelicKernel [mirage-xmpp]. LightVM (Manco et al., SOSP 2017) reduces KVM boot time to ~5 ms. EbbRT (Schatzberg et al., OSDI 2016) is a C++ library OS for high-performance kernels. HermiTux runs unmodified POSIX binaries as unikernels. OSv supports a JVM runtime directly on bare metal or KVM. ClickOS [Martins2014] achieves sub-5 ms boot with click modular router payloads. IncludeOS [IncludeOS] is a C++ unikernel targeting cloud services. Unikraft [Unikraft] provides a POSIX-compatible unikernel build framework based on modular micro-libraries and has existing ports of lwIP and mbedTLS — the same two libraries used in AngelicKernel. Nabla containers [Nabla] use a library OS (rumprun) to provide strong syscall-level isolation between container and host. Rumprun [Rumprun] combines NetBSD rump kernels [NetBSD] with a hardware abstraction layer to run POSIX applications on bare Xen or KVM; the rumprun-packages repository [RumprunPkgs] includes pre-ported versions of many server applications. HaLVM [HaLVM] is a Haskell adaptation of MirageOS ideas running on Xen. Solo5 [Solo5] is a minimal sandboxed execution environment for unikernels that provides a narrow hardware abstraction layer; MirageOS uses Solo5 as its KVM/hardware back-end. Mini-OS [MiniOS] is a minimal Xen guest OS maintained by the Xen Project, used as a reference implementation for paravirtual device drivers. The OPS build tool [OPS] packages POSIX applications as unikernels without code changes. None of these systems applies MPK-based intra-unikernel driver isolation on commodity x86.
+
+**TLS formal verification.** Kaloper-Mersinjak et al. (USENIX Security 2015) [Kaloper2015] present miTLS, a formally verified implementation of TLS 1.2 and 1.3 in F*, demonstrating that a freestanding TLS stack can be proven memory-safe and cryptographically correct. AngelicKernel uses mbedTLS rather than miTLS; migrating to a formally verified TLS implementation is a long-term security goal.
 
 **MPK Systems:** ERIM (Vahldiek-Oberwagner et al., USENIX Security 2019) uses MPK for intra-process isolation of sensitive data, achieving sub-100 ns switching in user space on Linux. Hodor (Hedayati et al., USENIX ATC 2019) provides formal analysis of MPK isolation policies. PKRU-Safe (Koning et al., EuroSys 2017) provides compiler-assisted enforcement of MPK domain boundaries. All three operate in Linux user space; AngelicKernel applies the same hardware primitive at ring 0 without an OS. Unlike PKRU-Safe, AngelicKernel takes the manual assembly approach for the trampolines, giving precise control over register-saving order and avoiding any compiler dependency, at the cost of requiring careful manual verification.
 
 **Bare-Metal XMPP:** No prior published work implements a full XMPP server on bare-metal x86-64 without an OS. The closest prior systems are OpenWRT-hosted Prosody on embedded MIPS routers (still running on a full Linux kernel) and experimental Erlang/OTP-based servers. AngelicKernel is the first bare-metal UEFI XMPP server with automated protocol compliance verification. The closest conceptual predecessor is mirage-xmpp (Amzallag, 2019), an OCaml MirageOS unikernel XMPP server [mirage-xmpp]. That work demonstrates XMPP on a unikernel but targets the MirageOS type-safe OCaml environment rather than bare-metal C on UEFI and does not address intra-component isolation.
 
-**XMPP Server Implementations:** AngelicKernel was designed after a detailed study of three mature XMPP servers. ejabberd (ProcessOne) is an Erlang/OTP server with a modular architecture: each XEP is implemented as a separate `gen_server` behaviour in its own `.erl` module (e.g., `mod_roster.erl`, `mod_muc.erl`), connected via a hook-and-handler dispatch system. This plugin model — absent in AngelicKernel's monolithic handler table — is the primary architectural difference. Prosody (Lua) adopts a similar event-driven plugin architecture with clean separation between the XMPP core stream (`xmpp_stream.lua`) and protocol handlers. Openfire (Java) implements a layered packet router: `PacketRouterImpl` delegates to type-specific routers (`MessageRouter`, `PresenceRouter`, `IQRouter`), which resolve the MUC subdomain and forward packets to `MultiUserChatServiceImpl`. The study of these systems informed AngelicKernel's routing table design and motivated the architectural limitations noted in §11.2.
+**XMPP Server Implementations:** AngelicKernel was designed after a detailed study of three mature XMPP servers. ejabberd (ProcessOne) is an Erlang/OTP server with a modular architecture: each XEP is implemented as a separate `gen_server` behaviour in its own `.erl` module (e.g., `mod_roster.erl`, `mod_muc.erl`), connected via a hook-and-handler dispatch system. This plugin model — absent in AngelicKernel's monolithic handler table — is the primary architectural difference. Prosody (Lua) adopts a similar event-driven plugin architecture with clean separation between the XMPP core stream (`xmpp_stream.lua`) and protocol handlers [Prosody]. Openfire (Java) was studied in detail through the following file-by-file read order [Openfire]:
+
+*Phase 1 — Network Ingestion (bytes to XML):* `NettyXMPPDecoder` accepts raw TCP byte streams and decodes them to XML text. `NettyConnectionHandler` manages the network session lifecycle. `NettyClientConnectionHandler` extends this for client connections and passes decoded XML to the server logic. `StanzaHandler` is the crucial bridge: it parses the raw XML string, creates typed `<iq>`, `<message>`, or `<presence>` Java objects, and hands them to the routing engine.
+
+*Phase 2 — Core Routing (directing traffic):* `PacketRouterImpl` is the main traffic cop — it inspects the packet type and delegates to one of three specialised routers. `MessageRouter`, `PresenceRouter`, and `IQRouter` each inspect the destination JID; if the domain is `conference.<domain>`, they recognise a MUC-subdomain address and route the packet out of the core server into the MUC subsystem.
+
+*Phase 3 — MUC Subsystem (XEP-0045 engine):* `MultiUserChatManager` is the top-level global manager tracking all MUC service domains. `MultiUserChatService` defines the interface. `MultiUserChatServiceImpl` is the concrete implementation where `processPacket()` dispatches join, leave, and groupchat events. `LocalMUCRoomManager` fetches or creates room objects from memory, managing lifecycle, caching, and memory limits for active rooms.
+
+This three-phase architecture — ingestion, routing, subsystem — directly informed AngelicKernel's `xmpp_recv_callback()` → `xmpp_route_stanza()` → per-handler design, and the Openfire study motivated the architectural limitations documented in §11.2 (monolithic routing table vs. per-XEP module structure, typed stanza objects vs. snprintf assembly).
+
+ejabberd's Erlang ecosystem includes two standalone libraries relevant to any C-based XMPP implementation: `processone/xmpp` [pxmpp] (a typed Erlang XMPP stanza library that provides the builder-object model absent in AngelicKernel) and `processone/fast_xml` [fast_xml] (a NIF-accelerated streaming XML parser backed by a C `expat` binding). These are cited not as direct dependencies but as reference implementations for what a typed stanza API and a production-grade bare-metal XML parser respectively should provide. Jackline [Jackline] is an OCaml XMPP client (not server) that runs on MirageOS; it demonstrates that a full XMPP client can be built with OCaml's type system providing protocol correctness guarantees, and it uses the same MirageOS TLS stack that mirage-xmpp would use on the server side.
 
 ---
 
@@ -838,21 +1101,25 @@ Key engineering insights surfaced during implementation: PTE_USER must be set at
 
 **Future Work.** Several directions are prioritised:
 
-*Security hardening:* Intel CET shadow stacks to protect trampoline call sites against return-oriented programming; ASLR for the kernel image and static allocations; stack canaries; a per-session SASL retry counter to rate-limit brute-force attempts.
+*Security hardening:* Intel CET shadow stacks to protect trampoline call sites against return-oriented programming; ASLR for the kernel image and static allocations; stack canaries; a per-session SASL retry counter to rate-limit brute-force attempts; NX/XD bit enforcement on all data-only pages (currently unset in `vmm_map_page()`), which would prevent code injection into XMPP receive buffers.
 
-*SASL and TLS improvements:* SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) to eliminate transmission of cleartext credentials even over TLS; SASL channel binding to TLS (RFC 5056) to bind authentication to the specific TLS session.
+*SASL and TLS improvements:* SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) to eliminate transmission of cleartext credentials even over TLS; SASL channel binding to TLS (RFC 5056) to bind authentication to the specific TLS session; a CA-signed certificate to allow client-side server identity verification.
 
-*Protocol extensions:* XEP-0313 (Message Archive Management) for client-side history sync; XEP-0384 (OMEMO) for end-to-end encrypted messaging; XEP-0359 (Unique and Stable Stanza IDs) as a prerequisite for MAM; XEP-0333 (Chat Markers); XEP-0085 (Chat State Notifications); XEP-0115 (Entity Capabilities) for feature advertisement caching; XEP-0077 (In-Band Registration) to allow self-service account creation; XEP-0048 (Bookmark Storage via private XML, already partially served by XEP-0049); XEP-0198 session resumption with full stanza queue persistence.
+*Protocol extensions:* XEP-0313 (Message Archive Management) for client-side history sync; XEP-0384 (OMEMO) for end-to-end encrypted messaging; XEP-0359 (Unique and Stable Stanza IDs, requiring RFC 4122 UUID generation) as a prerequisite for MAM; XEP-0333 (Chat Markers); XEP-0085 (Chat State Notifications); XEP-0115 (Entity Capabilities) for feature advertisement caching; XEP-0077 (In-Band Registration) to allow self-service account creation; XEP-0048 (Bookmark Storage via private XML, partially served by XEP-0049); XEP-0198 session resumption with full stanza queue persistence on disk; XEP-0191 Blocklist full policy enforcement (stub handler currently returns success without filtering).
 
 *Architectural extensibility:* Replace the monolithic `xmpp_handlers.c` routing table with a per-XEP module structure and a hook-and-handler dispatch system similar to ejabberd's `gen_mod` architecture. Replace hardcoded `snprintf`-assembled stanzas with typed stanza builder objects, reducing the risk of malformed XML and simplifying addition of new extensions.
 
-*Memory management:* Replace the bump allocator with a buddy allocator or slab allocator to support `free()` and sub-page allocations. Explore 2 MB hugepages in the identity map to reduce TLB pressure (currently 1,000,000 PTEs for the 4 GB identity map; 2 MB pages would reduce this to 2,048 PDEs).
+*Memory management:* Replace the bump allocator with a buddy allocator or slab allocator to support `free()` and sub-page allocations [OSDev_MemAlloc] [OSDev_BrendanMMGuide] [Slab]. Explore 2 MB hugepages for the identity map: the current `vmm_init()` loop creates ~1,000,000 4 KB PTEs to cover 4 GB; switching to 2 MB pages (Intel SDM Table 4-17: IA-32e PDE mapping a 2 MB page) would reduce this to ~2,048 PDEs, shrinking the page table footprint from ~4 MB to ~16 KB and reducing TLB pressure. Memory swapping is deliberately omitted — disk latency would destroy the sub-millisecond XMPP latency target.
 
-*Hardware and platform:* RTC integration for accurate XEP-0203 delay stamps; APIC timer to replace TSC-based timekeeping; SMP support (LAPIC + IPI-based TLB shootdown for multi-core isolation); real-hardware validation of all five section 9.2 metrics on an Ice Lake or Alder Lake system.
+*PAT and cache optimisation:* Assign the Write-Combining (WC) PAT entry to PCIe prefetchable BAR regions. This would improve DMA throughput for the e1000 NIC's transmit path by allowing CPU store buffers to coalesce writes before they reach the PCIe bus, instead of issuing one uncacheable transaction per descriptor update [IntelSDM, Vol. 3A §11.12].
 
-*Disk and I/O:* IDE Bus-Master DMA (~100 MB/s) or full AHCI (~300–600 MB/s) to replace the current ATA PIO path (~16 MB/s); these require approximately 200 and 700 lines of additional driver code respectively.
+*Hardware and platform:* RTC integration (via CMOS I/O ports 0x70/0x71 or ACPI HPET) for accurate XEP-0203 delay stamps; APIC timer (Local APIC timer register) to replace TSC-based timekeeping for better frequency invariance across CPU P-states; SMP support (LAPIC IPI-based TLB shootdown for multi-core isolation — currently a single-CPU design); real-hardware validation of all five §9.2 metrics on an Ice Lake or Alder Lake system.
+
+*Disk and I/O:* IDE Bus-Master DMA (~100 MB/s) or full AHCI (~300–600 MB/s) to replace the current ATA PIO path (~16 MB/s); these require approximately 200 and 700 lines of additional driver code respectively [ATA8ACS] [AHCI13].
 
 *External compliance:* Evaluate against compliance.conversations.im and connect.xmpp.net once a public IPv4/IPv6 address and CA-signed certificate are obtained (see §10.3).
+
+*Unikernel deployment alternatives:* AngelicKernel currently targets bare UEFI on x86-64. Alternative deployment bases surveyed during design include: running the same image as a Xen PVH guest (paravirtualised, sub-millisecond boot), packaging as a Unikraft application (POSIX-compatible micro-library framework with existing lwIP and mbedTLS ports), and running under Nabla containers (rumprun-based isolation on a Linux host without a full VM). Each of these would trade the zero-OS property for easier deployment and hardware compatibility, which may be acceptable in production environments [Unikraft] [Nabla] [Rumprun].
 
 ---
 
@@ -927,6 +1194,232 @@ Key engineering insights surfaced during implementation: PTE_USER must be set at
 [Nabla] Nabla Containers Project. https://nabla-containers.github.io/
 
 [Rumprun] Rump Kernel Project, "Rumprun: Bare-metal and cloud unikernel based on rump kernels." https://github.com/rumpkernel/rumprun
+
+[RumprunPkgs] Rump Kernel Project, "Rumprun Packages: Pre-ported server applications for rumprun." https://github.com/rumpkernel/rumprun-packages
+
+[NetBSD] The NetBSD Foundation, "NetBSD Operating System." https://www.netbsd.org/
+
+[Solo5] Solo5 Contributors, "Solo5: A sandboxed execution environment for unikernels." https://github.com/Solo5/solo5
+
+[HaLVM] Galois Inc., "HaLVM: The Haskell Lightweight Virtual Machine." https://github.com/GaloisInc/HaLVM
+
+[MiniOS] Xen Project, "Mini-OS: Minimal OS for Xen guests." https://github.com/mirage/mini-os
+
+[MirageOS] MirageOS Team, "MirageOS: A library operating system that constructs unikernels." https://mirage.io/docs
+
+[MirageSkeleton] MirageOS Team, "mirage-skeleton: Example MirageOS applications." https://github.com/mirage/mirage-skeleton
+
+[IncludeOS] IncludeOS Contributors, "IncludeOS: A C++ unikernel for cloud services." https://www.includeos.org/
+
+[OPS] NanoVMs, "OPS: Build and run nanos unikernels." https://docs.ops.city/ops
+
+[Limine] limine-bootloader Contributors, "Limine: Modern, feature-rich bootloader." https://github.com/limine-bootloader/limine
+
+[Kaloper2015] K. Bhargavan, A. Delignat-Lavaud, C. Fournet, A. Pironti, P.-Y. Strub, "Implementing TLS with Verified Cryptographic Security," USENIX Security 2015. https://www.usenix.org/conference/usenixsecurity15/technical-sessions/presentation/kaloper-mersinjak
+
+[Park2019] S. Park et al., "libmpk: Software Abstraction for Intel Memory Protection Keys," USENIX ATC 2019. https://www.usenix.org/system/files/atc19-park-soyeon.pdf
+
+[Jackline] Hannes Mehnert, "Jackline: A minimalistic XMPP client in OCaml." https://github.com/hannesm/jackline
+
+[pxmpp] ProcessOne, "processone/xmpp: Erlang/Elixir XMPP parsing and serialization library." https://github.com/processone/xmpp
+
+[fast_xml] ProcessOne, "processone/fast_xml: Fast Expat-based XML parser for Erlang." https://github.com/processone/fast_xml
+
+[yxml] N. Vernes, "yxml: A small, fast and correct XML parser." https://dev.yorhel.nl/yxml
+
+[mxml] M. Sweet, "Mini-XML: A small XML library." https://www.msweet.org/mxml/
+
+[libexpat] Expat Contributors, "Expat XML Parser." https://libexpat.github.io/
+
+[lwIPBMPort] lwIP Wiki, "Porting For Bare Metal." https://www.nongnu.org/lwip/2_0_x/group__lwip__opts__nosys.html
+
+[OSDev_lwIP] OSDev Wiki, "LwIP on bare metal — community guide." https://wiki.osdev.org/
+
+[OSDev_AML] OSDev Wiki, "AML (ACPI Machine Language)." https://wiki.osdev.org/AML
+
+[OSDev_SMM] OSDev Wiki, "System Management Mode." https://wiki.osdev.org/System_Management_Mode
+
+[OSDev_DSDT] OSDev Wiki, "DSDT (Differentiated System Description Table)." https://wiki.osdev.org/DSDT
+
+[OSDev_ACPI] OSDev Wiki, "ACPI." https://wiki.osdev.org/ACPI
+
+[OSDev_APIC] OSDev Wiki, "APIC." https://wiki.osdev.org/APIC
+
+[OSDev_GPT] OSDev Wiki, "GPT (GUID Partition Table)." https://wiki.osdev.org/GPT
+
+[OSDev_GDT] OSDev Wiki, "Global Descriptor Table." https://wiki.osdev.org/Global_Descriptor_Table
+
+[OSDev_GDT_Tutorial] OSDev Wiki, "GDT Tutorial." https://wiki.osdev.org/GDT_Tutorial
+
+[OSDev_IDT] OSDev Wiki, "Interrupt Descriptor Table." https://wiki.osdev.org/Interrupt_Descriptor_Table
+
+[OSDev_ISR] OSDev Wiki, "Interrupt Service Routines." https://wiki.osdev.org/Interrupt_Service_Routines
+
+[OSDev_PIC] OSDev Wiki, "8259 PIC / Intel 8259A." https://pdos.csail.mit.edu/6.828/2017/readings/hardware/8259A.pdf
+
+[OSDev_ATA] OSDev Wiki, "ATA PIO Mode." https://wiki.osdev.org/ATA_PIO_Mode
+
+[OSDev_AHCI] OSDev Wiki, "AHCI." https://wiki.osdev.org/AHCI
+
+[OSDev_MMIO] OSDev Wiki, "Memory Mapped I/O and volatile." https://wiki.osdev.org/
+
+[OSDev_MemMap] OSDev Wiki, "Memory Map (x86)." https://wiki.osdev.org/
+
+[OSDev_MemAlloc] OSDev Wiki, "Memory Allocation." https://wiki.osdev.org/
+
+[OSDev_BrendanMMGuide] OSDev Wiki / Brendan, "Brendan's Memory Management Guide." https://wiki.osdev.org/Brendan%27s_Memory_Management_Guide
+
+[OSDev_RecursivePaging] OSDev Wiki, "Recursive Paging." https://wiki.osdev.org/
+
+[OSDev_TLB] OSDev Wiki, "TLB Shootdown." https://wiki.osdev.org/
+
+[OSDev_BareBones] OSDev Wiki, "Bare Bones (GCC + GRUB multiboot)." https://wiki.osdev.org/Babystep1
+
+[OSDev_MeatySkel] OSDev Wiki, "Meaty Skeleton." https://wiki.osdev.org/Meaty_Skeleton
+
+[OSDev_LimineBareBones] OSDev Wiki, "Limine Bare Bones." https://wiki.osdev.org/Limine_Bare_Bones
+
+[OSDev_HigherHalf] OSDev Wiki, "Higher Half Kernel." https://wiki.osdev.org/Higher_Half_Kernel
+
+[OSDev_GOP] OSDev Wiki / d-sonuga, "Graphics Output Protocol." https://wiki.osdev.org/GOP
+
+[OSDev_GDB] OSDev Wiki, "QEMU GDB stub for kernel debugging." https://wiki.osdev.org/
+
+[OSDev_CC] OSDev Wiki, "Cross Compiler." https://wiki.osdev.org/
+
+[OSDev_8254x] OSDev Wiki, "Intel 8254x." https://wiki.osdev.org/Intel_8254x
+
+[GNUldScript] GNU Project, "LD Linker Scripts: Basic Script Concepts." https://sourceware.org/binutils/docs/ld/Basic-Script-Concepts.html
+
+[PC16550D] Texas Instruments, "PC16550D Universal Asynchronous Receiver/Transmitter with FIFOs Datasheet." Texas Instruments, 1995.
+
+[ATA8ACS] T13 Technical Committee, "AT Attachment 8 — ATA/ATAPI Command Set (ATA8-ACS)," 2007.
+
+[AHCI13] Intel Corporation, "Serial ATA AHCI 1.3.1 Specification," 2011. https://www.intel.com/
+
+[WikipediaLBA] Wikipedia, "Logical Block Addressing." https://en.wikipedia.org/wiki/Logical_block_addressing
+
+[WikipediaTSC] Wikipedia, "Time Stamp Counter." https://en.wikipedia.org/wiki/Time_Stamp_Counter
+
+[QEMUDocs] QEMU Project, "QEMU System Emulation Documentation." https://www.qemu.org/docs/master/system/introduction.html
+
+[QEMUNet] QEMU Project, "QEMU Network Device Emulation." https://www.qemu.org/docs/master/system/devices/net.html
+
+[QEMUEmul] QEMU Project, "QEMU Emulation." https://www.qemu.org/docs/master/about/emulation.html
+
+[IntelE1000RC82540] Intel Corporation, "RC82540EM Gigabit Ethernet Controller Product Brief." https://www.mouser.com/catalog/specsheets/Intel-RC82540EM-7623794.pdf
+
+[IntelGbEPCI] Intel Corporation, "PCI/PCI-X Family of Gigabit Ethernet Controllers Software Developer's Manual." https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf
+
+[Paging_Zolutal] Zolutal, "Understanding x86-64 Paging," 2023. https://blog.zolutal.io/understanding-paging/
+
+[Paging_UW] University of Washington CSE 451, "x86-64 Paging Lecture Notes," 2024. https://courses.cs.washington.edu/courses/cse451/24sp/lectures/notes/x86-paging.html
+
+[Paging_Graz] TU Graz, "Paging on Intel x86-64 Tutorial." https://www.isec.tugraz.at/teaching/materials/os/tutorials/paging-on-intel-x86-64/
+
+[MemTutor] T. Voipio, "Memory Management Tutorial," HUT, 2001. https://web.archive.org/web/20081206102136/http://www.cs.hut.fi/~tvoipio/memtutor.html
+
+[Slab] J. Bonwick, "The Slab Allocator: An Object-Caching Kernel Memory Allocator," USENIX 1994.
+
+[LittleOSBook] E. Helin, A. Renberg, "The Little Book About OS Development," 2015. https://littleosbook.github.io/book.pdf
+
+[OSDev_Main] OSDev Wiki, "Expanded Main Page." https://wiki.osdev.org/Expanded_Main_Page
+
+[XenProject] Xen Project, "Xen Hypervisor." https://xenproject.org/
+
+[OSDev_MiniOSDev] Xen Project, "Mini-OS Developer Notes." https://wiki.xenproject.org/wiki/Mini-OS-DevNotes
+
+[IntelMPK_Scribd] Various, "Software Abstraction for Intel Memory Protection Keys," 2019. https://www.scribd.com/document/963166363/Software-Abstraction-for-Intel-Memory-Protection-Keys
+
+[IntelMPK_IEEE] Various, "Intel MPK Survey," IEEE 2023. https://ieeexplore.ieee.org/ielaam/8013/10137354/10077209-aam.pdf
+
+[KernelMPK] Linux Kernel Documentation, "Memory Protection Keys." https://docs.kernel.org/core-api/protection-keys.html
+
+[RS232] Wikipedia, "RS-232 / DE-9 Connector." https://en.wikipedia.org/wiki/RS-232
+
+[OSDev_Serial] OSDev Wiki, "Serial Ports." https://wiki.osdev.org/Serial_Port
+
+[OSDev_UART] OSDev Wiki, "UART." https://wiki.osdev.org/UART
+
+[OSDev_PCI] OSDev Wiki, "PCI." https://wiki.osdev.org/PCI
+
+[OSDev_PF] OSDev Wiki, "I Can't Get Interrupts Working — Problems with IDTs." https://wiki.osdev.org/I_Can%27t_Get_Interrupts_Working
+
+[OSDev_InterruptsTut] OSDev Wiki, "Interrupts Tutorial." https://wiki.osdev.org/Interrupts_Tutorial
+
+[OSDev_PageTables] OSDev Wiki, "Page Tables." https://wiki.osdev.org/Page_Tables
+
+[OSDev_Paging] OSDev Wiki, "Paging." https://wiki.osdev.org/Paging
+
+[OSDev_IdentityPaging] OSDev Wiki, "Identity Paging." https://wiki.osdev.org/Identity_Paging
+
+[OSDev_PageFrameAlloc] OSDev Wiki, "Page Frame Allocation." https://wiki.osdev.org/Page_Frame_Allocation
+
+[OSDev_WritingPageFrameAlloc] OSDev Wiki, "Writing A Page Frame Allocator." https://wiki.osdev.org/Writing_A_Page_Frame_Allocator
+
+[OSDev_SettingUpPaging] OSDev Wiki, "Setting Up Paging." https://wiki.osdev.org/Setting_Up_Paging
+
+[OSDev_MemMgmt] OSDev Wiki, "Memory Management." https://wiki.osdev.org/Memory_management
+
+[OSDev_ProgramMemAllocTypes] OSDev Wiki, "Program Memory Allocation Types." https://wiki.osdev.org/Program_Memory_Allocation_Types
+
+[OSDev_Heap] OSDev Wiki, "Heap." https://wiki.osdev.org/Heap
+
+[OSDev_HeapImpl] OSDev Wiki, "Heap Implementations (Pancakes series)." https://wiki.osdev.org/Writing_a_memory_manager
+
+[OSDev_SimpleHeap] OSDev Wiki, "User:Pancakes/SimpleHeapImplementation." https://wiki.osdev.org/User:Pancakes/SimpleHeapImplementation
+
+[OSDev_LinkedListHeap] OSDev Wiki, "User:Mrvn/LinkedListBucketHeapImplementation." https://wiki.osdev.org/User:Mrvn/LinkedListBucketHeapImplementation
+
+[OSDev_BitmapHeap] OSDev Wiki, "User:Pancakes/BitmapHeapImplementation." https://wiki.osdev.org/User:Pancakes/BitmapHeapImplementation
+
+[OSDev_GarbageCollection] OSDev Wiki, "Garbage Collection." https://wiki.osdev.org/Garbage_collection
+
+[OSDev_MMU] OSDev Wiki, "Memory Management Unit." https://wiki.osdev.org/Memory_Management_Unit
+
+[OSDev_Segmentation] OSDev Wiki, "Segmentation." https://wiki.osdev.org/Segmentation
+
+[OSDev_InlineAsm] OSDev Wiki, "Inline Assembly." https://wiki.osdev.org/Inline_Assembly
+
+[OSDev_UEFI] OSDev Wiki, "UEFI." https://wiki.osdev.org/UEFI
+
+[OSDev_OVMF] OSDev Wiki, "OVMF (Open Virtual Machine Firmware)." https://wiki.osdev.org/OVMF
+
+[OSDev_GNU_EFI] OSDev Wiki, "GNU-EFI." https://wiki.osdev.org/GNU-EFI
+
+[OSDev_Bootloader] OSDev Wiki, "Bootloader." https://wiki.osdev.org/Bootloader
+
+[OSDev_A20] OSDev Wiki, "A20 Line." https://wiki.osdev.org/A20_Line
+
+[OSDev_CPUID] OSDev Wiki, "CPUID." https://wiki.osdev.org/CPUID
+
+[OSDev_BeginnerMistakes] OSDev Wiki, "Beginner Mistakes." https://wiki.osdev.org/Beginner_Mistakes
+
+[OSDev_GoingFurther] OSDev Wiki, "Going Further on x86." https://wiki.osdev.org/Going_Further_on_x86
+
+[OSDev_HigherHalfBB] OSDev Wiki, "Higher Half x86 Bare Bones." https://wiki.osdev.org/Higher_Half_x86_Bare_Bones
+
+[OSDev_DetectMem] OSDev Wiki, "Detecting Memory (x86)." https://wiki.osdev.org/Detecting_Memory_(x86)
+
+[OSDev_DebugUEFI] OSDev Wiki, "Debugging UEFI Applications with GDB." https://wiki.osdev.org/Debugging_UEFI_applications_with_GDB
+
+[OSDev_8254x] OSDev Wiki, "Intel 8254x." https://wiki.osdev.org/Intel_8254x
+
+[ContainerSolUnikernels1] Container Solutions, "All About Unikernels Part 1: What They Are." https://blog.container-solutions.com/all-about-unikernels-part-1-what-they-are
+
+[ContainerSolUnikernels2] Container Solutions, "All About Unikernels Part 2: MirageOS and Rumprun." https://blog.container-solutions.com/all-about-unikernels-part-2-mirageos-and-rumprun
+
+[LPI_Xen_Unikernels] Linux Professional Institute, "Xen Virtualization and Cloud Computing 05: Xen Project Unikernels and Future," 2020. https://www.lpi.org/blog/2020/10/29/xen-virtualization-and-cloud-computing-05-xen-project-unikernels-and-future/
+
+[NXP_lwIP] NXP, "Developing LwIP Application with Sequential API," MCUXpresso SDK Knowledge Base, 2021. https://community.nxp.com/t5/MCUXpresso-SDK-Knowledge-Base/Developing-LwIP-Application-with-Sequential-API/ta-p/1098996
+
+[Infradead_MPK] M. Chehab, "Memory Protection Keys (rst conversion)." https://www.infradead.org/~mchehab/rst_conversion/core-api/protection-keys.html
+
+[ClickOS_GH] Sysml, "ClickOS: High-Performance Virtualized Software Middle Boxes." https://github.com/sysml/clickos
+
+[UEFISpecs] UEFI Forum, "UEFI Specifications." https://uefi.org/specifications
+
+[WikipediaSlab] Wikipedia, "Slab Allocation." https://en.wikipedia.org/wiki/Slab_allocation
 
 ---
 
