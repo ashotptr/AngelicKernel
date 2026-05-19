@@ -23,7 +23,7 @@ Unikernels invert this trade-off. Rather than running an application atop a gene
 
 The drawback is that the entire system shares one virtual address space. In a conventional OS, a vulnerable network driver runs in kernel space but the XMPP application runs in user space; a driver buffer overflow cannot directly corrupt application data because the MMU enforces a kernel/user boundary. In a unikernel, driver and application coexist at the same privilege level with no hardware boundary between them. A bug in the e1000 receive path can overwrite the XMPP session table, authentication credentials, or message buffers.
 
-Intel Memory Protection Keys (MPK), available on every x86-64 CPU since Skylake (2015), offer a hardware mechanism to enforce intra-kernel isolation between components at a cost of two instructions per boundary crossing. AngelicKernel uses MPK to partition its single address space into two protection domains: the XMPP stack (Key 0, always accessible) and the e1000 driver (Key 1, locked by default). Any attempt by XMPP code to dereference a pointer into driver memory raises a hardware page fault before any data is read or written.
+Intel Memory Protection Keys (MPK), available on x86-64 CPU, offer a hardware mechanism to enforce intra-kernel isolation between components at a cost of two instructions per boundary crossing. AngelicKernel uses MPK to partition its single address space into two protection domains: the XMPP stack (Key 0, always accessible) and the e1000 driver (Key 1, locked by default). Any attempt by XMPP code to dereference a pointer into driver memory raises a hardware page fault before any data is read or written.
 
 ### 1.2 Research Questions
 
