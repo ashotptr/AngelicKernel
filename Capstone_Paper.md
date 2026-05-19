@@ -1,8 +1,7 @@
 # AngelicKernel: A Security-Performance Pareto Analysis of MPK-Isolated Driver Domains in a Bare-Metal XMPP Unikernel
 
-**Author:** [Name]  
-**Institution:** [University / Program]  
-**Submitted:** [Date]
+**Author:** [Ashot]  
+**Institution:** [AUA / Computer Science]
 
 ---
 
