@@ -19,7 +19,7 @@ We present AngelicKernel, a bare-metal XMPP server unikernel that uses Intel Mem
 
 Modern server software runs on general-purpose operating systems that trade raw performance for programmer convenience. The OS provides process isolation, virtual memory, a scheduler, a filesystem, a network stack, and hundreds of system calls — most of which a single-purpose server like an XMPP messaging daemon never uses.
 
-Unikernels invert this trade-off. Rather than running an application atop a general OS, a unikernel compiles the application and only the OS components it needs into a single executable image. The result boots in milliseconds and occupies megabytes of RAM. A network adversary scanning a UEFI unikernel XMPP server on port 5222 sees an XMPP server; there is no /proc, no shell, no dynamic linker, no unused kernel module.
+Unikernels invert this trade-off. Rather than running an application atop a general OS, a unikernel compiles the application and only the OS components it needs into a single executable image. The result boots in milliseconds and occupies megabytes of RAM. There is no /proc, no shell, no dynamic linker, no unused kernel module.
 
 The drawback is that the entire system shares one virtual address space. In a conventional OS, a vulnerable network driver runs in kernel space but the XMPP application runs in user space; a driver buffer overflow cannot directly corrupt application data because the MMU enforces a kernel/user boundary. In a unikernel, driver and application coexist at the same privilege level with no hardware boundary between them. A bug in the e1000 receive path can overwrite the XMPP session table, authentication credentials, or message buffers.
 
