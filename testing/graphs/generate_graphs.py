@@ -38,8 +38,16 @@ plt.rcParams.update({
     "savefig.dpi": 200,
 })
 
+
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
+
+
+def safe_float(val, fallback=float("nan")):
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return fallback
 
 
 def load_lines(path: Path, cast=int) -> list:
@@ -83,6 +91,7 @@ def save(fig, path: Path):
     plt.close(fig)
 
     print(f"✓ {path}")
+
 
 DEMO_MPK_CYCLES = [
     6, 7, 6, 8, 6, 7, 7, 6, 8, 7, 6, 7, 6, 7, 8,
@@ -183,6 +192,7 @@ DEMO_COMPLIANCE_JSON = {
     ]
 }
 
+
 def write_demo_data(data_dir: Path):
     (data_dir / "mpk_cycles.txt").write_text("\n".join(str(v) for v in DEMO_MPK_CYCLES) + "\n")
     (data_dir / "boot_times.csv").write_text(DEMO_BOOT_CSV)
@@ -192,6 +202,7 @@ def write_demo_data(data_dir: Path):
     (data_dir / "compliance.json").write_text(json.dumps(DEMO_COMPLIANCE_JSON, indent=2))
 
     print(f"demo data written to {data_dir}/")
+
 
 def fig_mpk_cycles(cycles: list[int], out: Path):
     if not cycles:
@@ -232,14 +243,18 @@ def fig_mpk_cycles(cycles: list[int], out: Path):
     save(fig, out / "fig1_mpk_cycles.pdf")
     save(fig, out / "fig1_mpk_cycles.png")
 
+
 def fig_boot_time(rows: list[dict], out: Path):
     if not rows:
         print("⚠ no boot time data, skipping figure 2")
 
         return
 
-    tcp = [float(r["tcp_ready_ms"]) for r in rows if r.get("tcp_ready_ms")]
-    xmpp = [float(r["xmpp_ready_ms"]) for r in rows if r.get("xmpp_ready_ms")]
+    tcp = [safe_float(r["tcp_ready_ms"]) for r in rows if r.get("tcp_ready_ms")]
+    xmpp = [safe_float(r["xmpp_ready_ms"]) for r in rows if r.get("xmpp_ready_ms")]
+
+    tcp = [v for v in tcp if not np.isnan(v)]
+    xmpp = [v for v in xmpp if not np.isnan(v)]
 
     if not xmpp:
         print("⚠ no valid boot time rows, skipping figure 2")
@@ -255,7 +270,7 @@ def fig_boot_time(rows: list[dict], out: Path):
 
     ax1.axhline(500, color=COLORS["target"], linestyle="--", linewidth=1.5, label="target: 500 ms")
 
-    ax1.set_xlabel("run #"); 
+    ax1.set_xlabel("run #")
     ax1.set_ylabel("time from t₀ (ms)")
     ax1.set_title("boot time per run")
 
@@ -263,7 +278,7 @@ def fig_boot_time(rows: list[dict], out: Path):
 
     categories = ["tcp ready", "xmpp ready"]
     data = [tcp[:len(runs)], xmpp]
-    bp = ax2.boxplot(data, labels=categories, patch_artist=True, medianprops=dict(color="white", linewidth=2))
+    bp = ax2.boxplot(data, tick_labels=categories, patch_artist=True, medianprops=dict(color="white", linewidth=2))
     bp["boxes"][0].set_facecolor(COLORS["angelic"])
     bp["boxes"][1].set_facecolor("#E91E63")
 
@@ -279,6 +294,7 @@ def fig_boot_time(rows: list[dict], out: Path):
     save(fig, out / "fig2_boot_time.pdf")
     save(fig, out / "fig2_boot_time.png")
 
+
 def fig_latency(rows: list[dict], out: Path):
     if not rows:
         print("⚠ no latency data, skipping figure 3")
@@ -286,17 +302,12 @@ def fig_latency(rows: list[dict], out: Path):
         return
 
     servers = [r["server"] for r in rows]
-    p50 = [float(r["p50_ms"]) for r in rows]
-    p95 = [float(r["p95_ms"]) for r in rows]
-    p99 = [float(r["p99_ms"]) for r in rows]
+    p50 = [safe_float(r["p50_ms"]) for r in rows]
+    p95 = [safe_float(r["p95_ms"]) for r in rows]
+    p99 = [safe_float(r["p99_ms"]) for r in rows]
 
     x = np.arange(len(servers))
     width = 0.25
-
-    fig, ax = plt.subplots(figsize=(9, 5))
-    b1 = ax.bar(x - width, p50, width, label="p50", color=[COLORS.get(s.lower().split()[0], "#607D8B") for s in servers], alpha=0.9)
-    b2 = ax.bar(x, p95, width, label="p95", color=[COLORS.get(s.lower().split()[0], "#607D8B") for s in servers], alpha=0.6)
-    b3 = ax.bar(x + width, p99, width, label="p99", color=[COLORS.get(s.lower().split()[0], "#607D8B") for s in servers], alpha=0.4)
 
     server_colors = {
         "AngelicKernel": COLORS["angelic"],
@@ -304,22 +315,23 @@ def fig_latency(rows: list[dict], out: Path):
         "openfire": COLORS["openfire"],
     }
 
-    for i, (bar_group, srv) in enumerate(zip([b1, b2, b3], ["", "", ""])):
-        pass
-
-    ax.cla()
+    fig, ax = plt.subplots(figsize=(9, 5))
 
     for i, (srv, s50, s95, s99) in enumerate(zip(servers, p50, p95, p99)):
         c = server_colors.get(srv, "#607D8B")
-        ax.bar(i - width, s50, width, color=c, alpha=0.95, label=f"p50 ({srv})" if i == 0 else "")
+        ax.bar(i - width, s50, width, color=c, alpha=0.95)
         ax.bar(i, s95, width, color=c, alpha=0.65)
         ax.bar(i + width, s99, width, color=c, alpha=0.40)
 
-        ax.text(i - width, s50 + 0.05, f"{s50:.2f}", ha="center", fontsize=8)
-        ax.text(i, s95 + 0.05, f"{s95:.2f}", ha="center", fontsize=8)
-        ax.text(i + width, s99 + 0.05, f"{s99:.2f}", ha="center", fontsize=8)
+        if not np.isnan(s50):
+            ax.text(i - width, s50 + 0.05, f"{s50:.2f}", ha="center", fontsize=8)
+        if not np.isnan(s95):
+            ax.text(i, s95 + 0.05, f"{s95:.2f}", ha="center", fontsize=8)
+        if not np.isnan(s99):
+            ax.text(i + width, s99 + 0.05, f"{s99:.2f}", ha="center", fontsize=8)
 
-    ax.set_xticks(x); ax.set_xticklabels(servers)
+    ax.set_xticks(x)
+    ax.set_xticklabels(servers)
     ax.set_ylabel("latency (ms)")
     ax.set_title("figure 3 — message latency: p50 / p95 / p99")
 
@@ -341,6 +353,7 @@ def fig_latency(rows: list[dict], out: Path):
     save(fig, out / "fig3_latency.pdf")
     save(fig, out / "fig3_latency.png")
 
+
 def fig_throughput(rows: list[dict], out: Path):
     if not rows:
         print("⚠ no throughput data, skipping figure 4")
@@ -357,10 +370,14 @@ def fig_throughput(rows: list[dict], out: Path):
 
     for r in rows:
         srv = r["server"]
-        users = int(r["users"])
-        mps = float(r["msg_per_sec"])
+        users = safe_float(r["users"])
+        mps = safe_float(r["msg_per_sec"])
+
+        if np.isnan(users) or np.isnan(mps):
+            continue
+
         grouped.setdefault(srv, {"users": [], "mps": []})
-        grouped[srv]["users"].append(users)
+        grouped[srv]["users"].append(int(users))
         grouped[srv]["mps"].append(mps)
 
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -373,21 +390,18 @@ def fig_throughput(rows: list[dict], out: Path):
         ax.plot(us, mp, "o-", color=c, label=srv, linewidth=2.5, markersize=8)
 
     ax.set_xlabel("concurrent users")
-
     ax.set_ylabel("messages / second")
-    
     ax.set_title("figure 4 — groupchat throughput under load (tsung)")
-    
     ax.legend(fontsize=10)
-    
     ax.grid(axis="y", alpha=0.3)
 
     save(fig, out / "fig4_throughput.pdf")
     save(fig, out / "fig4_throughput.png")
 
+
 def fig_memory(rows: list[dict], out: Path):
     if not rows:
-        print("  ⚠ no memory data, skipping figure 5")
+        print("⚠ no memory data, skipping figure 5")
 
         return
 
@@ -398,8 +412,8 @@ def fig_memory(rows: list[dict], out: Path):
     }
 
     servers = [r["server"] for r in rows]
-    idle_mb = [float(r["idle_mb"]) for r in rows]
-    load_mb = [float(r["load_mb"]) for r in rows]
+    idle_mb = [safe_float(r["idle_mb"]) for r in rows]
+    load_mb = [safe_float(r["load_mb"]) for r in rows]
     colors = [server_colors.get(s, "#607D8B") for s in servers]
 
     x = np.arange(len(servers))
@@ -410,15 +424,18 @@ def fig_memory(rows: list[dict], out: Path):
     b2 = ax.bar(x + width/2, load_mb, width, color=colors, alpha=0.55, label="peak load rss (mb)")
 
     for bar, val in zip(b1, idle_mb):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, f"{val:.1f}", ha="center", va="bottom", fontsize=9)
+        if not np.isnan(val):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                    f"{val:.1f}", ha="center", va="bottom", fontsize=9)
 
     for bar, val in zip(b2, load_mb):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, f"{val:.1f}", ha="center", va="bottom", fontsize=9)
+        if not np.isnan(val):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                    f"{val:.1f}", ha="center", va="bottom", fontsize=9)
 
-    ax.set_xticks(x); ax.set_xticklabels(servers)
-
+    ax.set_xticks(x)
+    ax.set_xticklabels(servers)
     ax.set_ylabel("resident set size (mb)")
-
     ax.set_title("figure 5, memory footprint comparison")
 
     patches = [
@@ -431,18 +448,20 @@ def fig_memory(rows: list[dict], out: Path):
     ]
     ax.legend(handles=patches + legend_extra, fontsize=9)
 
-    if len(idle_mb) > 1 and idle_mb[0] > 0:
-        ratio_p = idle_mb[1] / idle_mb[0]
-        ratio_o = idle_mb[2] / idle_mb[0] if len(idle_mb) > 2 else None
+    valid_idle = [v for v in idle_mb if not np.isnan(v)]
+    if len(valid_idle) > 1 and valid_idle[0] > 0:
+        ratio_p = valid_idle[1] / valid_idle[0]
+        ratio_o = valid_idle[2] / valid_idle[0] if len(valid_idle) > 2 else None
         note = f"AngelicKernel is {ratio_p:.0f}× smaller than prosody at idle"
 
         if ratio_o:
             note += f", {ratio_o:.0f}× smaller than openfire"
-        
+
         ax.annotate(note, xy=(0.5, -0.13), xycoords="axes fraction", ha="center", fontsize=9, color="#444")
 
     save(fig, out / "fig5_memory.pdf")
     save(fig, out / "fig5_memory.png")
+
 
 def fig_compliance(json_data: dict, out: Path):
     if not json_data or not json_data.get("results"):
@@ -511,7 +530,9 @@ def fig_compliance(json_data: dict, out: Path):
     ax.set_title("figure 6, protocol compliance by rfc/xep section")
 
     for bar, rate, total in zip(bars, pass_rates, totals):
-        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2, f"{rate:.0f}% ({int(rate * total / 100)}/{total})", va="center", fontsize=10)
+        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2,
+                f"{rate:.0f}% ({int(rate * total / 100)}/{total})",
+                va="center", fontsize=10)
 
     ax.axvline(100, color="#333", linewidth=0.8, linestyle="--")
 
@@ -519,10 +540,12 @@ def fig_compliance(json_data: dict, out: Path):
     total_all = json_data.get("total", 0)
     overall = total_pass / total_all * 100 if total_all else 0
 
-    ax.text(0.98, 0.02, f"overall: {total_pass}/{total_all} ({overall:.0f}%)", transform=ax.transAxes, ha="right", va="bottom", fontsize=10, fontweight="bold")
+    ax.text(0.98, 0.02, f"overall: {total_pass}/{total_all} ({overall:.0f}%)",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=10, fontweight="bold")
 
     save(fig, out / "fig6_compliance.pdf")
     save(fig, out / "fig6_compliance.png")
+
 
 def fig_dashboard(cycles, boot_rows, latency_rows, memory_rows, compliance_data, out: Path):
     fig = plt.figure(figsize=(14, 10))
@@ -540,34 +563,38 @@ def fig_dashboard(cycles, boot_rows, latency_rows, memory_rows, compliance_data,
         avg = sum(cycles) / len(cycles)
 
         ax_a.set_title(f"mpk overhead\n(avg {avg:.1f} cycles)", fontsize=10)
-        ax_a.set_xlabel("run #");
+        ax_a.set_xlabel("run #")
         ax_a.set_ylabel("cycles / wrpkru")
 
         status = "✓" if avg < 20 else "✗"
 
-        ax_a.text(0.05, 0.92, f"{status} target: <20 cyc", transform=ax_a.transAxes, fontsize=9, color=COLORS["pass"] if avg < 20 else COLORS["fail"])
+        ax_a.text(0.05, 0.92, f"{status} target: <20 cyc", transform=ax_a.transAxes, fontsize=9,
+                  color=COLORS["pass"] if avg < 20 else COLORS["fail"])
     else:
         ax_a.text(0.5, 0.5, "no data\n(run mpk_benchmark)", ha="center", transform=ax_a.transAxes, fontsize=10, color="#999")
 
         ax_a.set_title("mpk overhead", fontsize=10)
 
     ax_b = fig.add_subplot(grid[0, 1])
-    xmpp_ms = [float(r["xmpp_ready_ms"]) for r in boot_rows if r.get("xmpp_ready_ms")]
+    xmpp_ms = [safe_float(r["xmpp_ready_ms"]) for r in boot_rows if r.get("xmpp_ready_ms")]
+    xmpp_ms = [v for v in xmpp_ms if not np.isnan(v)]
 
     if xmpp_ms:
         ax_b.boxplot(xmpp_ms, patch_artist=True, boxprops=dict(facecolor=COLORS["angelic"]))
 
         ax_b.axhline(500, color=COLORS["target"], linestyle="--", linewidth=1.5)
-        
+
         avg = sum(xmpp_ms) / len(xmpp_ms)
 
         ax_b.set_title(f"boot time\n(avg {avg:.0f} ms)", fontsize=10)
         ax_b.set_ylabel("ms to xmpp-ready")
-        ax_b.set_xticks([1]); ax_b.set_xticklabels(["AngelicKernel"])
+        ax_b.set_xticks([1])
+        ax_b.set_xticklabels(["AngelicKernel"])
 
         status = "✓" if avg < 500 else "✗"
 
-        ax_b.text(0.05, 0.92, f"{status} target: <500 ms", transform=ax_b.transAxes, fontsize=9, color=COLORS["pass"] if avg < 500 else COLORS["fail"])
+        ax_b.text(0.05, 0.92, f"{status} target: <500 ms", transform=ax_b.transAxes, fontsize=9,
+                  color=COLORS["pass"] if avg < 500 else COLORS["fail"])
     else:
         ax_b.text(0.5, 0.5, "no data\n(run boot_time_measure.py)", ha="center", transform=ax_b.transAxes, fontsize=10, color="#999")
 
@@ -599,7 +626,7 @@ def fig_dashboard(cycles, boot_rows, latency_rows, memory_rows, compliance_data,
 
     if latency_rows:
         servers = [r["server"] for r in latency_rows]
-        p50 = [float(r["p50_ms"]) for r in latency_rows]
+        p50 = [safe_float(r["p50_ms"]) for r in latency_rows]
         colors = [{"AngelicKernel": COLORS["angelic"],
                    "prosody": COLORS["prosody"],
                    "openfire": COLORS["openfire"]}.get(s, "#607D8B")
@@ -614,28 +641,26 @@ def fig_dashboard(cycles, boot_rows, latency_rows, memory_rows, compliance_data,
         ax_d.set_title("message latency p50", fontsize=10)
 
         for i, (s, v) in enumerate(zip(servers, p50)):
-            ax_d.text(i, v + 0.02, f"{v:.2f}", ha="center", fontsize=9)
+            if not np.isnan(v):
+                ax_d.text(i, v + 0.02, f"{v:.2f}", ha="center", fontsize=9)
     else:
         ax_d.text(0.5, 0.5, "no data\n(run tsung)", ha="center", transform=ax_d.transAxes, fontsize=10, color="#999")
         ax_d.set_title("message latency", fontsize=10)
 
     ax_e = fig.add_subplot(grid[1, 1])
-    
-    if latency_rows:
-        pass
-    
-    ax_e.text(0.5, 0.5, "run tsung to\ncollect throughput data", ha="center", va="center", transform=ax_e.transAxes, fontsize=10, color="#999")
+    ax_e.text(0.5, 0.5, "run tsung to\ncollect throughput data", ha="center", va="center",
+              transform=ax_e.transAxes, fontsize=10, color="#999")
     ax_e.set_title("peak throughput", fontsize=10)
 
     ax_f = fig.add_subplot(grid[1, 2])
 
     if memory_rows:
         servers = [r["server"] for r in memory_rows]
-        idle = [float(r["idle_mb"]) for r in memory_rows]
+        idle = [safe_float(r["idle_mb"]) for r in memory_rows]
         colors = [{"AngelicKernel": COLORS["angelic"],
-                    "prosody": COLORS["prosody"],
-                    "openfire": COLORS["openfire"]}.get(s, "#607D8B")
-                   for s in servers]
+                   "prosody": COLORS["prosody"],
+                   "openfire": COLORS["openfire"]}.get(s, "#607D8B")
+                  for s in servers]
 
         ax_f.bar(servers, idle, color=colors, alpha=0.9)
 
@@ -644,7 +669,8 @@ def fig_dashboard(cycles, boot_rows, latency_rows, memory_rows, compliance_data,
         ax_f.set_title("memory footprint (idle)", fontsize=10)
 
         for i, (s, v) in enumerate(zip(servers, idle)):
-            ax_f.text(i, v + 0.5, f"{v:.1f}", ha="center", fontsize=9)
+            if not np.isnan(v):
+                ax_f.text(i, v + 0.5, f"{v:.1f}", ha="center", fontsize=9)
     else:
         ax_f.text(0.5, 0.5, "no data\n(run baselines)", ha="center", transform=ax_f.transAxes, fontsize=10, color="#999")
 
@@ -652,6 +678,7 @@ def fig_dashboard(cycles, boot_rows, latency_rows, memory_rows, compliance_data,
 
     save(fig, out / "fig7_dashboard.pdf")
     save(fig, out / "fig7_dashboard.png")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -698,7 +725,8 @@ def main():
     print("\nfiles produced:")
 
     for f in sorted(fig_dir.glob("fig*.png")):
-        print(f"{f.name}")
+        print(f"  {f.name}")
+
 
 if __name__ == "__main__":
     main()
