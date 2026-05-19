@@ -19,7 +19,7 @@ colorama_init()
 DOMAIN = "angelic.local"
 MUC_SVC = f"conference.{DOMAIN}"
 
-INTER_TEST_SLEEP = 2.0
+INTER_TEST_SLEEP = 3.0
 
 def ok(msg): 
     print(f"{Fore.GREEN}✓{Style.RESET_ALL} {msg}")
@@ -160,11 +160,23 @@ class TestClient(ClientXMPP):
 
         return True
 
+    # async def stop(self):
+    #     try:
+    #         self.disconnect()
+
+    #         await asyncio.sleep(2.0)
+    #     except Exception:
+    #         pass
     async def stop(self):
         try:
-            self.disconnect(wait=False)
+            disc_event = asyncio.Event()
+            self.add_event_handler("disconnected", lambda _: disc_event.set())
+            self.disconnect()
 
-            await asyncio.sleep(0.5)
+            try:
+                await asyncio.wait_for(disc_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
         except Exception:
             pass
 
@@ -306,7 +318,7 @@ async def test_muc_join_and_chat(host, port):
 
         alice.clear_received()
 
-        await alice_muc.join_muc_wait(room_jid, "alice", maxwait=8)
+        await alice_muc.join_muc_wait(room_jid, "alice", timeout=8)
 
         record("alice joins muc room (xep-0045 §7.2)", True)
 
@@ -316,7 +328,7 @@ async def test_muc_join_and_chat(host, port):
 
         bob.clear_received()
 
-        await bob_muc.join_muc_wait(room_jid, "bob", maxwait=8)
+        await bob_muc.join_muc_wait(room_jid, "bob", timeout=8)
 
         record("bob joins existing muc room (xep-0045 §7.2)", True)
 
@@ -369,7 +381,7 @@ async def test_muc_private_message(host, port):
         bob_muc = bob["xep_0045"]
         charlie_muc = charlie["xep_0045"]
 
-        await alice_muc.join_muc_wait(room_jid, "alice", maxwait=8)
+        await alice_muc.join_muc_wait(room_jid, "alice", timeout=8)
 
         await asyncio.sleep(0.3)
 
@@ -377,9 +389,9 @@ async def test_muc_private_message(host, port):
 
         await asyncio.sleep(0.3)
 
-        await bob_muc.join_muc_wait(room_jid, "bob", maxwait=8)
+        await bob_muc.join_muc_wait(room_jid, "bob", timeout=8)
 
-        await charlie_muc.join_muc_wait(room_jid, "charlie", maxwait=8)
+        await charlie_muc.join_muc_wait(room_jid, "charlie", timeout=8)
 
         await asyncio.sleep(0.5)
 
@@ -435,14 +447,14 @@ async def test_disco(host, port):
 
     try:
         if not await c.start():
-            warn("session failed");
-
+            warn("session failed")
             return
 
         disco = c["xep_0030"]
 
         try:
-            info = await disco.get_info(DOMAIN)
+            iq = await disco.get_info(DOMAIN)
+            info = iq["disco_info"]
             has_id = len(info["identities"]) > 0
             has_muc = any("muc" in str(f) for f in info["features"])
 
@@ -450,13 +462,17 @@ async def test_disco(host, port):
             record("server advertises muc feature", has_muc, str(list(info["features"])[:5]))
         except Exception as e:
             record("disco#info on server", False, str(e))
+
         try:
-            muc_info = await disco.get_info(MUC_SVC)
+            iq = await disco.get_info(MUC_SVC)
+            muc_info = iq["disco_info"]
             record("disco#info on muc service (xep-0045 §6.2)", len(muc_info["identities"]) > 0, str(list(muc_info["identities"])[:2]))
         except Exception as e:
             record("disco#info on muc service", False, str(e))
+
         try:
-            items = await disco.get_items(DOMAIN)
+            iq = await disco.get_items(DOMAIN)
+            items = iq["disco_items"]
             has_muc_item = any("conference" in str(item) for item in items["items"])
             record("disco#items lists muc service (xep-0030 §3.2)", has_muc_item, str(list(items["items"])[:3]))
         except Exception as e:
@@ -543,6 +559,8 @@ ALL_ASYNC_TESTS = [
 ]
 
 async def run_all(host, port, test_filter):
+    MUC_TESTS = {test_muc_join_and_chat, test_muc_private_message}
+
     for test_fn in ALL_ASYNC_TESTS:
         if test_filter and test_filter.lower() not in test_fn.__name__.lower():
             continue
@@ -552,7 +570,9 @@ async def run_all(host, port, test_filter):
             fail(f"unhandled exception in {test_fn.__name__}: {e}")
             traceback.print_exc()
 
-        await asyncio.sleep(INTER_TEST_SLEEP)
+        sleep = INTER_TEST_SLEEP * 2 if test_fn in MUC_TESTS else INTER_TEST_SLEEP
+
+        await asyncio.sleep(sleep)
 
 
 def main():

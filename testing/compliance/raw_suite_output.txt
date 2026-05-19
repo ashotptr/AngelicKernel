@@ -1,169 +1,93 @@
 
-XMPP Compliance Test Harness (fixed)
-Target:           angelic.local:5222
-Recv timeout:     8.0s
-Inter-test sleep: 1.0s
+xmpp compliance test harness
+target: angelic.local:5222
+recv timeout: 8.0s
+inter-test sleep: 1.0s
 
+ rfc 6120 §4.2 — stream opening
+✓ stream:stream present in response
+✓ stream:features present
+✓ from='angelic.local' set (rfc 6120 §4.7.1)
+✓ version='1.0' set (rfc 6120 §4.7.5)
+✓ id= attribute present (rfc 6120 §4.7.3)
+✓ STARTTLS offered in features (rfc 6120 §5)
+✓ STARTTLS marked required (rfc 6120 §5.3.2)
+ rfc 6120 §4.9.3.9 — host-unknown on wrong 'to'
+✓ stream error sent for wrong 'to' (RFC 6120 §4.9.3.9)
+✓ <host-unknown/> condition present
+✓ </stream:stream> sent before close
+ rfc 6120 §4.4 — graceful stream close
+✓ server echoes </stream:stream> on close (RFC 6120 §4.4)
+ rfc 6120 §6 — sasl authentication
+✓ bad credentials → <failure><not-authorized/> (rfc 6120 §6.5)
+✓ good credentials → <success/> (rfc 6120 §6.4.6)
+ rfc 6120 §6.5.7 — invalid sasl mechanism
+✓ invalid mechanism → <invalid-mechanism/> (rfc 6120 §6.5.7)
+ rfc 6120 §13.9.1 — bad base64 in sasl payload
+✓ bad base64 → <incorrect-encoding/> (rfc 6120 §13.9.1)
+ rfc 6120 §7 — resource binding
+✓ post-auth features contain <bind> (rfc 6120 §7.2)
+✓ Bind result contains full jid (rfc 6120 §7.7)
+✓ bound jid domain matches server (rfc 6120 §7.7)
+ rfc 6120 §8.2.3 — unknown iq namespace → error
+✓ unknown iq get → iq error response (rfc 6120 §8.2.3)
+✓ error contains <service-unavailable/> or <feature-not-implemented/>
+ rfc 6120 §4.9.3.10 — invalid-namespace
+✓ wrong xmlns → stream error (rfc 6120 §4.9.3.10)
+ rfc 6121 §2.1 — roster management
+✓ roster get → iq result (rfc 6121 §2.1.4)
+✓ roster result contains <query xmlns='jabber:iq:roster'>
+✓ roster get with ver= → result contains ver= (rfc 6121 §2.6)
+ rfc 6121 §2.1.5/6 — roster set + push
+✓ roster set → iq result (rfc 6121 §2.1.5)
+✓ roster get after set returns stored item
+ rfc 6121 §4.2 — initial presence
+✓ initial presence elicits at least one <presence> stanza
+ rfc 6121 §4.6 — presence content forwarding
+✓ <show>away</show> forwarded verbatim (rfc 6121 §4.6)
+✓ <status>in a meeting</status> forwarded verbatim
+✓ <priority>5</priority> forwarded verbatim
+ rfc 6121 §5 — message delivery
+✓ direct message delivered to recipient (rfc 6121 §5)
+✓ message from= is sender's jid (rfc 6120 §8.1.2)
+ xep-0160 — offline message storage + delivery
+✓ offline message delivered after receiver comes online (xep-0160)
+✓ delivery includes xep-0203 <delay/> element
+ rfc 6121 §3 — presence subscription
+✓ subscribe forwarded to recipient (rfc 6121 §3.1.3)
+✓ subscribed forwarded back to requester (rfc 6121 §3.1.3)
+✓ after subscription, roster shows subscription='to' (rfc 6121 §3.1)
+ xep-0045 §7.2 / §10.1 — muc room create + join
+✓ join room → self-presence received (xep-0045 §7.2.2)
+✓ self-presence contains status code 110 (xep-0045 §7.2.2)
+✓ new room creator gets status code 201 (xep-0045 §10.1)
+✓ creator gets affiliation='owner' (xep-0045 §10.1)
+✓ room subject sent after join (xep-0045 §7.2.15)
+✓ config submit → iq result (xep-0045 §10.1.2)
+✓ leaving room → unavailable presence received (xep-0045 §7.14)
+ xep-0045 §7.2.8 — nick conflict
+✓ nick conflict → <presence type='error'> (xep-0045 §7.2.8)
+✓ error contains <conflict/> (xep-0045 §7.2.8)
+ xep-0045 §7.9 — groupchat message broadcast
+✓ groupchat message reflected to sender (xep-0045 §7.9)
+✓ groupchat message delivered to other occupant (xep-0045 §7.9)
+✓ message from= is room/nick (xep-0045 §7.9)
+ xep-0045 §7.13 — private muc message
+✓ private message delivered to addressed occupant (xep-0045 §7.13)
+✓ private message not delivered to other occupants (xep-0045 §7.13)
+ xep-0045 §7.6 — nick change
+✓ nick change → unavailable from old nick (xep-0045 §7.6)
+✓ nick change → status code 303 (xep-0045 §7.6)
+✓ nick change → presence from new nick sent
+ xep-0045 §7.16 — in-room presence update
+✓ in-room presence update relayed to other occupants (xep-0045 §7.16)
+ xep-0030 — service discovery (disco#info)
+✓ disco#info → IQ result (XEP-0030 §3)
+✓ disco#info → <identity> present
+✓ disco#info → muc feature advertised
+✓ disco#items on server returns muc service (xep-0030 §3.2)
+ xep-0199 — xmpp ping
+✓ ping → iq result (xep-0199)
+results: 60 passed / 0 failed / 60 total
 
-════════════════════════════════════════════════════════════
- RFC 6120 §4.2 — Stream Opening
-════════════════════════════════════════════════════════════
-  ✓ stream:stream present in response
-  ✓ stream:features present
-  ✓ from='angelic.local' set (RFC 6120 §4.7.1)
-  ✓ version='1.0' set (RFC 6120 §4.7.5)
-  ✓ id= attribute present (RFC 6120 §4.7.3)
-  ✓ STARTTLS offered in features (RFC 6120 §5)
-  ✓ STARTTLS marked required (RFC 6120 §5.3.2)
-
-════════════════════════════════════════════════════════════
- RFC 6120 §4.9.3.9 — host-unknown on wrong 'to'
-════════════════════════════════════════════════════════════
-  ✓ Stream error sent for wrong 'to' (RFC 6120 §4.9.3.9)
-  ✓ <host-unknown/> condition present
-  ✓ </stream:stream> sent before close
-
-════════════════════════════════════════════════════════════
- RFC 6120 §4.4 — Graceful stream close
-════════════════════════════════════════════════════════════
-  ✓ Server echoes </stream:stream> on close (RFC 6120 §4.4)
-
-════════════════════════════════════════════════════════════
- RFC 6120 §6 — SASL Authentication
-════════════════════════════════════════════════════════════
-  ✓ Bad credentials → <failure><not-authorized/> (RFC 6120 §6.5)
-  ✓ Good credentials → <success/> (RFC 6120 §6.4.6)
-
-════════════════════════════════════════════════════════════
- RFC 6120 §6.5.7 — Invalid SASL mechanism
-════════════════════════════════════════════════════════════
-  ✓ Invalid mechanism → <invalid-mechanism/> (RFC 6120 §6.5.7)
-
-════════════════════════════════════════════════════════════
- RFC 6120 §13.9.1 — Bad Base64 in SASL payload
-════════════════════════════════════════════════════════════
-  ✓ Bad Base64 → <incorrect-encoding/> (RFC 6120 §13.9.1)
-
-════════════════════════════════════════════════════════════
- RFC 6120 §7 — Resource Binding
-════════════════════════════════════════════════════════════
-  ✓ Post-auth features contain <bind> (RFC 6120 §7.2)
-  ✓ Bind result contains full JID (RFC 6120 §7.7)
-  ✓ Bound JID domain matches server (RFC 6120 §7.7)
-
-════════════════════════════════════════════════════════════
- RFC 6120 §8.2.3 — Unknown IQ namespace → error
-════════════════════════════════════════════════════════════
-  ✓ Unknown IQ get → IQ error response (RFC 6120 §8.2.3)
-  ✓ Error contains <service-unavailable/> or <feature-not-implemented/>
-
-════════════════════════════════════════════════════════════
- RFC 6120 §4.9.3.10 — invalid-namespace
-════════════════════════════════════════════════════════════
-  ✓ Wrong xmlns → stream error (RFC 6120 §4.9.3.10)
-
-════════════════════════════════════════════════════════════
- RFC 6121 §2.1 — Roster Management
-════════════════════════════════════════════════════════════
-  ✓ Roster get → IQ result (RFC 6121 §2.1.4)
-  ✓ Roster result contains <query xmlns='jabber:iq:roster'>
-  ✓ Roster get with ver= → result contains ver= (RFC 6121 §2.6)
-
-════════════════════════════════════════════════════════════
- RFC 6121 §2.1.5/6 — Roster Set + Push
-════════════════════════════════════════════════════════════
-  ✓ Roster set → IQ result (RFC 6121 §2.1.5)
-  ✓ Roster get after set returns stored item
-
-════════════════════════════════════════════════════════════
- RFC 6121 §4.2 — Initial Presence
-════════════════════════════════════════════════════════════
-  ✓ Initial presence elicits at least one <presence> stanza
-
-════════════════════════════════════════════════════════════
- RFC 6121 §4.6 — Presence Content Forwarding
-════════════════════════════════════════════════════════════
-  ✓ <show>away</show> forwarded verbatim (RFC 6121 §4.6)
-  ✓ <status>In a meeting</status> forwarded verbatim
-  ✓ <priority>5</priority> forwarded verbatim
-
-════════════════════════════════════════════════════════════
- RFC 6121 §5 — Message Delivery
-════════════════════════════════════════════════════════════
-  ✓ Direct message delivered to recipient (RFC 6121 §5)
-  ✓ Message from= is sender's JID (RFC 6120 §8.1.2)
-
-════════════════════════════════════════════════════════════
- XEP-0160 — Offline Message Storage + Delivery
-════════════════════════════════════════════════════════════
-  ✓ Offline message delivered after receiver comes online (XEP-0160)
-  ✓ Delivery includes XEP-0203 <delay/> element
-
-════════════════════════════════════════════════════════════
- RFC 6121 §3 — Presence Subscription
-════════════════════════════════════════════════════════════
-  ✓ subscribe forwarded to recipient (RFC 6121 §3.1.3)
-  ✓ subscribed forwarded back to requester (RFC 6121 §3.1.3)
-  ✓ After subscription, roster shows subscription='to' (RFC 6121 §3.1)
-
-════════════════════════════════════════════════════════════
- XEP-0045 §7.2 / §10.1 — MUC Room Create + Join
-════════════════════════════════════════════════════════════
-  ✓ Join room → self-presence received (XEP-0045 §7.2.2)
-  ✓ Self-presence contains status code 110 (XEP-0045 §7.2.2)
-  ✓ New room creator gets status code 201 (XEP-0045 §10.1)
-  ✓ Creator gets affiliation='owner' (XEP-0045 §10.1)
-  ✓ Room subject sent after join (XEP-0045 §7.2.15)
-  ✓ Config submit → IQ result (XEP-0045 §10.1.2)
-  ✓ Leaving room → unavailable presence received (XEP-0045 §7.14)
-
-════════════════════════════════════════════════════════════
- XEP-0045 §7.2.8 — Nick Conflict
-════════════════════════════════════════════════════════════
-  ✓ Nick conflict → <presence type='error'> (XEP-0045 §7.2.8)
-  ✓ Error contains <conflict/> (XEP-0045 §7.2.8)
-
-════════════════════════════════════════════════════════════
- XEP-0045 §7.9 — Groupchat Message Broadcast
-════════════════════════════════════════════════════════════
-  ✓ Groupchat message reflected to sender (XEP-0045 §7.9)
-  ✓ Groupchat message delivered to other occupant (XEP-0045 §7.9)
-  ✓ Message from= is room/nick (XEP-0045 §7.9)
-
-════════════════════════════════════════════════════════════
- XEP-0045 §7.13 — Private MUC Message
-════════════════════════════════════════════════════════════
-  ✓ Private message delivered to addressed occupant (XEP-0045 §7.13)
-  ✓ Private message NOT delivered to other occupants (XEP-0045 §7.13)
-
-════════════════════════════════════════════════════════════
- XEP-0045 §7.6 — Nick Change
-════════════════════════════════════════════════════════════
-  ✓ Nick change → unavailable from old nick (XEP-0045 §7.6)
-  ✓ Nick change → status code 303 (XEP-0045 §7.6)
-  ✓ Nick change → presence from new nick sent
-
-════════════════════════════════════════════════════════════
- XEP-0045 §7.16 — In-Room Presence Update
-════════════════════════════════════════════════════════════
-  ✓ In-room presence update relayed to other occupants (XEP-0045 §7.16)
-
-════════════════════════════════════════════════════════════
- XEP-0030 — Service Discovery (disco#info)
-════════════════════════════════════════════════════════════
-  ✓ disco#info → IQ result (XEP-0030 §3)
-  ✓ disco#info → <identity> present
-  ✓ disco#info → MUC feature advertised
-  ✓ disco#items on server returns MUC service (XEP-0030 §3.2)
-
-════════════════════════════════════════════════════════════
- XEP-0199 — XMPP Ping
-════════════════════════════════════════════════════════════
-  ✓ Ping → IQ result (XEP-0199)
-
-════════════════════════════════════════════════════════════
- RESULTS: 60 passed / 0 failed / 60 total
-════════════════════════════════════════════════════════════
-
-
-JSON results written to: /home/apetrosyan/AngelicKernel/testing/compliance/_raw_results.json
+json results written to: /home/gohar/Desktop/AngelicKernel/testing/compliance/_raw_results.json

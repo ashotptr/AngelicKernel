@@ -1,82 +1,82 @@
-# XMPP Compliance Report
-Generated: 2026-04-20T22:34:18
-Server: angelic.local:5222
+# xmpp compliance report
+generated: 2026-05-19T20:54:04
+server: angelic.local:5222
 
-## Test Summary
+## test summary
 
-| Suite | Passed | Failed | Total | Pass Rate |
+| suite | passed | failed | total | pass rate |
 |-------|--------|--------|-------|-----------|
-| Raw TCP harness | 60 | 0 | 60 | 100% |
-| slixmpp suite   | 0 | 0 | 0 | 0% |
-| **COMBINED**    | **60** | **0** | **60** | **100%** |
+| raw tcp harness | 60 | 0 | 60 | 100% |
+| slixmpp suite | 20 | 0 | 20 | 100% |
+| combined | 80 | 0 | 80 | 100% |
 
-## RFC 6120 — XMPP Core
+## rfc 6120 — xmpp core
 
-| § | Requirement | Status |
+| § | requirement | status |
 |---|-------------|--------|
-| 4.2 | Stream opening exchange | ✅ |
-| 4.4 | Graceful stream close (</stream:stream>) | ✅ |
-| 4.7.1 | Server sets from= to authoritative domain | ✅ |
-| 4.7.3 | Stream ID hard to predict | ✅ |
+| 4.2 | stream opening exchange | ✅ |
+| 4.4 | graceful stream close (</stream:stream>) | ✅ |
+| 4.7.1 | server sets from= to authoritative domain | ✅ |
+| 4.7.3 | stream id hard to predict | ✅ |
 | 4.7.5 | version='1.0' | ✅ |
 | 4.9.3.9 | host-unknown on wrong to= | ✅ |
 | 4.9.3.10 | invalid-namespace on wrong xmlns= | ✅ |
 | 5.3.2 | STARTTLS marked required | ✅ |
 | 6.4.6 | SASL PLAIN success → <success/> | ✅ |
-| 6.5 | Bad credentials → <not-authorized/> | ✅ |
-| 6.5.5 | Bad Base64 → <incorrect-encoding/> | ✅ |
-| 6.5.7 | Invalid mechanism → <invalid-mechanism/> | ✅ |
-| 7.2 | Post-auth stream features include <bind> | ✅ |
-| 7.7 | Bind result contains full JID | ✅ |
-| 8.2.3 | Unknown IQ get → error | ✅ |
+| 6.5 | bad credentials → <not-authorized/> | ✅ |
+| 6.5.5 | bad base64 → <incorrect-encoding/> | ✅ |
+| 6.5.7 | invalid mechanism → <invalid-mechanism/> | ✅ |
+| 7.2 | post-auth stream features include <bind> | ✅ |
+| 7.7 | bind result contains full jid | ✅ |
+| 8.2.3 | unknown iq get → error | ✅ |
 
-## RFC 6121 — XMPP IM
+## rfc 6121 — xmpp im
 
-| § | Requirement | Status |
+| § | requirement | status |
 |---|-------------|--------|
-| 2.1.3 | Roster get → result with <query xmlns='jabber:iq:roster'> | ✅ |
-| 2.1.5 | Roster set → acknowledged | ✅ |
-| 2.6 | Roster get with ver= → result includes ver= | ✅ |
+| 2.1.3 | roster get → result with <query xmlns='jabber:iq:roster'> | ✅ |
+| 2.1.5 | roster set → acknowledged | ✅ |
+| 2.6 | roster get with ver= → result includes ver= | ✅ |
 | 3.1.3 | subscribe forwarded to recipient | ✅ |
 | 3.1.3 | subscribed forwarded back | ✅ |
-| 3.1 | After subscription, roster shows subscription='to' | ✅ |
-| 4.2 | Initial presence elicits at least one <presence> | ✅ |
-| 4.6 | Client <show>/<status>/<priority> forwarded verbatim | ✅ |
-| 5 | Direct message delivered | ✅ |
-| 8 | Offline message delivered with <delay/> | ✅ |
+| 3.1 | after subscription, roster shows subscription='to' | ✅ |
+| 4.2 | initial presence elicits at least one <presence> | ✅ |
+| 4.6 | client <show>/<status>/<priority> forwarded verbatim | ✅ |
+| 5 | direct message delivered | ✅ |
+| 8 | offline message delivered with <delay/> | ✅ |
 
-## XEP-0045 — Multi-User Chat
+## xep-0045 — multi-user chat
 
-| § | Requirement | Status |
+| § | requirement | status |
 |---|-------------|--------|
-| 7.2.2 | Join → self-presence with status 110 | ✅ |
-| 7.2.2 | New room → status 201, affiliation='owner' | ✅ |
-| 7.2.8 | Nick conflict → <conflict/> error | ✅ |
-| 7.2.15 | Room subject sent after join | ✅ |
-| 7.6 | Nick change → unavailable + status 303 | ✅ |
-| 7.9 | Groupchat message broadcast to all occupants | ✅ |
-| 7.9 | Groupchat message reflected to sender | ✅ |
-| 7.13 | Private message delivered only to addressed occupant | ✅ |
-| 7.13 | Private message NOT delivered to others | ✅ |
-| 7.14 | Leave → unavailable presence sent | ✅ |
-| 7.16 | In-room presence update relayed | ✅ |
-| 10.1 | Config form submit → IQ result | ✅ |
+| 7.2.2 | join → self-presence with status 110 | ✅ |
+| 7.2.2 | new room → status 201, affiliation='owner' | ✅ |
+| 7.2.8 | nick conflict → <conflict/> error | ✅ |
+| 7.2.15 | room subject sent after join | ✅ |
+| 7.6 | nick change → unavailable + status 303 | ✅ |
+| 7.9 | groupchat message broadcast to all occupants | ✅ |
+| 7.9 | groupchat message reflected to sender | ✅ |
+| 7.13 | private message delivered only to addressed occupant | ✅ |
+| 7.13 | private message not delivered to others | ✅ |
+| 7.14 | leave → unavailable presence sent | ✅ |
+| 7.16 | in-room presence update relayed | ✅ |
+| 10.1 | config form submit → iq result | ✅ |
 
-## XEP-0030 — Service Discovery
+## xep-0030 — service discovery
 
-| § | Requirement | Status |
+| § | requirement | status |
 |---|-------------|--------|
 | 3 | disco#info on server → identity + features | ✅ |
-| 3.2 | disco#items on server → MUC service listed | ✅ |
-| 6.2 (XEP-0045) | disco#info on MUC service | ✅ |
+| 3.2 | disco#items on server → muc service listed | ✅ |
+| 6.2 (xep-0045) | disco#info on muc service | ✅ |
 
-## XEP-0160 / XEP-0199 / XEP-0092
+## xep-0160 / xep-0199 / xep-0092
 
-| XEP | Requirement | Status |
+| xep | requirement | status |
 |-----|-------------|--------|
-| XEP-0199 | Ping → IQ result | ✅ |
-| XEP-0092 | Version query → name/version | ⚠️ |
-| XEP-0160 | Offline message stored + delivered with delay | ✅ |
+| xep-0199 | ping → iq result | ✅ |
+| xep-0092 | version query → name/version | ⚠️ |
+| xep-0160 | offline message stored + delivered with delay | ✅ |
 
 ---
-*✅ = PASS  ❌ = FAIL  ⚠️ = NOT TESTED*
+*✅ = pass ❌ = fail ⚠️ = not tested*
