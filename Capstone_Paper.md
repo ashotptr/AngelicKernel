@@ -35,9 +35,8 @@ Intel Memory Protection Keys (MPK), available on x86-64 CPU, offer a hardware me
 
 1. First full-featured XMPP server on bare-metal UEFI x86-64 with hardware-enforced driver isolation, passing 80/80 protocol compliance tests (60 raw TCP, 20 slixmpp library tests).
 2. Three-tier MPK correctness verification suite (PKRU register readback, PTE walk, violation self-test with IDT recovery) that detects misconfiguration before the server accepts any connection.
-3. Rigorous RDTSC-based WRPKRU benchmark methodology that subtracts loop calibration overhead and prevents out-of-order measurement skew.
-4. Write-through ATA disk persistence layer using only PIO I/O registers (no UEFI protocols, no filesystem) for durable XMPP state across reboots.
-5. Quantification of the security-performance Pareto frontier for intra-kernel driver isolation on commodity x86 hardware.
+3. Write-through ATA disk persistence layer using only PIO I/O registers (no UEFI protocols, no filesystem) for durable XMPP state across reboots.
+4. Quantification of the security-performance Pareto frontier for intra-kernel driver isolation on commodity x86 hardware.
 
 ---
 
