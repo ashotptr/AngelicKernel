@@ -1,61 +1,4 @@
 #!/usr/bin/env python3
-"""
-slixmpp_suite.py — High-level XMPP compliance suite using the slixmpp library.
-
-FIXES (cumulative):
-  1. Removed disable_starttls / use_ssl kwargs (removed in slixmpp >= 1.9).
-     TLS configured via ssl_context passed directly to ClientXMPP constructor.
-
-  2. ssl_context passed to constructor so the default CERT_REQUIRED context
-     is never created inside XMLStream.__init__.
-
-  3. Version-detection wrapper _connect_compat() for slixmpp < 1.9 compat.
-
-  4. MUC room config: get_room_config / set_room_config instead of deprecated
-     configure_muc().
-
-  5. Inter-test sleep to avoid MAX_USERS limit.
-
-  6. Renamed _session_started → _session_ready (avoids slixmpp 1.14 internal
-     attribute collision).
-
-  7. use_aiodns=False — aiodns bypasses system mDNS stack, hangs 60 s on
-     .local domains.
-
-  8. _pre_resolve_ipv4() — resolves hostname to IPv4 literal via OS mDNS
-     stack (instant) before calling connect(). Bypasses get_dns_records() SRV
-     probe which hangs 60 s on mDNS domains (BUG 1).
-
-  9. enable_direct_tls=False — slixmpp default True makes it attempt a raw
-     TLS handshake on port 5222 before trying STARTTLS. Server speaks plain
-     XMPP on 5222, not direct TLS → ssl.SSLError → connection_failed fires
-     immediately. False = skip XMPPS, go straight to STARTTLS (BUG 2).
-
- 10. [KEY FIX] connect(host, port) called with SEPARATE ARGS, not a tuple.
-     Previous code: client.connect((host, port))
-     slixmpp signature: connect(self, host=None, port=None)
-     Passing a tuple means host=('10.0.2.15', 5222), port=None.
-     The condition `if host and port:` is False (port is None) so
-     self.custom_address is NEVER set. Result: _connect_loop() always calls
-     get_dns_records() which issues an IPv6 AAAA getaddrinfo() call. Tests
-     1–3 pass because mDNS has a fresh negative cache for angelic.local AAAA.
-     After ~15 s the cache expires, the re-probe broadcasts and waits, hanging
-     for exactly our 15 s session timeout — which is why tests 4+ all fail.
-     Fix: client.connect(host, port) sets custom_address correctly → DNS
-     skipped entirely → all tests complete in < 5 s. (BUG 3)
-
- 11. use_ipv6=False — suppresses the IPv6 AAAA lookup that BUG 3 was
-     triggering. Belt-and-suspenders alongside the connect() fix.
-
-  CERT NOTE: Gajim prompts to trust the self-signed cert because Gajim
-  verifies certs (correct default behaviour for a user-facing client).
-  slixmpp with CERT_NONE does no cert verification — the cert contents
-  (missing SAN extension) are completely irrelevant to slixmpp.
-
-Usage:
-    pip install slixmpp colorama
-    python3 slixmpp_suite.py --host angelic.local --port 5222
-"""
 
 import asyncio
 import time
@@ -73,22 +16,22 @@ from colorama import Fore, Style, init as colorama_init
 
 colorama_init()
 
-DOMAIN  = "angelic.local"
+DOMAIN = "angelic.local"
 MUC_SVC = f"conference.{DOMAIN}"
 
 INTER_TEST_SLEEP = 2.0
 
+def ok(msg): 
+    print(f"{Fore.GREEN}✓{Style.RESET_ALL} {msg}")
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+def fail(msg): 
+    print(f"{Fore.RED}✗{Style.RESET_ALL} {msg}")
 
-def ok(msg):   print(f"  {Fore.GREEN}✓{Style.RESET_ALL} {msg}")
-def fail(msg): print(f"  {Fore.RED}✗{Style.RESET_ALL} {msg}")
-def warn(msg): print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} {msg}")
+def warn(msg): 
+    print(f"{Fore.YELLOW}⚠{Style.RESET_ALL} {msg}")
 
 def header(msg):
-    print(f"\n{Fore.MAGENTA}{'═'*60}{Style.RESET_ALL}")
     print(f"{Fore.MAGENTA} {msg}{Style.RESET_ALL}")
-    print(f"{Fore.MAGENTA}{'═'*60}{Style.RESET_ALL}")
 
 from dataclasses import dataclass
 from typing import List, Optional
@@ -103,125 +46,83 @@ results: List[TestResult] = []
 
 def record(name: str, passed: bool, detail: str = ""):
     results.append(TestResult(name, passed, detail))
+
     if passed:
         ok(name)
     else:
         fail(f"{name}: {detail}")
 
-
-# ── SSL / DNS helpers ──────────────────────────────────────────────────────────
-
 def _make_ssl_context() -> ssl.SSLContext:
-    """Return an SSL context that accepts self-signed certificates."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
-    ctx.verify_mode    = ssl.CERT_NONE
+    ctx.verify_mode = ssl.CERT_NONE
+
     return ctx
 
 
 def _pre_resolve_ipv4(host: str, port: int) -> str:
-    """Resolve *host* to an IPv4 literal via the OS mDNS stack.
-
-    BUG 1 fix: slixmpp calls get_dns_records() for any hostname, which issues
-    an SRV probe that hangs 60 s on .local mDNS domains.  Passing a raw IPv4
-    literal to connect() makes slixmpp set custom_address and skip
-    get_dns_records() entirely (provided connect() is called correctly — see
-    _connect_compat() for the BUG 3 fix that makes this actually work).
-
-    Falls back to *host* on error so tests still fail meaningfully.
-    """
     if host.replace(".", "").isdigit():
-        return host  # already a literal
+        return host
     try:
         infos = _sock.getaddrinfo(host, port, _sock.AF_INET, _sock.SOCK_STREAM)
+
         if infos:
             return infos[0][4][0]
     except OSError:
         pass
+
     return host
 
 
 def _connect_compat(client: ClientXMPP, host: str, port: int) -> bool:
-    """Call client.connect() compatibly across slixmpp versions.
-
-    BUG 3 fix (critical): previous code called client.connect((host, port))
-    passing a TUPLE as the first arg. slixmpp's signature is
-    connect(self, host=None, port=None). With a tuple:
-      host = ('10.0.2.15', 5222)   ← tuple, truthy
-      port = None                   ← second param not supplied
-    The guard `if host and port:` is False, so self.custom_address is NEVER
-    set. This causes _connect_loop() to call get_dns_records() on every
-    connection attempt, which in turn issues an IPv6 AAAA getaddrinfo()
-    for the hostname. Tests 1–3 pass because mDNS has a fresh negative cache;
-    after ~15 s the cache expires, the re-probe hangs for exactly the session
-    timeout, and tests 4–9 all fail.
-
-    Fix: call client.connect(host, port) with separate string and int args.
-    slixmpp then sets self.custom_address = (host, port), _connect_loop()
-    takes the custom_address fast-path, and get_dns_records() is never called.
-    """
-    # BUG 1 fix: pass IPv4 literal so slixmpp sets custom_address correctly.
     host = _pre_resolve_ipv4(host, port)
 
-    sig    = inspect.signature(client.connect)
+    sig = inspect.signature(client.connect)
     params = set(sig.parameters.keys())
     kwargs: dict = {}
+
     if "disable_starttls" in params:
         kwargs["disable_starttls"] = False
+
     if "use_ssl" in params:
         kwargs["use_ssl"] = False
 
-    # BUG 3 fix: separate args, NOT a tuple.
     try:
         return client.connect(host, port, **kwargs)
     except TypeError:
         return client.connect(host, port)
 
-
-# ── TestClient ─────────────────────────────────────────────────────────────────
-
 class TestClient(ClientXMPP):
-    """Thin wrapper around ClientXMPP for compliance test use."""
-
     def __init__(self, host: str, port: int, username: str, password: str):
         jid = f"{username}@{DOMAIN}"
+
         super().__init__(jid, password, ssl_context=_make_ssl_context())
 
         self._host = host
         self._port = port
 
         self.received_messages: List[slixmpp.Message] = []
-        self._session_ready  = asyncio.Event()
+        self._session_ready = asyncio.Event()
         self._session_failed = False
-
-        # BUG 2 fix: skip XMPPS direct-TLS attempt on port 5222.
-        # Default True → slixmpp tries raw TLS first → ssl.SSLError on plain
-        # XMPP port → connection_failed fires → start() returns False before
-        # STARTTLS is ever attempted.
         self.enable_direct_tls = False
-
-        # Belt-and-suspenders for BUG 1 + BUG 3:
-        # use_aiodns=False prevents aiodns from bypassing mDNS.
-        # use_ipv6=False suppresses the AAAA lookup that BUG 3 was triggering.
         self.use_aiodns = False
-        self.use_ipv6   = False
-
+        self.use_ipv6 = False
         self.register_plugin("xep_0030")
         self.register_plugin("xep_0045")
         self.register_plugin("xep_0092")
         self.register_plugin("xep_0199", {"keepalive": False})
-
-        self.add_event_handler("session_start",    self._on_session_start)
-        self.add_event_handler("failed_auth",       self._on_failed_auth)
+        self.add_event_handler("session_start", self._on_session_start)
+        self.add_event_handler("failed_auth", self._on_failed_auth)
         self.add_event_handler("connection_failed", self._on_conn_failed)
-        self.add_event_handler("message",           self._on_message)
+        self.add_event_handler("message", self._on_message)
 
     async def _on_session_start(self, _event):
         try:
             await self.get_roster()
+
             self.send_presence()
         except Exception as e:
-            warn(f"session_start error: {e}")
+            warn(f"{e}")
         finally:
             self._session_ready.set()
 
@@ -230,7 +131,6 @@ class TestClient(ClientXMPP):
         self._session_ready.set()
 
     def _on_conn_failed(self, _event):
-        # With enable_direct_tls=False this should only fire on real errors.
         self._session_failed = True
         self._session_ready.set()
 
@@ -242,17 +142,20 @@ class TestClient(ClientXMPP):
         try:
             _connect_compat(self, self._host, self._port)
         except Exception as e:
-            warn(f"Connection failed for {self.boundjid}: {e}")
+            warn(f"connection failed for {self.boundjid}: {e}")
+
             return False
 
         try:
             await asyncio.wait_for(self._session_ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            warn(f"Session timed out for {self.boundjid}")
+            warn(f"session timed out for {self.boundjid}")
+
             return False
 
         if self._session_failed:
-            warn(f"Session failed for {self.boundjid}")
+            warn(f"session failed for {self.boundjid}")
+
             return False
 
         return True
@@ -260,6 +163,7 @@ class TestClient(ClientXMPP):
     async def stop(self):
         try:
             self.disconnect(wait=False)
+
             await asyncio.sleep(0.5)
         except Exception:
             pass
@@ -267,227 +171,294 @@ class TestClient(ClientXMPP):
     def clear_received(self):
         self.received_messages.clear()
 
-    async def wait_for_message(self, body_fragment: str,
-                               timeout: float = 5.0) -> Optional[slixmpp.Message]:
+    async def wait_for_message(self, body_fragment: str, timeout: float = 5.0) -> Optional[slixmpp.Message]:
         deadline = time.monotonic() + timeout
+
         while time.monotonic() < deadline:
             for m in self.received_messages:
                 if body_fragment in str(m["body"]):
                     return m
+
             await asyncio.sleep(0.1)
+
         return None
 
-
-# ── Individual test functions ──────────────────────────────────────────────────
-
 async def test_connect_and_session(host, port):
-    header("slixmpp — Connection + Session Establishment")
+    header("slixmpp — connection + session establishment")
+
     c = TestClient(host, port, "user1", "pass1")
+    
     try:
         ok_flag = await c.start()
-        record("Session start completes (TLS + SASL PLAIN + bind)",
-               ok_flag, "timed out" if not ok_flag else "")
+        
+        record("session start completes (tls + sasl PLAIN + bind)", ok_flag, "timed out" if not ok_flag else "")
+        
         if ok_flag:
-            record("Bound JID contains username and domain",
-                   DOMAIN in str(c.boundjid), str(c.boundjid))
+            record("bound jid contains username and domain", DOMAIN in str(c.boundjid), str(c.boundjid))
     finally:
         await c.stop()
 
 
 async def test_roster_get(host, port):
-    header("slixmpp — RFC 6121 Roster Get")
+    header("slixmpp — rfc 6121 roster get")
+
     c = TestClient(host, port, "user1", "pass1")
+    
     try:
         if not await c.start():
-            warn("Session failed"); return
+            warn("session failed");
+
+            return
         try:
             roster = c.client_roster
-            record("Roster get completes (RFC 6121 §2.1)", roster is not None, "")
+
+            record("roster get completes (rfc 6121 §2.1)", roster is not None, "")
         except Exception as e:
-            record("Roster get completes", False, str(e))
+            record("roster get completes", False, str(e))
     finally:
         await c.stop()
 
-
 async def test_roster_update_and_subscription(host, port):
-    header("slixmpp — RFC 6121 Roster + Subscription Flow")
+    header("slixmpp — rfc 6121 roster + subscription flow")
+
     alice = TestClient(host, port, "user1", "pass1")
-    bob   = TestClient(host, port, "user2", "pass2")
+    bob = TestClient(host, port, "user2", "pass2")
+
     try:
         ok1 = await alice.start()
         ok2 = await bob.start()
+
         if not (ok1 and ok2):
-            warn("Session failed for one or both users"); return
+            warn("session failed for one or both users");
+
+            return
+
         alice.send_presence_subscription(pto=f"user2@{DOMAIN}", ptype="subscribe")
+
         await asyncio.sleep(2)
+        
         bob.send_presence_subscription(pto=f"user1@{DOMAIN}", ptype="subscribed")
+        
         await asyncio.sleep(2)
-        record("Subscription flow executed without exception", True)
+        
+        record("subscription flow executed without exception", True)
     except Exception as e:
-        record("Subscription flow", False, str(e))
+        record("subscription flow", False, str(e))
     finally:
         await alice.stop()
+
         await bob.stop()
 
-
 async def test_direct_message(host, port):
-    header("slixmpp — RFC 6121 Direct Message")
+    header("slixmpp — rfc 6121 direct message")
+
     sender = TestClient(host, port, "user1", "pass1")
-    recvr  = TestClient(host, port, "user2", "pass2")
+    recvr = TestClient(host, port, "user2", "pass2")
+
     try:
         ok1 = await sender.start()
         ok2 = await recvr.start()
+
         if not (ok1 and ok2):
-            warn("Session failed"); return
+            warn("session failed");
+
+            return
+
         recvr.clear_received()
-        body  = f"slixmpp-test-{int(time.time())}"
+
+        body = f"slixmpp-test-{int(time.time())}"
         bare2 = f"user2@{DOMAIN}"
+
         sender.send_message(mto=bare2, mbody=body, mtype="chat")
+
         msg = await recvr.wait_for_message(body, timeout=5)
-        record("Direct message delivered (RFC 6121 §5)", msg is not None, f"body: {body}")
+
+        record("direct message delivered (rfc 6121 §5)", msg is not None, f"body: {body}")
+
         if msg:
-            record("Message from= is sender (RFC 6120 §8.1.2)",
-                   "user1" in str(msg["from"]), str(msg["from"]))
+            record("message from= is sender (RFC 6120 §8.1.2)", "user1" in str(msg["from"]), str(msg["from"]))
     finally:
         await sender.stop()
         await recvr.stop()
 
-
 async def _unlock_room(muc_plugin, room_jid: str):
     try:
         form = await muc_plugin.get_room_config(room_jid)
+
         await muc_plugin.set_room_config(room_jid, form)
     except Exception:
         pass
 
-
 async def test_muc_join_and_chat(host, port):
-    header("slixmpp — XEP-0045 MUC Join + Groupchat")
+    header("slixmpp — xep-0045 muc join + groupchat")
     alice = TestClient(host, port, "user1", "pass1")
-    bob   = TestClient(host, port, "user2", "pass2")
+    bob = TestClient(host, port, "user2", "pass2")
+
     try:
         if not (await alice.start() and await bob.start()):
-            warn("Session failed"); return
-        room_jid  = f"slix{int(time.time()) % 10000}@{MUC_SVC}"
+            warn("Session failed");
+
+            return
+        
+        room_jid = f"slix{int(time.time()) % 10000}@{MUC_SVC}"
         alice_muc = alice["xep_0045"]
-        bob_muc   = bob["xep_0045"]
+        bob_muc = bob["xep_0045"]
+
         alice.clear_received()
+
         await alice_muc.join_muc_wait(room_jid, "alice", maxwait=8)
-        record("Alice joins MUC room (XEP-0045 §7.2)", True)
+
+        record("alice joins muc room (xep-0045 §7.2)", True)
+
         await asyncio.sleep(0.5)
         await _unlock_room(alice_muc, room_jid)
         await asyncio.sleep(0.5)
+
         bob.clear_received()
+
         await bob_muc.join_muc_wait(room_jid, "bob", maxwait=8)
-        record("Bob joins existing MUC room (XEP-0045 §7.2)", True)
+
+        record("bob joins existing muc room (xep-0045 §7.2)", True)
+
         await asyncio.sleep(0.5)
+        
         body = f"gc-{int(time.time())}"
+
         alice.clear_received()
         bob.clear_received()
+        
         alice.send_message(mto=room_jid, mbody=body, mtype="groupchat")
+        
         await asyncio.sleep(2)
-        bob_got   = any(body in str(m["body"]) for m in bob.received_messages)
+
+        bob_got = any(body in str(m["body"]) for m in bob.received_messages)
         alice_got = any(body in str(m["body"]) for m in alice.received_messages)
-        record("Groupchat received by other occupant (XEP-0045 §7.9)", bob_got,
-               f"bob msgs: {[str(m['body'])[:40] for m in bob.received_messages]}")
-        record("Groupchat reflected to sender (XEP-0045 §7.9)", alice_got,
-               f"alice msgs: {[str(m['body'])[:40] for m in alice.received_messages]}")
+        
+        record("groupchat received by other occupant (xep-0045 §7.9)", bob_got, f"bob msgs: {[str(m['body'])[:40] for m in bob.received_messages]}")
+        record("groupchat reflected to sender (xep-0045 §7.9)", alice_got, f"alice msgs: {[str(m['body'])[:40] for m in alice.received_messages]}")
+        
         for muc, nick in [(alice_muc, "alice"), (bob_muc, "bob")]:
-            try: await muc.leave_muc(room_jid, nick)
-            except Exception: pass
+            try: 
+                await muc.leave_muc(room_jid, nick)
+            except Exception: 
+                pass
     finally:
         await alice.stop()
         await bob.stop()
 
 
 async def test_muc_private_message(host, port):
-    header("slixmpp — XEP-0045 Private MUC Message")
-    alice   = TestClient(host, port, "user1", "pass1")
-    bob     = TestClient(host, port, "user2", "pass2")
+    header("slixmpp — xep-0045 private muc message")
+
+    alice = TestClient(host, port, "user1", "pass1")
+    bob = TestClient(host, port, "user2", "pass2")
     charlie = TestClient(host, port, "admin", "admin")
+
     try:
         ok1 = await alice.start()
         ok2 = await bob.start()
         ok3 = await charlie.start()
+
         if not (ok1 and ok2 and ok3):
-            warn("Session failed"); return
-        room_jid    = f"pm{int(time.time()) % 10000}@{MUC_SVC}"
-        alice_muc   = alice["xep_0045"]
-        bob_muc     = bob["xep_0045"]
+            warn("Session failed");
+
+            return
+
+        room_jid = f"pm{int(time.time()) % 10000}@{MUC_SVC}"
+        alice_muc = alice["xep_0045"]
+        bob_muc = bob["xep_0045"]
         charlie_muc = charlie["xep_0045"]
+
         await alice_muc.join_muc_wait(room_jid, "alice", maxwait=8)
+
         await asyncio.sleep(0.3)
+
         await _unlock_room(alice_muc, room_jid)
+
         await asyncio.sleep(0.3)
+
         await bob_muc.join_muc_wait(room_jid, "bob", maxwait=8)
+
         await charlie_muc.join_muc_wait(room_jid, "charlie", maxwait=8)
+
         await asyncio.sleep(0.5)
+
         bob.clear_received()
+
         charlie.clear_received()
+        
         secret = f"private-{int(time.time())}"
+        
         alice.send_message(mto=f"{room_jid}/bob", mbody=secret, mtype="chat")
+        
         await asyncio.sleep(2)
-        bob_got     = any(secret in str(m["body"]) for m in bob.received_messages)
+        
+        bob_got = any(secret in str(m["body"]) for m in bob.received_messages)
         charlie_got = any(secret in str(m["body"]) for m in charlie.received_messages)
-        record("Private MUC message delivered to addressed occupant (XEP-0045 §7.13)",
-               bob_got,
-               f"bob msgs: {[str(m['body'])[:40] for m in bob.received_messages]}")
-        record("Private MUC message NOT delivered to others (XEP-0045 §7.13)",
-               not charlie_got,
-               f"charlie got: {[str(m['body'])[:40] for m in charlie.received_messages]}")
+
+        record("private muc message delivered to addressed occupant (xep-0045 §7.13)", bob_got, f"bob msgs: {[str(m['body'])[:40] for m in bob.received_messages]}")
+        record("private muc message not delivered to others (xep-0045 §7.13)", not charlie_got, f"charlie got: {[str(m['body'])[:40] for m in charlie.received_messages]}")
+
         for muc, nick in [(alice_muc, "alice"), (bob_muc, "bob"), (charlie_muc, "charlie")]:
-            try: await muc.leave_muc(room_jid, nick)
-            except Exception: pass
+            try: 
+                await muc.leave_muc(room_jid, nick)
+            except Exception: 
+                pass
     finally:
         await alice.stop()
         await bob.stop()
         await charlie.stop()
 
-
 async def test_ping(host, port):
-    header("slixmpp — XEP-0199 Ping")
+    header("slixmpp — xep-0199 ping")
+
     c = TestClient(host, port, "user1", "pass1")
+
     try:
         if not await c.start():
-            warn("Session failed"); return
+            warn("session failed");
+
+            return
         try:
             await c["xep_0199"].ping(DOMAIN, timeout=5)
-            record("Server ping succeeds (XEP-0199)", True)
+
+            record("server ping succeeds (xep-0199)", True)
         except Exception as e:
-            record("Server ping succeeds (XEP-0199)", False, str(e))
+            record("server ping succeeds (xep-0199)", False, str(e))
     finally:
         await c.stop()
 
-
 async def test_disco(host, port):
-    header("slixmpp — XEP-0030 Service Discovery")
+    header("slixmpp — xep-0030 service discovery")
+
     c = TestClient(host, port, "user1", "pass1")
+
     try:
         if not await c.start():
-            warn("Session failed"); return
+            warn("session failed");
+
+            return
+
         disco = c["xep_0030"]
+
         try:
             info = await disco.get_info(DOMAIN)
-            has_id  = len(info["identities"]) > 0
+            has_id = len(info["identities"]) > 0
             has_muc = any("muc" in str(f) for f in info["features"])
-            record("disco#info → identity present (XEP-0030 §3)",
-                   has_id, str(list(info["identities"])[:2]))
-            record("Server advertises MUC feature",
-                   has_muc, str(list(info["features"])[:5]))
+
+            record("disco#info → identity present (xep-0030 §3)", has_id, str(list(info["identities"])[:2]))
+            record("server advertises muc feature", has_muc, str(list(info["features"])[:5]))
         except Exception as e:
             record("disco#info on server", False, str(e))
         try:
             muc_info = await disco.get_info(MUC_SVC)
-            record("disco#info on MUC service (XEP-0045 §6.2)",
-                   len(muc_info["identities"]) > 0,
-                   str(list(muc_info["identities"])[:2]))
+            record("disco#info on muc service (xep-0045 §6.2)", len(muc_info["identities"]) > 0, str(list(muc_info["identities"])[:2]))
         except Exception as e:
-            record("disco#info on MUC service", False, str(e))
+            record("disco#info on muc service", False, str(e))
         try:
             items = await disco.get_items(DOMAIN)
             has_muc_item = any("conference" in str(item) for item in items["items"])
-            record("disco#items lists MUC service (XEP-0030 §3.2)",
-                   has_muc_item, str(list(items["items"])[:3]))
+            record("disco#items lists muc service (xep-0030 §3.2)", has_muc_item, str(list(items["items"])[:3]))
         except Exception as e:
             record("disco#items on server", False, str(e))
     finally:
@@ -495,46 +466,61 @@ async def test_disco(host, port):
 
 
 async def test_version(host, port):
-    header("slixmpp — XEP-0092 Software Version")
+    header("slixmpp — xep-0092 software version")
+
     c = TestClient(host, port, "user1", "pass1")
+
     try:
         if not await c.start():
-            warn("Session failed"); return
+            warn("session failed");
+
+            return
         try:
             resp = await c["xep_0092"].get_version(DOMAIN)
-            record("Version query succeeds (XEP-0092)",
-                   resp["software_version"]["name"] != "",
-                   str(dict(resp["software_version"])))
+
+            record("version query succeeds (xep-0092)", resp["software_version"]["name"] != "", str(dict(resp["software_version"])))
         except Exception as e:
-            record("Version query succeeds (XEP-0092)", False, str(e))
+            record("version query succeeds (xep-0092)", False, str(e))
     finally:
         await c.stop()
 
-
 async def test_offline_message(host, port):
-    header("slixmpp — XEP-0160 Offline Message Delivery")
+    header("slixmpp — xep-0160 offline message delivery")
+
     sender = TestClient(host, port, "user1", "pass1")
+
     try:
         if not await sender.start():
-            warn("Sender login failed"); return
-        body  = f"offline-slix-{int(time.time())}"
+            warn("sender login failed");
+
+            return
+
+        body = f"offline-slix-{int(time.time())}"
         bare2 = f"user2@{DOMAIN}"
+
         sender.send_message(mto=bare2, mbody=body, mtype="chat")
+        
         await asyncio.sleep(1.5)
         await sender.stop()
         await asyncio.sleep(2.0)
+        
         recvr = TestClient(host, port, "user2", "pass2")
+        
         try:
             if not await recvr.start():
-                warn("Receiver login failed"); return
+                warn("receiver login failed");
+
+                return
+
             await asyncio.sleep(3)
             msg = await recvr.wait_for_message(body, timeout=5)
-            record("Offline message delivered after recipient logs in (XEP-0160)",
-                   msg is not None, f"looking for: {body}")
+            
+            record("offline message delivered after recipient logs in (xep-0160)", msg is not None, f"looking for: {body}")
+
             if msg:
                 has_delay = "delay" in msg or "delay" in str(msg)
-                record("Delivery includes XEP-0203 <delay/> element",
-                       has_delay, str(msg)[:100])
+
+                record("delivery includes xep-0203 <delay/> element", has_delay, str(msg)[:100])
         finally:
             await recvr.stop()
     finally:
@@ -542,9 +528,6 @@ async def test_offline_message(host, port):
             await sender.stop()
         except Exception:
             pass
-
-
-# ── Test registry ──────────────────────────────────────────────────────────────
 
 ALL_ASYNC_TESTS = [
     test_connect_and_session,
@@ -559,7 +542,6 @@ ALL_ASYNC_TESTS = [
     test_offline_message,
 ]
 
-
 async def run_all(host, port, test_filter):
     for test_fn in ALL_ASYNC_TESTS:
         if test_filter and test_filter.lower() not in test_fn.__name__.lower():
@@ -567,44 +549,44 @@ async def run_all(host, port, test_filter):
         try:
             await test_fn(host, port)
         except Exception as e:
-            fail(f"Unhandled exception in {test_fn.__name__}: {e}")
+            fail(f"unhandled exception in {test_fn.__name__}: {e}")
             traceback.print_exc()
+
         await asyncio.sleep(INTER_TEST_SLEEP)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="slixmpp XMPP compliance suite")
-    parser.add_argument("--host",   default="angelic.local")
-    parser.add_argument("--port",   type=int, default=5222)
-    parser.add_argument("--filter", default=None,
-                        help="Only run tests whose name contains this string")
+    parser = argparse.ArgumentParser(description="slixmpp xmpp compliance suite")
+    parser.add_argument("--host", default="angelic.local")
+    parser.add_argument("--port", type=int, default=5222)
+    parser.add_argument("--filter", default=None, help="only run tests whose name contains this string")
+
     args = parser.parse_args()
 
-    print(f"\n{Fore.CYAN}slixmpp XMPP Compliance Suite (fixed){Style.RESET_ALL}")
-    print(f"Target:  {args.host}:{args.port}")
+    print(f"\n{Fore.CYAN}slixmpp xmpp compliance suite{Style.RESET_ALL}")
+    print(f"target: {args.host}:{args.port}")
     print(f"slixmpp: {slixmpp.__version__}")
-    print(f"Inter-test sleep: {INTER_TEST_SLEEP}s\n")
+    print(f"inter-test sleep: {INTER_TEST_SLEEP}s\n")
 
     asyncio.run(run_all(args.host, args.port, args.filter))
 
     passed = [r for r in results if r.passed]
     failed = [r for r in results if not r.passed]
 
-    print(f"\n{Fore.MAGENTA}{'═'*60}{Style.RESET_ALL}")
-    print(f" RESULTS: {Fore.GREEN}{len(passed)} passed{Style.RESET_ALL} / "
+    print(f"\nresults: {Fore.GREEN}{len(passed)} passed{Style.RESET_ALL} / "
           f"{Fore.RED}{len(failed)} failed{Style.RESET_ALL} "
-          f"/ {len(results)} total")
-    print(f"{Fore.MAGENTA}{'═'*60}{Style.RESET_ALL}\n")
+          f"/ {len(results)} total\n")
 
     if failed:
-        print(f"{Fore.RED}FAILED:{Style.RESET_ALL}")
+        print(f"{Fore.RED}failed:{Style.RESET_ALL}")
+
         for r in failed:
-            print(f"  ✗ {r.name}")
+            print(f"✗ {r.name}")
+
             if r.detail:
-                print(f"      {r.detail[:120]}")
+                print(f"{r.detail[:120]}")
 
     return 0 if not failed else 1
-
 
 if __name__ == "__main__":
     sys.exit(main())

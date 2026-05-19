@@ -1,30 +1,9 @@
 #!/usr/bin/env bash
-# ===========================================================================
-# prosody_baseline.sh — Deploy Prosody in Docker for Capstone comparison
-#
-# Capstone §9.2 — "Memory footprint vs Prosody (MB comparison)"
-# Capstone methodology — "Benchmarking against Prosody running in Docker
-#                         (lightweight Lua baseline)"
-#
-# WHAT THIS SCRIPT DOES:
-#   1. Pulls and starts Prosody in Docker with matching configuration
-#      (same domain, same users, same MUC enabled).
-#   2. Runs the Tsung benchmark against Prosody.
-#   3. Measures Prosody's memory footprint (RSS via /proc).
-#   4. Prints a comparison summary.
-#
-# REQUIREMENTS:
-#   sudo apt install docker.io tsung
-#   (Tsung must be installed for the benchmark to run)
-#
-# USAGE:
-#   ./prosody_baseline.sh [--skip-bench]
-#
-# ===========================================================================
+
 set -e
 
 DOMAIN="angelic.local"
-PROSODY_PORT=5223          # use 5223 to avoid conflict with the unikernel on 5222
+PROSODY_PORT=5223
 CONTAINER_NAME="prosody_baseline"
 BENCH_SCENARIO="tsung_angelic_prosody.xml"
 
@@ -34,64 +13,40 @@ CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
-ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+info() { echo -e "${CYAN}[info]${NC} $*"; }
+ok() { echo -e "${GREEN}[ok]${NC} $*"; }
+warn() { echo -e "${YELLOW}[warn]${NC} $*"; }
+err() { echo -e "${RED}[error]${NC} $*" >&2; }
 
 SKIP_BENCH=0
 for arg in "$@"; do
     [[ "$arg" == "--skip-bench" ]] && SKIP_BENCH=1
 done
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 1: Generate Prosody configuration
-# ──────────────────────────────────────────────────────────────────────────────
-info "Generating Prosody configuration..."
+info "generating prosody configuration"
 
 cat > /tmp/prosody_bench.cfg.lua << 'EOF'
--- Prosody benchmark configuration
--- Mirrors the AngelicKernel's capabilities for fair comparison:
---   - Same domain
---   - Same user accounts (PLAIN auth, no TLS required on LAN)
---   - MUC enabled on conference subdomain
---   - No persistence (in-memory only, like the unikernel's RAM state)
-
 pidfile = "/var/run/prosody/prosody.pid"
 log = { error = "*syslog" }
-
--- Disable TLS for benchmark simplicity (unikernel requires TLS;
--- if comparing TLS-to-TLS, enable this and configure certs)
--- c2s_require_encryption = false
 
 VirtualHost "angelic.local"
     authentication = "internal_plain"
 
-    -- Same users as xmpp_credentials[] in xmpp_handlers.c
-    --   user1/pass1, user2/pass2, admin/admin
-    -- (set via prosodyctl adduser after startup)
-
 Component "conference.angelic.local" "muc"
     name = "Benchmark Chat Service"
     restrict_room_creation = false
-    max_history_messages = 0        -- no history = closest to unikernel behaviour
+    max_history_messages = 0
 EOF
 
-ok "Configuration written to /tmp/prosody_bench.cfg.lua"
+ok "configuration written to /tmp/prosody_bench.cfg.lua"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 2: Stop any existing container
-# ──────────────────────────────────────────────────────────────────────────────
 if docker ps -q --filter "name=${CONTAINER_NAME}" | grep -q .; then
-    info "Stopping existing Prosody container..."
+    info "stopping existing prosody container"
     docker stop "${CONTAINER_NAME}" >/dev/null
-    docker rm   "${CONTAINER_NAME}" >/dev/null
+    docker rm "${CONTAINER_NAME}" >/dev/null
 fi
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 3: Start Prosody
-# ──────────────────────────────────────────────────────────────────────────────
-info "Starting Prosody container (port ${PROSODY_PORT} → 5222)..."
+info "starting prosody container (port ${PROSODY_PORT} → 5222)"
 
 docker run -d \
     --name "${CONTAINER_NAME}" \
@@ -100,30 +55,24 @@ docker run -d \
     prosody/prosody:latest \
     >/dev/null
 
-ok "Prosody container started (ID: $(docker ps -q --filter name=${CONTAINER_NAME}))"
+ok "prosody container started (id: $(docker ps -q --filter name=${CONTAINER_NAME}))"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 4: Wait for Prosody to be ready
-# ──────────────────────────────────────────────────────────────────────────────
-info "Waiting for Prosody to accept connections..."
+info "waiting for prosody to accept connections"
 for i in $(seq 1 30); do
     if nc -z 127.0.0.1 "${PROSODY_PORT}" 2>/dev/null; then
-        ok "Prosody is accepting connections (took ${i}s)"
+        ok "prosody is accepting connections (took ${i}s)"
         break
     fi
     sleep 1
     if [[ $i -eq 30 ]]; then
-        err "Prosody did not start within 30 seconds"
+        err "prosody did not start within 30 seconds"
         docker logs "${CONTAINER_NAME}"
         exit 1
     fi
 done
-sleep 2  # extra settle time
+sleep 2
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 5: Create test users in Prosody
-# ──────────────────────────────────────────────────────────────────────────────
-info "Creating test users..."
+info "creating test users"
 
 for user_pass in "user1:pass1" "user2:pass2" "admin:admin"; do
     user="${user_pass%%:*}"
@@ -133,12 +82,9 @@ for user_pass in "user1:pass1" "user2:pass2" "admin:admin"; do
         2>/dev/null || warn "User ${user} may already exist"
 done
 
-ok "Test users created"
+ok "test users created"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 6: Measure memory footprint (baseline — before any connections)
-# ──────────────────────────────────────────────────────────────────────────────
-info "Measuring Prosody memory footprint (baseline)..."
+info "measuring prosody memory footprint (baseline)"
 
 PROSODY_PID=$(docker exec "${CONTAINER_NAME}" pgrep -f "prosody" | head -1 2>/dev/null || true)
 
@@ -146,61 +92,51 @@ if [[ -n "${PROSODY_PID}" ]]; then
     PROSODY_RSS_KB=$(docker exec "${CONTAINER_NAME}" \
         awk '/VmRSS/{print $2}' "/proc/${PROSODY_PID}/status" 2>/dev/null || echo "N/A")
     PROSODY_RSS_MB=$(echo "scale=1; ${PROSODY_RSS_KB} / 1024" | bc 2>/dev/null || echo "N/A")
-    ok "Prosody baseline RSS: ${PROSODY_RSS_KB} KB (${PROSODY_RSS_MB} MB)"
+    ok "prosody baseline rss: ${PROSODY_RSS_KB} kb (${PROSODY_RSS_MB} mb)"
 else
-    warn "Could not find Prosody PID inside container for memory measurement"
+    warn "could not find prosody pid inside container for memory measurement"
     PROSODY_RSS_KB="N/A"
     PROSODY_RSS_MB="N/A"
 fi
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 7: (Optional) Run Tsung benchmark against Prosody
-# ──────────────────────────────────────────────────────────────────────────────
 if [[ ${SKIP_BENCH} -eq 0 ]]; then
     if ! command -v tsung &>/dev/null; then
-        warn "Tsung not found — skipping benchmark"
-        warn "Install with: sudo apt install tsung"
+        warn "tsung not found, skipping benchmark"
+        warn "install with: sudo apt install tsung"
     else
-        info "Generating Tsung scenario for Prosody (port ${PROSODY_PORT})..."
+        info "generating tsung scenario for prosody (port ${PROSODY_PORT})"
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-        # Patch the Tsung scenario to use Prosody's port
         sed "s/port=\"5222\"/port=\"${PROSODY_PORT}\"/" \
             "${SCRIPT_DIR}/tsung_angelic.xml" \
             > "/tmp/${BENCH_SCENARIO}"
 
-        info "Running Tsung against Prosody..."
+        info "running tsung against prosody"
         LOG_DIR=~/.tsung/log/prosody_$(date +%Y%m%d_%H%M%S)
         tsung -f "/tmp/${BENCH_SCENARIO}" -l "${LOG_DIR}" start
 
-        ok "Tsung complete. Generating HTML report..."
+        ok "tsung complete, generating html report"
         (cd "${LOG_DIR}" && perl /usr/share/tsung/tsung_stats.pl)
-        ok "Report: ${LOG_DIR}/report.html"
+        ok "report: ${LOG_DIR}/report.html"
     fi
 fi
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 8: Print comparison summary
-# ──────────────────────────────────────────────────────────────────────────────
 echo
-echo "═══════════════════════════════════════════════════════════"
-echo " Prosody Baseline Summary"
-echo "═══════════════════════════════════════════════════════════"
-echo " Container:    ${CONTAINER_NAME}"
-echo " Port:         127.0.0.1:${PROSODY_PORT}"
-echo " Domain:       ${DOMAIN}"
-echo " Memory (RSS): ${PROSODY_RSS_MB} MB  (${PROSODY_RSS_KB} KB)"
+echo "prosody baseline summary"
+echo "container: ${CONTAINER_NAME}"
+echo "port: 127.0.0.1:${PROSODY_PORT}"
+echo "domain: ${DOMAIN}"
+echo "memory (RSS): ${PROSODY_RSS_MB} mb (${PROSODY_RSS_KB} kb)"
 echo
-echo " AngelicKernel comparison:"
-echo "   Boot footprint: ~512 MB allocated QEMU RAM"
-echo "   XMPP server:    embedded in kernel image"
-echo "   No OS/libc overhead: bare-metal unikernel"
+echo "AngelicKernel comparison:"
+echo "boot footprint: ~512 mb allocated qemu ram"
+echo "xmpp server: embedded in kernel image"
+echo "no os/libc overhead: bare-metal unikernel"
 echo
-echo " To measure AngelicKernel memory during runtime:"
-echo "   (from host while QEMU is running)"
-echo "   ps aux | grep qemu  # see resident set size"
-echo "   cat /proc/\$(pgrep qemu)/status | grep VmRSS"
-echo "═══════════════════════════════════════════════════════════"
+echo "to measure AngelicKernel memory during runtime:"
+echo "(from host while qemu is running)"
+echo "ps aux | grep qemu # see resident set size"
+echo "cat /proc/\$(pgrep qemu)/status | grep VmRSS"
 
-info "Leaving Prosody running for manual testing."
-info "Stop with: docker stop ${CONTAINER_NAME} && docker rm ${CONTAINER_NAME}"
+info "leaving prosody running for manual testing"
+info "stop with: docker stop ${CONTAINER_NAME} && docker rm ${CONTAINER_NAME}"

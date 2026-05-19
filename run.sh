@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-DISK_BACKEND="ata"   # "ahci" for SATA
+DISK_BACKEND="ata"   # "ahci" for sata
 
 if [ -z "${ACCEL}" ]; then
     if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] && \
@@ -10,10 +10,10 @@ if [ -z "${ACCEL}" ]; then
     else
         ACCEL="tcg"
         if [ ! -e /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
-            echo "[INFO] KVM not available, falling back to TCG."
-            echo "       To enable KVM: sudo usermod -aG kvm \$USER && newgrp kvm"
+            echo "[info] kvm not available, falling back to tcg"
+            echo "to enable kvm, use sudo usermod -aG kvm \$USER && newgrp kvm"
         else
-            echo "[INFO] Host CPU lacks PKU — KVM cannot expose it, falling back to TCG."
+            echo "[info] host cpu lacks pku, kvm cannot expose it, falling back to tcg"
         fi
     fi
 fi
@@ -27,10 +27,11 @@ for d in /usr/share/OVMF /usr/share/edk2/ovmf /usr/share/edk2-ovmf /usr/share/qe
     done
 done
 [ -z "$OVMF_CODE" ] && {
-    echo "ERROR: OVMF firmware not found. Install with one of:"
-    echo "         sudo apt install ovmf           # Debian/Ubuntu"
-    echo "         sudo dnf install edk2-ovmf      # Fedora"
-    echo "         sudo pacman -S edk2-ovmf        # Arch"
+    echo "OVMF firmware not found"
+    echo "install with one of:"
+    echo "sudo apt install ovmf # debian/ubuntu"
+    echo "sudo dnf install edk2-ovmf # fedora"
+    echo "sudo pacman -S edk2-ovmf # arch"
     exit 1
 }
 
@@ -40,10 +41,10 @@ for d in /usr/share/OVMF /usr/share/edk2/ovmf /usr/share/edk2-ovmf /usr/share/qe
         [ -f "$d/$name" ] && { OVMF_VARS_TEMPLATE="$d/$name"; break 2; }
     done
 done
-[ -z "$OVMF_VARS_TEMPLATE" ] && { echo "ERROR: OVMF_VARS template not found alongside $OVMF_CODE"; exit 1; }
+[ -z "$OVMF_VARS_TEMPLATE" ] && { echo "OVMF_VARS template not found alongside $OVMF_CODE"; exit 1; }
 
-echo "[INFO]  OVMF code: $OVMF_CODE"
-echo "[INFO]  OVMF vars: $OVMF_VARS_TEMPLATE (template)"
+echo "[info] OVMF code: $OVMF_CODE"
+echo "[info] OVMF vars: $OVMF_VARS_TEMPLATE (template)"
 
 make
 
@@ -55,11 +56,11 @@ if [ ! -f OVMF_VARS.fd ]; then
 fi
 
 if [ ! -f data.img ]; then
-    echo "Creating data.img (1 MB raw — persistent XMPP store)..."
+    echo "creating data.img (1 mb for persistent XMPP store)"
     qemu-img create -f raw data.img 1M
 fi
 
-echo "Launching AngelicKernel (disk backend: ${DISK_BACKEND}, accel: ${ACCEL})..."
+echo "launching AngelicKernel (disk backend: ${DISK_BACKEND}, accel: ${ACCEL})"
 
 if [ "${DISK_BACKEND}" = "ata" ]; then
     qemu-system-x86_64 \
@@ -104,7 +105,8 @@ elif [ "${DISK_BACKEND}" = "ahci" ]; then
         -global isa-debugcon.iobase=0x402
 
 else
-    echo "ERROR: Unknown DISK_BACKEND '${DISK_BACKEND}'. Use 'ata' or 'ahci'."
+    echo "unknown disk_backend '${DISK_BACKEND}'"
+    echo "use 'ata' or 'ahci'."
     exit 1
 fi
 

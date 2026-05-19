@@ -9,10 +9,10 @@ REQUIRED_TOOLS := $(CC) $(NASM) objcopy ld qemu-img
 
 _check := $(foreach t,$(REQUIRED_TOOLS), \
     $(if $(shell command -v $(t) 2>/dev/null),, \
-        $(error Required tool '$(t)' not found. Run: sudo apt install build-essential nasm qemu-utils)))
+        $(error required tool '$(t)' not found)))
 
 _check_efi := $(if $(wildcard $(EFI_INC)/efi.h),, \
-    $(error EFI headers not found at $(EFI_INC). Run: sudo apt install gnu-efi))
+    $(error efi headers not found at $(EFI_INC)))
 
 MBEDTLS_DIR ?= ./mbedtls
 
@@ -183,21 +183,21 @@ $(MBEDTLS_DIR)/library/gcm.o: $(MBEDTLS_DIR)/library/gcm.c
 
 check-pku:
 	@grep -q pku /proc/cpuinfo \
-		&& echo "PKU supported — real-hardware MPK testing is possible" \
-		|| echo "PKU NOT found — this CPU cannot run MPK in hardware"
+		&& echo "pku supported, mpk testing is possible" \
+		|| echo "pku not found, this cpu cannot run mpk"
 
 check-kvm:
 	@[ -e /dev/kvm ] \
-		&& echo "KVM available — use ACCEL=kvm bash run.sh for near-native speed" \
-		|| echo "KVM not available — check BIOS VT-x/AMD-V settings"
+		&& echo "kvm available" \
+		|| echo "kvm not available"
 
 info:
-	@echo "CC = $(CC)"
-	@echo "NASM = $(NASM)"
-	@echo "EFI_INC = $(EFI_INC)"
-	@echo "EFI_LIB = $(EFI_LIB)"
-	@echo "EFI_CRT = $(EFI_CRT)"
-	@echo "LIBGCC = $(LIBGCC)"
-	@echo "MBEDTLS = $(MBEDTLS_DIR)"
+	@echo "cc = $(CC)"
+	@echo "nasm = $(NASM)"
+	@echo "efi_inc = $(EFI_INC)"
+	@echo "efi_lib = $(EFI_LIB)"
+	@echo "efi_crt = $(EFI_CRT)"
+	@echo "libgcc = $(LIBGCC)"
+	@echo "mbedtls = $(MBEDTLS_DIR)"
 
 .PHONY: all clean mbedtls-fetch check-pku check-kvm info

@@ -2,28 +2,24 @@
 
 volatile int packet_pending = 0;
 
-// Matches the registers saved in assembly
 typedef struct {
-    // General Purpose Registers (Last pushed = First here)
     uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp;
     uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
 
-    // Interrupt info (Pushed by our macros)
     uint64_t int_no;
     uint64_t err_code;
 
-    // Return Stack (Pushed by CPU)
     uint64_t rip, cs, rflags, rsp, ss;
 } __attribute__((packed)) registers_t;
 
 typedef struct {
-    uint16_t isr_low;    // The lower 16 bits of the handler's memory address
-    uint16_t kernel_cs;  // The Code Segment Selector (Where is the code?)
-    uint8_t  ist;        // Interrupt Stack Table (Stack switching mechanism)
-    uint8_t  attributes; // Type (Interrupt vs Trap), DPL (Permissions), Present bit
-    uint16_t isr_mid;    // The middle 16 bits of the handler's address
-    uint32_t isr_high;   // The upper 32 bits of the handler's address
-    uint32_t reserved;   // Must be ZERO.
+    uint16_t isr_low;
+    uint16_t kernel_cs;
+    uint8_t ist;
+    uint8_t attributes;
+    uint16_t isr_mid;
+    uint32_t isr_high;
+    uint32_t reserved;
 } __attribute__((packed)) idt_entry_t;
 
 typedef struct {
@@ -35,13 +31,6 @@ __attribute__((aligned(0x10)))
 static idt_entry_t idt[256];
 static idtr_t idtr;
 
-//extern uint32_t e1000_read_reg(uint64_t base, uint32_t offset);
-//extern uint64_t e1000_mmio_base_phys;
-/* signal packet_pending = 1 for any hardware IRQ
- * and let the main loop's trampoline-guarded angelic_netif_poll() drain the
- * NIC.  lwIP's ethernet_input() will discard the frame if there is nothing
- * waiting, so a false-positive flag costs one empty poll — not a crash.
- */
 extern void* isr_stub_table[];
 extern void load_idt(void* idtr_ptr);
 extern void serial_print(const char* str);
@@ -56,8 +45,8 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
-#define PIC1 0x20 // IO base for master PIC
-#define PIC2 0xA0 // IO base for slave PIC
+#define PIC1 0x20
+#define PIC2 0xA0
 #define PIC1_COMMAND PIC1
 #define PIC1_DATA (PIC1 + 1)
 #define PIC2_COMMAND PIC2
@@ -65,28 +54,28 @@ static inline uint8_t inb(uint16_t port) {
 
 void pic_remap(int offset1, int offset2) {
 	unsigned char a1, a2;
-	a1 = inb(PIC1_DATA); // save masks, read the current "Interrupt Mask Register" (IMR)
+	a1 = inb(PIC1_DATA);
 	a2 = inb(PIC2_DATA);
 
-	outb(PIC1_COMMAND, 0x11); // ICW1: Initialization Command, starts the initialization sequence (in cascade mode)
+	outb(PIC1_COMMAND, 0x11);
 	outb(PIC2_COMMAND, 0x11);
 
-	outb(PIC1_DATA, offset1); // ICW2: Master PIC vector offset
-	outb(PIC2_DATA, offset2); // ICW2: Slave PIC vector offset
+	outb(PIC1_DATA, offset1);
+	outb(PIC2_DATA, offset2);
 
-	outb(PIC1_DATA, 4); // ICW3: tell Master PIC that there is a slave PIC at IRQ2 (0000 0100)
-	outb(PIC2_DATA, 2); // ICW3: tell Slave PIC its cascade identity (0000 0010)
+	outb(PIC1_DATA, 4);
+	outb(PIC2_DATA, 2);
 
-	outb(PIC1_DATA, 0x01); // ICW4: 8086 mode
+	outb(PIC1_DATA, 0x01);
 	outb(PIC2_DATA, 0x01);
 
-	outb(PIC1_DATA, a1); // restore saved masks.
+	outb(PIC1_DATA, a1);
 	outb(PIC2_DATA, a2);
 }
 
 void pic_send_eoi(unsigned char irq) {
 	if (irq >= 8) {
-        outb(PIC2_COMMAND, 0x20); // The Value 0x20 is the specific command byte for "Non-Specific EOI."
+        outb(PIC2_COMMAND, 0x20);
     }
 
 	outb(PIC1_COMMAND, 0x20);
@@ -95,23 +84,20 @@ void pic_send_eoi(unsigned char irq) {
 void idt_set_gate(uint8_t vector, void* isr) {
     uint64_t addr = (uint64_t)isr;
     idt[vector].isr_low = addr & 0xFFFF;
-    idt[vector].kernel_cs = 0x38; // tells the CPU which GDT segment the Interrupt Handler code lives in. 64-bit Kernel Code Segment is located at offset 0x38.
-    idt[vector].ist = 0; // do not use the IST(Interrupt Stack Table), use the standard legacy stack switching mechanism.
-    idt[vector].attributes = 0x8E; // value is 1000 1110, bit 7 (Present = 1), bits 6-5 (DPL = 00) only the Kernel (Ring 0) can access this, bit 4 (S = 0) Interrupt/Trap Gates, Bits 3-0 (Type = 1110): 64-bit Interrupt Gate
+    idt[vector].kernel_cs = 0x38;
+    idt[vector].ist = 0;
+    idt[vector].attributes = 0x8E;
     idt[vector].isr_mid = (addr >> 16) & 0xFFFF;
     idt[vector].isr_high = (addr >> 32) & 0xFFFFFFFF;
-    idt[vector].reserved = 0; // must be zero
+    idt[vector].reserved = 0;
 }
 
 void init_idt() {
-    // Remap PIC so hardware IRQs start at 32 instead of 0
     pic_remap(32, 40);
 
-    // Unmask all interrupts (for now) to ensure we get e1000
     outb(PIC1_DATA, 0x00);
     outb(PIC2_DATA, 0x00);
 
-    // Install stubs for Exceptions (0-31) and IRQs (32-47)
     for (int i = 0; i < 48; i++) {
         idt_set_gate(i, isr_stub_table[i]);
     }
@@ -121,75 +107,50 @@ void init_idt() {
 
     load_idt(&idtr);
     
-    serial_print("[KERNEL] IDT Initialized (PIC Remapped).\n");
+    serial_print("[kernel] idt initialized (pic remapped).\n");
 }
 
 void interrupt_handler(registers_t* regs) {
-    // ── MPK self-test recovery — MUST be first ──────────────────────
-    // mpk_diagnostic.c sets this flag before intentionally touching
-    // Key-1 memory. If we fault here with that flag set, it means
-    // MPK fired correctly. We skip past the faulting instruction
-    // and return instead of halting.
     if (regs->int_no == 14) {
         extern volatile int mpk_test_in_progress;
         extern volatile int mpk_test_fault_occurred;
+
         if (mpk_test_in_progress) {
             mpk_test_fault_occurred = 1;
             mpk_test_in_progress = 0;
-            regs->rip += 2;   // skip the 2-byte `mov al, [rax]` instruction
-            return;           // resume after the inline asm block — no crash
+            regs->rip += 2;
+
+            return;
         }
     }
-    // ────────────────────────────────────────────────────────────────
-
-    // Case 1: Hardware Interrupts (IRQs)
+    
     if (regs->int_no >= 32 && regs->int_no < 48) {
-        // // serial_print("IRQ Received\n");
-        
-        // // check pci interrupt (IRQ 10 or 11 for QEMU e1000), check e1000 status for IRQ > 32 to be safe for this phase
-        // if (e1000_mmio_base_phys != 0) {
-        //     uint32_t cause = e1000_read_reg(e1000_mmio_base_phys, 0xC0); // Read ICR
-
-        //     if (cause != 0) { // Bit 7 = RXT0 (Timer Interrupt / Packet Received)
-        //         serial_print("[INT] e1000 Cause: "); 
-        //         serial_print_hex(cause); 
-        //         serial_print("\n");
-
-        //         // If it's a Receive interrupt (Bit 7) OR a General/Link interrupt
-        //         // Just flag the kernel to look at the card. It's cheap to check.
-        //         packet_pending = 1;
-        //     }
-        // }
-        
-        /* unconditionally signal packet_pending for any IRQ.
-         * The main loop calls angelic_netif_poll() via the MPK trampoline,
-         * which safely reads ICR and drains the NIC ring.  A spurious
-         * flag is cheap (one empty poll); a Key-1 fault is fatal.
-         */
         packet_pending = 1;
 
         pic_send_eoi(regs->int_no - 32);
 
         return;
     }
-
-    // Case 2: CPU Exceptions
-    serial_print("\n!!! CPU EXCEPTION !!!\n");
-    serial_print("INT Number: "); serial_print_hex(regs->int_no);
-    serial_print("\nError Code: "); serial_print_hex(regs->err_code);
-    serial_print("\nRIP: "); serial_print_hex(regs->rip);
+    
+    serial_print("\ncpu exception\n");
+    serial_print("int number: ");
+    serial_print_hex(regs->int_no);
+    serial_print("\nerror code: ");
+    serial_print_hex(regs->err_code);
+    serial_print("\nrip: ");
+    serial_print_hex(regs->rip);
 
     if (regs->int_no == 14) {
         uint64_t cr2;
         
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
 
-        serial_print("\nPAGE FAULT @ Address: ");
+        serial_print("\npage fault @ address: ");
         
         serial_print_hex(cr2);
     } 
 
-    serial_print("\nHalting system.\n");
+    serial_print("\nhalting system\n");
     
     __asm__ volatile ("cli; hlt");
 }

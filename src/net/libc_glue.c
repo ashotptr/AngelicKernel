@@ -246,7 +246,9 @@ int atoi(const char *str) {
 
 int putchar(int c) {
     char str[2] = {(char)c, '\0'};
+
     serial_print(str);
+    
     return c;
 }
 
@@ -283,6 +285,7 @@ static void print_int(long n) {
 
     if (n == 0) {
         putchar('0');
+
         return;
     }
 
@@ -312,6 +315,7 @@ static void print_hex(unsigned long n) {
 
     if (n == 0) {
         putchar('0');
+
         return;
     }
 
@@ -326,50 +330,68 @@ static void print_hex(unsigned long n) {
 }
 
 static void print_str(const char *s) {
-    if (!s) s = "(null)";
-    while (*s) putchar(*s++);
+    if (!s) {
+        s = "(null)";
+    }
+
+    while (*s) {
+        putchar(*s++);
+    }
 }
 
-//review
 int vprintf(const char *format, va_list args) {
     int count = 0;
 
     while (*format) {
         if (*format == '%') {
             format++;
+
             switch (*format) {
                 case 'd':
                     print_int(va_arg(args, int));
+
                     break;
+
                 case 'u':
                     print_int((long)(unsigned long)(unsigned int)va_arg(args, unsigned int));
+                    
                     break;
+
                 case 'x':
                     print_hex(va_arg(args, unsigned long));
+                    
                     break;
+
                 case 'p':
                     print_str("0x");
                     print_hex(va_arg(args, unsigned long));
+                    
                     break;
                 case 's':
                     print_str(va_arg(args, char*));
+                    
                     break;
                 case 'c':
                     putchar(va_arg(args, int));
+                    
                     break;
                 case '%':
                     putchar('%');
+                    
                     break;
                 default:
                     putchar('%');
                     putchar(*format);
             }
-        } else {
+        }
+        else {
             putchar(*format);
         }
+
         format++;
         count++;
     }
+
     return count;
 }
 
@@ -385,7 +407,6 @@ int printf(const char *format, ...) {
     return ret;
 }
 
-//review
 int vsnprintf(char *str, size_t size, const char *format, va_list args) {
     char *out = str;
     size_t remaining = size;
@@ -394,77 +415,120 @@ int vsnprintf(char *str, size_t size, const char *format, va_list args) {
         if (*format != '%') {
             *out++ = *format++;
             remaining--;
+
             continue;
         }
 
-        format++; /* skip '%' */
-
-        /* Handle optional 'l' or 'z' length modifier */
+        format++;
+        
         int is_long = 0;
         int is_size = 0;
-        if (*format == 'l') { is_long = 1; format++; }
-        else if (*format == 'z') { is_size = 1; format++; }
+
+        if (*format == 'l') { 
+            is_long = 1; 
+            format++; 
+        }
+        else if (*format == 'z') { 
+            is_size = 1;
+            format++;
+        }
 
         switch (*format) {
             case 'd':
             case 'i': {
                 long val = is_long ? va_arg(args, long) : (long)va_arg(args, int);
-                if (val < 0 && remaining > 1) { *out++ = '-'; remaining--; val = -val; }
+                
+                if (val < 0 && remaining > 1) { 
+                    *out++ = '-'; 
+                    remaining--; 
+                    val = -val; 
+                }
+                
                 simple_append_int(&out, &remaining, (unsigned long)val);
+                
                 break;
             }
             case 'u': {
-                unsigned long val = (is_long || is_size)
-                    ? va_arg(args, unsigned long)
-                    : (unsigned long)va_arg(args, unsigned int);
+                unsigned long val = (is_long || is_size) ? va_arg(args, unsigned long) : (unsigned long)va_arg(args, unsigned int);
+
                 simple_append_int(&out, &remaining, val);
+
                 break;
             }
             case 'x':
             case 'X': {
-                unsigned long val = (is_long || is_size)
-                    ? va_arg(args, unsigned long)
-                    : (unsigned long)va_arg(args, unsigned int);
+                unsigned long val = (is_long || is_size) ? va_arg(args, unsigned long) : (unsigned long)va_arg(args, unsigned int);
+                
                 simple_append_hex(&out, &remaining, val);
+                
                 break;
             }
             case 'p': {
-                if (remaining > 2) { *out++ = '0'; *out++ = 'x'; remaining -= 2; }
+                if (remaining > 2) { 
+                    *out++ = '0'; 
+                    *out++ = 'x'; 
+                    remaining -= 2; 
+                }
+
                 simple_append_hex(&out, &remaining, va_arg(args, unsigned long));
+                
                 break;
             }
             case 's': {
                 const char *s = va_arg(args, const char *);
-                if (!s) s = "(null)";
-                while (*s && remaining > 1) { *out++ = *s++; remaining--; }
+
+                if (!s) {
+                    s = "(null)";
+                }
+
+                while (*s && remaining > 1) { 
+                    *out++ = *s++;
+                    remaining--; 
+                }
+
                 break;
             }
             case 'c': {
                 int c = va_arg(args, int);
-                if (remaining > 1) { *out++ = (char)c; remaining--; }
+
+                if (remaining > 1) { 
+                    *out++ = (char)c; 
+                    remaining--; 
+                }
+
                 break;
             }
             case '%': {
-                if (remaining > 1) { *out++ = '%'; remaining--; }
+                if (remaining > 1) { 
+                    *out++ = '%'; 
+                    remaining--; 
+                }
+
                 break;
             }
             default: {
-                /* Unknown specifier: emit literally and consume no arg.
-                 * This is imprecise but safe — better than corrupting
-                 * the va_list by consuming the wrong type. */
-                if (remaining > 1) { *out++ = '%'; remaining--; }
-                if (remaining > 1) { *out++ = *format; remaining--; }
+                if (remaining > 1) { 
+                    *out++ = '%';
+                    remaining--;
+                }
+
+                if (remaining > 1) { 
+                    *out++ = *format;
+                    remaining--; 
+                }
+
                 break;
             }
         }
+
         format++;
     }
 
     *out = '\0';
+
     return (int)(out - str);
 }
 
-//review
 int snprintf(char *str, size_t size, const char *format, ...) {
     va_list args;
 
@@ -477,63 +541,10 @@ int snprintf(char *str, size_t size, const char *format, ...) {
     return ret;
 }
 
-//review
-// int printf(const char *format, ...) {
-//     char buf[256];
-//     va_list args;
-
-//     va_start(args, format);
-    
-//     int ret = vsnprintf(buf, sizeof(buf), format, args);
-    
-//     va_end(args);
-    
-//     serial_print(buf);
-    
-//     return ret;
-// }
-
-/* ------------------------------------------------------------------
- * Hardware TRNG hook
- *
- * Platforms MUST override this weak stub with a real implementation
- * that reads one 32-bit word from the MCU's hardware True Random
- * Number Generator (TRNG) peripheral.
- *
- * Return value:
- *   1  — *out has been filled with a hardware-entropy word.
- *   0  — TRNG unavailable; caller will fall back to the software CSPRNG.
- *
- * Example (Cortex-M4 with STM32 RNG peripheral):
- *
- *   int hw_trng_read(uint32_t *out) {
- *       while (!(RNG->SR & RNG_SR_DRDY));   // wait for data ready
- *       *out = RNG->DR;
- *       return 1;
- *   }
- *
- * RFC 6120 §4.7.3 — stream IDs MUST be hard to predict.
- * RFC 6120 §7.7.1 — server-generated resource IDs (we treat the same).
- * ------------------------------------------------------------------ */
-/* ------------------------------------------------------------------
- * hw_trng_read — x86-64 implementation using RDRAND.
- *
- * RDRAND (available since Ivy Bridge / QEMU -cpu max,+pku) fills a
- * 32-bit register and sets CF=1 on success.  We retry up to 10 times
- * as recommended by the Intel SDM; on QEMU this never actually retries.
- *
- * This replaces the weak stub so secure_random_u32() no longer falls
- * back to a compile-time seed, eliminating the boot-time
- * [SECURITY WARNING] and giving every TLS session and XMPP stream ID
- * real hardware entropy.
- *
- * RFC 6120 §4.7.3 — stream IDs MUST be hard to predict.
- * RFC 6120 §7.7.1 — server-generated resource IDs (we treat the same).
- * ------------------------------------------------------------------ */
 int hw_trng_read(uint32_t *out) {
     for (int attempt = 0; attempt < 10; attempt++) {
         unsigned int val = 0;
-        unsigned char cf  = 0;
+        unsigned char cf = 0;
 
         __asm__ volatile(
             "rdrand %0\n"
@@ -545,50 +556,21 @@ int hw_trng_read(uint32_t *out) {
 
         if (cf) {
             *out = (uint32_t)val;
+
             return 1;
         }
     }
 
-    return 0;  /* RDRAND not ready — caller uses xorshift64* fallback */
+    return 0;
 }
 
-/* ------------------------------------------------------------------
- * secure_random_u32
- *
- * Returns a cryptographically unpredictable 32-bit value suitable for
- * use in stream IDs and resource IDs per RFC 6120 §4.7.3.
- *
- * Algorithm:
- *   1. Try hw_trng_read().  If it succeeds, return the hardware word
- *      directly — this is the preferred path.
- *   2. Otherwise, run an xorshift64* CSPRNG whose 64-bit state is
- *      (re-)seeded from hw_trng_read() on the very first call.  If
- *      the TRNG is still unavailable at seeding time the state is
- *      initialised from a compile-time constant, which degrades to a
- *      PRNG that is at least harder to predict than the old LCG but
- *      is NOT cryptographically secure.  The serial console will print
- *      a warning in that case so the condition is visible.
- *
- * xorshift64* reference:
- *   Vigna, S. "An experimental exploration of Marsaglia's xorshift
- *   generators, scrambled" (2016).  The * scrambler (multiply by a
- *   Weyl-sequence constant) gives good statistical quality; the period
- *   is 2^64-1.
- *
- * NOTE: the LCG rand() below is kept for any third-party code that
- * calls the standard rand() symbol, but it must NOT be used for
- * security-sensitive IDs.  See the SECURITY WARNING comment there.
- * ------------------------------------------------------------------ */
 unsigned int secure_random_u32(void) {
     uint32_t hw;
 
-    /* Fast path: real hardware entropy */
     if (hw_trng_read(&hw)) {
         return (unsigned int)hw;
     }
 
-    /* Software fallback: xorshift64* seeded from hardware entropy
-     * (or a compile-time constant if TRNG is not yet available). */
     static uint64_t state = 0;
     static int seeded = 0;
 
@@ -599,18 +581,13 @@ unsigned int secure_random_u32(void) {
 
         if (got_hi && got_lo) {
             state = ((uint64_t)seed_hi << 32) | seed_lo;
-        } else {
-            /* TRNG unavailable at seed time — degrade gracefully but
-             * warn loudly so the integrator notices. */
-            serial_print("[SECURITY WARNING] hw_trng_read() unavailable; "
-                         "secure_random_u32() is seeded from a constant. "
-                         "Override hw_trng_read() in your BSP.\n");
-            /* Mix in the address of the state variable as a tiny bit
-             * of environmental entropy so different builds differ. */
+        }
+        else {
+            serial_print("[security warning] hw_trng_read() unavailable\n");
+
             state = 0xDEADBEEFCAFEBABEULL ^ (uint64_t)(uintptr_t)&state;
         }
 
-        /* xorshift64 must never have an all-zero state */
         if (state == 0) {
             state = 0x123456789ABCDEF0ULL;
         }
@@ -618,7 +595,6 @@ unsigned int secure_random_u32(void) {
         seeded = 1;
     }
 
-    /* xorshift64* step */
     state ^= state >> 12;
     state ^= state << 25;
     state ^= state >> 27;
@@ -626,13 +602,6 @@ unsigned int secure_random_u32(void) {
     return (unsigned int)((state * 0x2545F4914F6CDD1DULL) >> 32);
 }
 
-/* ------------------------------------------------------------------
- * rand() — kept for ABI compatibility ONLY.
- *
- * SECURITY WARNING: This is a plain LCG.  It MUST NOT be used for
- * stream IDs, resource IDs, nonces, or any other security-sensitive
- * value.  Use secure_random_u32() instead.
- * ------------------------------------------------------------------ */
 int rand(void) {
     static unsigned long next = 123456789;
     next = next * 1103515245 + 12345;
@@ -641,7 +610,7 @@ int rand(void) {
 }
 
 void abort(void) {
-    serial_print("[FATAL] ABORT CALLED\n");
+    serial_print("[fatal] abort called\n");
 
     __asm__ volatile("cli; hlt");
     

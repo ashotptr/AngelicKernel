@@ -13,13 +13,11 @@
 
 void serial_print(const char* str);
 
-// this function must be defined for lwIP
 uint32_t sys_now(void) {
     uint32_t a, d;
-    // Read Time-Stamp Counter
+    
     __asm__ volatile("rdtsc" : "=a" (a), "=d" (d));
     
-    // 2GHz = 2,000,000 cycles per millisecond
     return a / 2000000; 
 }
 
@@ -27,86 +25,65 @@ static struct netif angelic_netif;
 static uint64_t global_mmio_base;
 
 static char rx_buffer[1514];
-/* BUG FIX #1: was `static char tx_buffer[1514];#define MAX_TX_SEGS 8` — the
- * #define was concatenated onto the same source line as the variable
- * declaration, which is a syntax error in C.  Split onto separate lines. */
 static char tx_buffer[1514];
-#define MAX_TX_SEGS  8      /* maximum pbuf chain depth we support zero-copy */
+#define MAX_TX_SEGS 8
 
-/* Fallback contiguous buffer (only used when chain is too deep) */
 static char tx_buffer_fallback[1514];
 
-/*
- * low_level_output_zerocopy — zero-copy version
- *
- * This function is called by lwIP's ethernet_input path for each outbound
- * Ethernet frame.  The pbuf chain `p` contains one fragment per element.
- *
- * Normal XMPP stanzas produce at most 2 pbuf fragments:
- *   1. Ethernet + IP + TCP header (from lwIP)
- *   2. Application payload (one pbuf per segment)
- *
- * We build a scatter array of (addr, len) pairs directly from the pbuf
- * chain and pass it to e1000_send_scatter() via the MPK trampoline.
- * No data is copied.
- *
- * BUG FIX #2: the original file had:
- *   extern err_t low_level_output_zerocopy(struct netif *netif, struct pbuf *p);
- * declared before this definition. That extern is invalid because this
- * function is `static` — a static function cannot have external linkage.
- * The extern declaration has been removed.
- */
 static err_t low_level_output_zerocopy(struct netif *netif, struct pbuf *p) {
     (void)netif;
     extern uint64_t global_mmio_base;
 
-    /* Count segments */
     int n_segs = 0;
-    for (struct pbuf *q = p; q != NULL; q = q->next) n_segs++;
 
-    if (n_segs == 0) return ERR_OK;
+    for (struct pbuf *q = p; q != NULL; q = q->next) {
+        n_segs++;
+    }
 
-    /* ── Fast path: scatter-gather (zero copy) ─────────────────────────── */
+    if (n_segs == 0) {
+        return ERR_OK;
+    }
+
     if (n_segs <= MAX_TX_SEGS) {
-        const void   *addrs[MAX_TX_SEGS];
-        uint16_t      lens [MAX_TX_SEGS];
+        const void *addrs[MAX_TX_SEGS];
+        uint16_t lens[MAX_TX_SEGS];
         int i = 0;
 
         for (struct pbuf *q = p; q != NULL; q = q->next) {
             addrs[i] = q->payload;
-            lens [i] = (uint16_t)q->len;
+            lens[i] = (uint16_t)q->len;
             i++;
         }
 
 #ifdef USE_MPK
         mpk_e1000_send_scatter(global_mmio_base, addrs, lens, n_segs);
 #else
-        /* Direct call (no MPK) — used when testing without MPK */
         extern int e1000_send_scatter(uint64_t, const void**, const uint16_t*, int);
+
         e1000_send_scatter(global_mmio_base, addrs, lens, n_segs);
 #endif
         return ERR_OK;
     }
 
-    /* ── Fallback: flatten into contiguous buffer ───────────────────────
-     * Reached only if the pbuf chain is unusually deep.  This is the
-     * original memcpy path, kept as a safety fallback.
-     */
     int len = 0;
+
     for (struct pbuf *q = p; q != NULL; q = q->next) {
-        if (len + (int)q->len > 1514) break;
+        if (len + (int)q->len > 1514) {
+            break;
+        }
+
         memcpy(tx_buffer_fallback + len, q->payload, q->len);
+
         len += q->len;
     }
 
 #ifdef USE_MPK
     extern int e1000_send_raw(uint64_t, void*, uint16_t);
-    mpk_trampoline_3((void*)e1000_send_raw,
-                     global_mmio_base,
-                     (uint64_t)tx_buffer_fallback,
-                     (uint64_t)len);
+
+    mpk_trampoline_3((void*)e1000_send_raw, global_mmio_base, (uint64_t)tx_buffer_fallback, (uint64_t)len);
 #else
     extern int e1000_send_raw(uint64_t, void*, uint16_t);
+
     e1000_send_raw(global_mmio_base, tx_buffer_fallback, len);
 #endif
 
@@ -139,6 +116,7 @@ void angelic_netif_poll() {
 
     if (len > 0) {
         struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
+
         if (p) {
             memcpy(p->payload, rx_buffer, len);
             
@@ -154,57 +132,68 @@ void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
     
     ip4_addr_t ip, netmask, gw;
 
-    /* All network values come from config.h — edit that file, not this one. */
     IP4_ADDR(&ip, ANGELIC_IP_0, ANGELIC_IP_1, ANGELIC_IP_2, ANGELIC_IP_3);
     IP4_ADDR(&netmask, ANGELIC_NM_0, ANGELIC_NM_1, ANGELIC_NM_2, ANGELIC_NM_3);
     IP4_ADDR(&gw, ANGELIC_GW_0, ANGELIC_GW_1, ANGELIC_GW_2, ANGELIC_GW_3);
 
-    serial_print("[NET] IP:      " 
-        /* stringification helper — we just print at runtime below */
-        "\n");
-    /* Print the actual IP to serial so the operator knows the address. */
+    serial_print("[net] ip: \n");
+
     {
         char buf[16];
-        /* simple itoa for one octet */
+
         #define OCT(n) ((uint8_t)(n))
         extern void serial_print_hex(uint64_t);
-        serial_print("[NET] IP:      ");
-        /* lwIP's ip4addr_ntoa requires a full ip4_addr_t — just print octets */
-        serial_print_hex(ANGELIC_IP_0); serial_print(".");
-        serial_print_hex(ANGELIC_IP_1); serial_print(".");
-        serial_print_hex(ANGELIC_IP_2); serial_print(".");
-        serial_print_hex(ANGELIC_IP_3); serial_print("\n");
-        serial_print("[NET] Netmask: ");
-        serial_print_hex(ANGELIC_NM_0); serial_print(".");
-        serial_print_hex(ANGELIC_NM_1); serial_print(".");
-        serial_print_hex(ANGELIC_NM_2); serial_print(".");
-        serial_print_hex(ANGELIC_NM_3); serial_print("\n");
-        serial_print("[NET] Gateway: ");
-        serial_print_hex(ANGELIC_GW_0); serial_print(".");
-        serial_print_hex(ANGELIC_GW_1); serial_print(".");
-        serial_print_hex(ANGELIC_GW_2); serial_print(".");
-        serial_print_hex(ANGELIC_GW_3); serial_print("\n");
+
+        serial_print("[net] ip: ");
+        serial_print_hex(ANGELIC_IP_0);
+        serial_print(".");
+        serial_print_hex(ANGELIC_IP_1);
+        serial_print(".");
+        serial_print_hex(ANGELIC_IP_2);
+        serial_print(".");
+        serial_print_hex(ANGELIC_IP_3);
+        serial_print("\n");
+        serial_print("[net] netmask: ");
+        serial_print_hex(ANGELIC_NM_0);
+        serial_print(".");
+        serial_print_hex(ANGELIC_NM_1);
+        serial_print(".");
+        serial_print_hex(ANGELIC_NM_2);
+        serial_print(".");
+        serial_print_hex(ANGELIC_NM_3);
+        serial_print("\n");
+        serial_print("[net] gateway: ");
+        serial_print_hex(ANGELIC_GW_0);
+        serial_print(".");
+        serial_print_hex(ANGELIC_GW_1);
+        serial_print(".");
+        serial_print_hex(ANGELIC_GW_2);
+        serial_print(".");
+        serial_print_hex(ANGELIC_GW_3);
+        serial_print("\n");
+
         (void)buf;
     }
     
-    serial_print("[DEBUG] Calling lwip_init()...\n");
+    serial_print("[debug] calling lwip_init()\n");
     lwip_init();
-    serial_print("[DEBUG] lwip_init() done.\n");
+    serial_print("[debug] lwip_init() done\n");
 
     //tcpip_init(tcpip_init_done, tcpip_init_done_param); 
     
     angelic_netif.hwaddr_len = 6;
+
     for(int i = 0; i < 6; i++) {
         angelic_netif.hwaddr[i] = mac[i];
     }
 
-    serial_print("[DEBUG] Adding netif...\n");
+    serial_print("[debug] adding netif\n");
     netif_add(&angelic_netif, &ip, &netmask, &gw, NULL, angelic_netif_init, ethernet_input);
     
-    serial_print("[DEBUG] Setting default...\n");
+    serial_print("[debug] setting default\n");
     netif_set_default(&angelic_netif);
     
-    serial_print("[DEBUG] Bringing interface up...\n");
+    serial_print("[debug] bringing interface up\n");
     netif_set_up(&angelic_netif);
 
     // for(int i = 0; i < 6; i++) {
@@ -213,7 +202,7 @@ void init_network_stack(uint64_t mmio_base, uint8_t *mac) {
 
     // angelic_netif.hwaddr_len = 6;
     
-    serial_print("[DEBUG] Network Stack Initialized.\n");
+    serial_print("[debug] network stack initialized\n");
 }
 
 // https://lwip.fandom.com/wiki/Writing_a_device_driver

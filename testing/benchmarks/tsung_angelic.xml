@@ -1,9 +1,5 @@
 <?xml version="1.0"?>
 <!DOCTYPE tsung SYSTEM "/usr/share/tsung/tsung-1.0.dtd">
-<!--
-  tsung_angelic.xml — Tsung load test for AngelicKernel XMPP
-  Corrected syntax: ts_jabber plugin, credentials via <options>, auth_sasl type.
--->
 
 <tsung loglevel="notice" version="1.0">
 

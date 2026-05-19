@@ -1,21 +1,16 @@
 #ifndef _CTYPE_H
 #define _CTYPE_H
 
-// A minimal ctype.h for bare metal LwIP
-
 static inline int isdigit(int c) { 
     return (c >= '0' && c <= '9'); 
 }
 
 static inline int isxdigit(int c) { 
-    return (c >= '0' && c <= '9') || 
-           (c >= 'a' && c <= 'f') || 
-           (c >= 'A' && c <= 'F'); 
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); 
 }
 
 static inline int isspace(int c) { 
-    return (c == ' ' || c == '\f' || c == '\n' || 
-            c == '\r' || c == '\t' || c == '\v'); 
+    return (c == ' ' || c == '\f' || c == '\n' || c == '\r' || c == '\t' || c == '\v'); 
 }
 
 static inline int islower(int c) { 

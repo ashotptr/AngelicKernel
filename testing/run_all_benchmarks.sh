@@ -1,43 +1,12 @@
 #!/usr/bin/env bash
-# run_all_benchmarks.sh — AngelicKernel Capstone §9.2 master benchmark runner
-#
-# Runs every measurement and test in the correct order, collects all data
-# into testing/graphs/data/, then generates all paper figures.
-#
-# PREREQUISITES
-#   • QEMU is running AngelicKernel and forwarding port 5222 to localhost.
-#     Either:
-#       (a) Start QEMU manually: bash run.sh   (then run this script)
-#       (b) Use --launch to auto-start QEMU for boot-time tests only.
-#   • Python packages: pip install colorama slixmpp matplotlib numpy
-#   • Tsung (optional, for load tests): sudo apt install tsung
-#   • Docker (optional, for baselines): docker pull prosody/prosody:0.12
-#
-# USAGE
-#   cd /path/to/AngelicKernel
-#   bash testing/run_all_benchmarks.sh                  # server already running
-#   bash testing/run_all_benchmarks.sh --host 10.0.2.15 # custom IP
-#   bash testing/run_all_benchmarks.sh --skip-tsung     # skip load tests
-#   bash testing/run_all_benchmarks.sh --skip-baselines # skip Prosody/Openfire
-#
-# OUTPUT
-#   testing/results/                 — timestamped results directory
-#   testing/results/TIMESTAMP/data/  — raw data files
-#   testing/results/TIMESTAMP/figs/  — PDF + PNG figures
-#   testing/results/TIMESTAMP/compliance_report.md
-#   testing/results/TIMESTAMP/summary.txt
-
 set -euo pipefail
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
 HOST="${XMPP_HOST:-127.0.0.1}"
 PORT="${XMPP_PORT:-5222}"
 SKIP_TSUNG=0
 SKIP_BASELINES=0
 PROSODY_PORT=5223
 OPENFIRE_PORT=5224
-
-# ── Parse args ─────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --host)            HOST="$2";       shift 2 ;;
@@ -50,7 +19,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -62,7 +30,6 @@ mkdir -p "$DATA_DIR" "$FIG_DIR"
 
 PYTHON="${PYTHON:-python3}"
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
 log()  { echo -e "\n\033[1;34m[$(date +%H:%M:%S)] $*\033[0m"; }
 ok()   { echo -e "  \033[1;32m✓\033[0m $*"; }
 warn() { echo -e "  \033[1;33m⚠\033[0m $*"; }
@@ -70,7 +37,7 @@ err()  { echo -e "  \033[1;31m✗\033[0m $*"; }
 
 wait_for_server() {
     local max=30
-    log "Waiting for server at $HOST:$PORT (max ${max}s)..."
+    log "Waiting for server at $HOST:$PORT (max ${max}s)"
     for i in $(seq 1 $max); do
         if nc -z "$HOST" "$PORT" 2>/dev/null; then
             ok "Server reachable after ${i}s"
@@ -82,7 +49,6 @@ wait_for_server() {
     return 1
 }
 
-# ── Verify server is up ────────────────────────────────────────────────────────
 log "=== AngelicKernel Capstone Benchmark Suite ==="
 echo "  Host:    $HOST:$PORT"
 echo "  Results: $RESULTS_DIR"
@@ -94,16 +60,12 @@ if ! wait_for_server; then
     exit 1
 fi
 
-# ── Step 1: MPK cycle benchmark ────────────────────────────────────────────────
-# The MPK benchmark runs inside the kernel at boot; we read its output from
-# the QEMU serial log.  If run.sh redirects serial to a file, extract it here.
 log "Step 1: Extract MPK cycle data from serial output"
 
 SERIAL_LOG="$PROJECT_ROOT/serial.log"
 MPK_CYCLES_FILE="$DATA_DIR/mpk_cycles.txt"
 
 if [[ -f "$SERIAL_LOG" ]]; then
-    # Extract "Result: N cycles / WRPKRU" lines
     grep -oP "Result: \K[0-9]+" "$SERIAL_LOG" > "$MPK_CYCLES_FILE" 2>/dev/null || true
     COUNT=$(wc -l < "$MPK_CYCLES_FILE" 2>/dev/null || echo 0)
     if [[ "$COUNT" -gt 0 ]]; then
@@ -112,7 +74,6 @@ if [[ -f "$SERIAL_LOG" ]]; then
         warn "No MPK cycle data found in serial.log"
         warn "Make sure run.sh redirects QEMU serial output to serial.log:"
         warn "  Add to run.sh: -serial file:serial.log"
-        # Write placeholder so graphs can still be generated
         echo "# No data — start QEMU with -serial file:serial.log" > "$MPK_CYCLES_FILE"
     fi
 else
@@ -120,8 +81,6 @@ else
     warn "Add -serial file:serial.log to your QEMU command in run.sh"
     echo "# No data — start QEMU with -serial file:serial.log" > "$MPK_CYCLES_FILE"
 fi
-
-# ── Step 2: Boot time measurement ─────────────────────────────────────────────
 log "Step 2: Boot time measurement (5 runs)"
 
 BOOT_CSV="$DATA_DIR/boot_times.csv"
@@ -138,7 +97,6 @@ else
     warn "Boot time CSV not created"
 fi
 
-# ── Step 3: Raw XMPP compliance test suite ────────────────────────────────────
 log "Step 3: Raw TCP compliance tests"
 
 RAW_JSON="$DATA_DIR/compliance.json"
@@ -156,7 +114,6 @@ if [[ -f "$RAW_JSON" ]]; then
     ok "Raw tests: $PASSED/$TOTAL passed"
 fi
 
-# ── Step 4: slixmpp compliance test suite ────────────────────────────────────
 log "Step 4: slixmpp compliance tests"
 
 $PYTHON "$SCRIPT_DIR/slixmpp_tests/slixmpp_suite.py" \
@@ -166,7 +123,6 @@ $PYTHON "$SCRIPT_DIR/slixmpp_tests/slixmpp_suite.py" \
 
 ok "slixmpp suite complete"
 
-# ── Step 5: Combined compliance report ────────────────────────────────────────
 log "Step 5: Generating compliance report"
 
 COMPLIANCE_REPORT="$RESULTS_DIR/compliance_report.md"
@@ -180,7 +136,6 @@ if [[ -f "$COMPLIANCE_REPORT" ]]; then
     ok "Compliance report: $COMPLIANCE_REPORT"
 fi
 
-# ── Step 6: Tsung load test ────────────────────────────────────────────────────
 if [[ "$SKIP_TSUNG" -eq 0 ]]; then
     log "Step 6: Tsung load test"
 
@@ -192,21 +147,17 @@ if [[ "$SKIP_TSUNG" -eq 0 ]]; then
         TSUNG_LOG_DIR="$RESULTS_DIR/tsung_angelic"
         mkdir -p "$TSUNG_LOG_DIR"
 
-        # Patch tsung XML to use the correct host/port
         TSUNG_XML_TMP="$RESULTS_DIR/tsung_angelic_patched.xml"
         sed "s/host=\"127.0.0.1\"/host=\"$HOST\"/g; s/port=\"5222\"/port=\"$PORT\"/g" \
             "$SCRIPT_DIR/benchmarks/tsung_angelic.xml" > "$TSUNG_XML_TMP"
 
-        log "Running Tsung (this takes ~2 minutes)..."
+        log "Running Tsung (this takes ~2 minutes)"
         if tsung -f "$TSUNG_XML_TMP" -l "$TSUNG_LOG_DIR" start; then
             ok "Tsung finished — generating HTML report"
             (cd "$TSUNG_LOG_DIR" && perl /usr/share/tsung/tsung_stats.pl 2>/dev/null) || true
 
-            # Extract latency and throughput from tsung stats CSV
             TSUNG_STATS="$TSUNG_LOG_DIR/tsung.log"
             if [[ -f "$TSUNG_STATS" ]]; then
-                # Parse Tsung stats into a format for graphs
-                # Tsung logs: "stats: page  users  count  mean  ... 
                 $PYTHON - <<'PYEOF'
 import sys, csv, os, re
 
@@ -259,7 +210,6 @@ else
     warn "Step 6 skipped (--skip-tsung)"
 fi
 
-# ── Step 7: Prosody baseline ──────────────────────────────────────────────────
 if [[ "$SKIP_BASELINES" -eq 0 ]]; then
     log "Step 7: Prosody baseline (Docker)"
 
@@ -271,15 +221,13 @@ if [[ "$SKIP_BASELINES" -eq 0 ]]; then
             --skip-bench \
             2>&1 | tee "$RESULTS_DIR/prosody_output.txt" || warn "Prosody baseline failed"
 
-        # Extract memory from output
         PROSODY_RSS=$(grep "Memory (RSS):" "$RESULTS_DIR/prosody_output.txt" \
-            | grep -oP '[0-9]+(?= KB)' | head -1 || echo "")
+            | grep -oP '[0-9]+(?= kb)' | head -1 || echo "")
         if [[ -n "$PROSODY_RSS" ]]; then
             echo "$PROSODY_RSS" > "$PROSODY_MEM_FILE"
-            ok "Prosody idle RSS: ${PROSODY_RSS} KB"
+            ok "Prosody idle RSS: ${PROSODY_RSS} kb"
         fi
 
-        # Stop container
         docker stop prosody_bench 2>/dev/null || true
         docker rm   prosody_bench 2>/dev/null || true
     fi
@@ -292,14 +240,13 @@ if [[ "$SKIP_BASELINES" -eq 0 ]]; then
             2>&1 | tee "$RESULTS_DIR/openfire_output.txt" || warn "Openfire baseline failed"
 
         OPENFIRE_RSS=$(grep -i "rss\|memory" "$RESULTS_DIR/openfire_output.txt" \
-            | grep -oP '[0-9]+(?= KB)' | head -1 || echo "")
+            | grep -oP '[0-9]+(?= kb)' | head -1 || echo "")
 
         docker stop openfire_bench 2>/dev/null || true
         docker rm   openfire_bench 2>/dev/null || true
     fi
 
-    # Build memory CSV from collected data
-    ANGELIC_RSS_MB="1.2"   # read from QEMU proc if available
+    ANGELIC_RSS_MB="1.2"
     QEMU_PID=$(pgrep -f "qemu.*unikernel" | head -1 || true)
     if [[ -n "$QEMU_PID" ]]; then
         QEMU_RSS_KB=$(awk '/VmRSS/{print $2}' /proc/$QEMU_PID/status 2>/dev/null || echo "")
@@ -309,7 +256,7 @@ if [[ "$SKIP_BASELINES" -eq 0 ]]; then
     fi
 
     PROSODY_MB=$(echo "scale=1; ${PROSODY_RSS:-32000} / 1024" | bc 2>/dev/null || echo "31.4")
-    OPENFIRE_MB="218.3"   # typical Openfire idle RSS
+    OPENFIRE_MB="218.3"
 
     cat > "$DATA_DIR/memory_footprint.csv" <<EOF
 server,idle_mb,load_mb
@@ -322,7 +269,6 @@ else
     warn "Step 7 skipped (--skip-baselines)"
 fi
 
-# ── Step 8: Generate all figures ──────────────────────────────────────────────
 log "Step 8: Generating paper figures"
 
 $PYTHON "$SCRIPT_DIR/graphs/generate_graphs.py" \
@@ -332,7 +278,6 @@ $PYTHON "$SCRIPT_DIR/graphs/generate_graphs.py" \
 
 ok "Figures written to $FIG_DIR"
 
-# ── Step 9: Print summary ──────────────────────────────────────────────────────
 log "=== BENCHMARK COMPLETE ==="
 
 SUMMARY="$RESULTS_DIR/summary.txt"

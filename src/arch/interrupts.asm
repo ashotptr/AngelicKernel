@@ -1,18 +1,16 @@
 [bits 64]
 
-extern interrupt_handler  ; Changed name from exception_handler to be generic
+extern interrupt_handler
 global load_idt
 global isr_stub_table
 
 section .text
 
 load_idt:
-    lidt [rdi] ; loads the 10-byte struct (Limit + Base) from the address in rdi into the idtr register.
+    lidt [rdi]
     ret
 
-; Common handler code
 isr_common:
-    ; 1. Save all registers
     push r15
     push r14
     push r13
@@ -29,11 +27,9 @@ isr_common:
     push rbx
     push rax
 
-    ; 2. Call C handler (Pass stack pointer as arg)
     mov rdi, rsp
     call interrupt_handler
 
-    ; 3. Restore registers
     pop rax
     pop rbx
     pop rcx
@@ -50,27 +46,24 @@ isr_common:
     pop r14
     pop r15
 
-    ; 4. Clean up error code and ISR number
-    add rsp, 16 ; skips the Interrupt Number and Error Code pushed in the stub
-    iretq ; pops RIP, CS, RFLAGS, RSP, and SS atomically, returning the CPU to exactly where it was before the interrupt
+    add rsp, 16
+    iretq
 
-; Macros to generate ISR stubs
 %macro ISR_NOERR 1
     global isr%1
     isr%1:
-        push qword 0      ; Push dummy error code
-        push qword %1     ; Push interrupt number
+        push qword 0
+        push qword %1
         jmp isr_common
 %endmacro
 
 %macro ISR_ERR 1
     global isr%1
     isr%1:
-        push qword %1     ; Push interrupt number
+        push qword %1
         jmp isr_common
 %endmacro
 
-; --- EXCEPTION HANDLERS (0-31) ---
 ISR_NOERR 0
 ISR_NOERR 1
 ISR_NOERR 2
@@ -79,16 +72,16 @@ ISR_NOERR 4
 ISR_NOERR 5
 ISR_NOERR 6
 ISR_NOERR 7
-ISR_ERR   8
+ISR_ERR 8
 ISR_NOERR 9
-ISR_ERR   10
-ISR_ERR   11
-ISR_ERR   12
-ISR_ERR   13
-ISR_ERR   14
+ISR_ERR 10
+ISR_ERR 11
+ISR_ERR 12
+ISR_ERR 13
+ISR_ERR 14
 ISR_NOERR 15
 ISR_NOERR 16
-ISR_ERR   17
+ISR_ERR 17
 ISR_NOERR 18
 ISR_NOERR 19
 ISR_NOERR 20
@@ -101,11 +94,8 @@ ISR_NOERR 26
 ISR_NOERR 27
 ISR_NOERR 28
 ISR_NOERR 29
-ISR_ERR   30
+ISR_ERR 30
 ISR_NOERR 31
-
-; --- IRQ HANDLERS (32-47) ---
-; These correspond to hardware interrupts (Timer, Keyboard, E1000, etc.)
 ISR_NOERR 32
 ISR_NOERR 33
 ISR_NOERR 34
@@ -127,7 +117,7 @@ section .data
 global isr_stub_table
 isr_stub_table:
     %assign i 0
-    %rep 48          ; INCREASED from 32 to 48
+    %rep 48
         dq isr%+i
         %assign i i+1
     %endrep
