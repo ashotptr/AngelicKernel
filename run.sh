@@ -18,7 +18,7 @@ if [ -z "${ACCEL}" ]; then
     fi
 fi
 
-ACCEL="tcg"
+#ACCEL="tcg"
 
 OVMF_CODE=""
 for d in /usr/share/OVMF /usr/share/edk2/ovmf /usr/share/edk2-ovmf /usr/share/qemu /usr/share/ovmf; do

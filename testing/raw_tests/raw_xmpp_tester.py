@@ -626,7 +626,7 @@ def test_rfc6121_presence_show_forwarded(host, port):
         sender.send(
             "<presence>"
             "<show>away</show>"
-            "<status>In a meeting</status>"
+            "<status>in a meeting</status>"
             "<priority>5</priority>"
             "</presence>"
         )
