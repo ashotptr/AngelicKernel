@@ -17,7 +17,7 @@ We present AngelicKernel, a bare-metal XMPP server unikernel that uses Intel Mem
 
 ### 1.1 Motivation
 
-Modern server software runs on general-purpose operating systems that trade raw performance for programmer convenience. The OS provides process isolation, virtual memory, a scheduler, a filesystem, a network stack, and hundreds of system calls — most of which a single-purpose server like an XMPP messaging daemon never uses. Every unused kernel feature is mapped into memory, linked into the attack surface, and paid for in boot time, resident memory, and scheduling jitter.
+Modern server software runs on general-purpose operating systems that trade raw performance for programmer convenience. The OS provides process isolation, virtual memory, a scheduler, a filesystem, a network stack, and hundreds of system calls — most of which a single-purpose server like an XMPP messaging daemon never uses.
 
 Unikernels invert this trade-off. Rather than running an application atop a general OS, a unikernel compiles the application and only the OS components it needs into a single executable image. The result boots in milliseconds, occupies kilobytes to megabytes of RAM, and exposes no OS-level attack surface. A network adversary scanning a UEFI unikernel XMPP server on port 5222 sees an XMPP server; there is no /proc, no shell, no dynamic linker, no unused kernel module.
 
