@@ -28,7 +28,7 @@ Intel Memory Protection Keys (MPK), available on x86-64 CPU, offer a hardware me
 ### 1.2 Research Questions
 
 1. **Correctness**: Can MPK protection keys be configured correctly in ring 0 on a freestanding x86-64 kernel, and can correctness be verified programmatically without an OS?
-2. **Overhead**: How many CPU cycles does an MPK gate crossing cost on real x86-64 hardware versus QEMU TCG and QEMU+KVM, and does it remain below the Capstone section 9.2 target of 20 cycles?
+2. **Overhead**: How many CPU cycles does an MPK gate crossing cost?
 3. **Viability**: Does a bare-metal XMPP server with MPK isolation achieve sub-millisecond message latency, pass 100% of RFC/XEP compliance tests, and fit inside a smaller memory footprint than competing implementations?
 
 ### 1.3 Contributions
