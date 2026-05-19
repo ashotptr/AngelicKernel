@@ -36,50 +36,44 @@ if [[ ${NO_DOCKER} -eq 0 ]]; then
     info "starting openfire container (xmpp port ${XMPP_PORT}, admin ${ADMIN_PORT})"
 
     docker run -d \
-        --name "${CONTAINER_NAME}" \
-        -p "${XMPP_PORT}:5222" \
-        -p "${ADMIN_PORT}:9090" \
-        -e OPENFIRE_DOMAIN="${DOMAIN}" \
-        sameersbn/openfire:latest \
-        >/dev/null
+    --name "${CONTAINER_NAME}" \
+    -p "${XMPP_PORT}:5222" \
+    -p "${ADMIN_PORT}:9090" \
+    sameersbn/openfire:latest \
+    >/dev/null
 
     ok "openfire container started (id: $(docker ps -q --filter name=${CONTAINER_NAME}))"
 
     info "waiting for openfire web admin (port ${ADMIN_PORT})"
     for i in $(seq 1 60); do
-        if curl -sf "http://127.0.0.1:${ADMIN_PORT}/setup/index.jsp" >/dev/null 2>&1; then
-            ok "openfire web admin ready (took ${i}s)"
+        if nc -z 127.0.0.1 "${ADMIN_PORT}" 2>/dev/null; then
+            ok "openfire admin port open (took ${i}s)"
             break
         fi
         sleep 2
         if [[ $i -eq 60 ]]; then
-            err "openfire admin ui not ready within 120s"
+            err "openfire admin port not open within 120s"
             docker logs "${CONTAINER_NAME}" | tail -20
             exit 1
         fi
     done
 
-    info "initialising openfire via rest api"
+    sleep 5
 
-    curl -sf -X POST "http://127.0.0.1:${ADMIN_PORT}/setup/setup-datasource-embedded.jsp" \
-         --data-urlencode "continue=true" \
-         >/dev/null 2>&1 || true
+    info "waiting for openfire rest api to become available"
+    for i in $(seq 1 45); do
+        if curl -sf -u "admin:admin" \
+                "http://127.0.0.1:${ADMIN_PORT}/plugins/restapi/v1/system/properties" \
+                >/dev/null 2>&1; then
+            ok "openfire REST api ready (took ${i}s)"
+            break
+        fi
+        sleep 2
+        if [[ $i -eq 45 ]]; then
+            warn "REST api not ready in 90s — proceeding anyway"
+        fi
+    done
 
-    curl -sf -X POST "http://127.0.0.1:${ADMIN_PORT}/setup/setup-host-settings.jsp" \
-         -d "domain=${DOMAIN}&serverName=${DOMAIN}&continue=true" \
-         >/dev/null 2>&1 || true
-
-    curl -sf -X POST "http://127.0.0.1:${ADMIN_PORT}/setup/setup-profile-settings.jsp" \
-         -d "storageType=default&continue=true" \
-         >/dev/null 2>&1 || true
-
-    curl -sf -X POST "http://127.0.0.1:${ADMIN_PORT}/setup/setup-admin-settings.jsp" \
-         -d "email=admin@angelic.local&newPassword=admin&newPasswordConfirm=admin&continue=true" \
-         >/dev/null 2>&1 || true
-
-    curl -sf -X POST "http://127.0.0.1:${ADMIN_PORT}/setup/setup-finished.jsp" \
-         -d "continue=true" \
-         >/dev/null 2>&1 || true
 
     sleep 5
 
