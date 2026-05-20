@@ -1,4 +1,4 @@
-# AngelicKernel: A Security-Performance Pareto Analysis of MPK-Isolated Driver Domains in a Bare-Metal XMPP Unikernel
+# AngelicKernel: Bare-Metal XMPP Unikernel
 
 **Author:** [Ashot]  
 **Institution:** [AUA / Computer Science]
@@ -209,10 +209,9 @@ efi_main() [kernel.c]
   │     Required before any SSE instruction — including those in yxml_sse.c.
   │     Without this, the first SIMD XML parse raises #UD.
   │
-  ├─ pci_get_bar(0x8086, 0x100E)    [while UEFI boot services still active]
+  ├─ pci_get_bar(0x8086, 0x100E)
   │     Scans PCI config space for Intel e1000 (vendor/device IDs).
   │     Reads BAR0 → global_mmio_base.
-  │     Must run before ExitBootServices; UEFI PCI services gone afterwards.
   │
   ├─ GetMemoryMap() + ExitBootServices()
   │     Two-attempt pattern: get MapKey, call ExitBootServices.
@@ -226,10 +225,7 @@ efi_main() [kernel.c]
   ├─ pmm_init(MemoryMap, MapSize, DescriptorSize)
   │     Scans EFI memory map for the largest EfiConventionalMemory region.
   │     Sets free_memory_start = max(region_start, 0x200000).
-  │     The 2 MB floor (0x200000) avoids the 2 MB alignment constraint in
-  │     Intel SDM Table 4-17 (IA-32e PDE mapping a 2 MB page). Starting
-  │     allocations below 2 MB risks aliasing with the kernel image or
-  │     with MMIO regions that may be placed there by some firmware.
+  │     Starting allocations below 2 MB risks overlapping with kernel image placement or firmware-reserved regions..
   │     Implements a bump allocator: each page allocation returns the current
   │     free pointer and advances it by PAGE_SIZE. Each page is zero-initialised.
   │
@@ -240,8 +236,7 @@ efi_main() [kernel.c]
   │     vmm_map_page() allocates PML4/PDP/PD/PT tables on demand from pmm,
   │     each with PTE_PRESENT|PTE_WRITE|PTE_USER set.
   │     Setting PTE_USER at ALL FOUR TABLE LEVELS is the critical step for
-  │     MPK: Intel SDM §4.6.2 states enforcement only applies to user-mode
-  │     pages — a page is user-mode only if U/S=1 in every ancestor table entry.
+  │     MPK. A page is user-mode only if U/S=1 in every ancestor table entry.
   │     Loads kernel_pml4 into CR3 to activate the new tables.
   │
   ├─ mpk_enable()    [mpk.asm]
@@ -251,19 +246,23 @@ efi_main() [kernel.c]
   ├─ init_idt()
   │     Remaps 8259 PIC: master IRQs to 0x20-0x27, slave to 0x28-0x2F.
   │     Installs ISR stubs for exceptions (INT 0-31) and IRQs (INT 32-47).
-  │     The page-fault handler (INT 14) includes the Tier-3 MPK self-test
+  │     The page-fault handler (INT 14) includes the MPK self-test
   │     recovery path: checks mpk_test_in_progress, advances RIP by 2,
   │     sets mpk_test_fault_occurred, and returns rather than halting.
   │
   ├─ mpk_e1000_init(mmio_base, mac_out)   [via trampoline, Key 1 not yet locked]
-  │     NIC is initialised through the MPK trampoline even before MPK is active.
-  │     This exercises the trampoline ABI early and ensures all driver call
-  │     sites use the same indirect-call path consistently.
+  │     The trampoline-wrapped entry point for
+  │     driver initialisation; calls e1000_init() through mpk_trampoline_2
+  │     so that the first access into protected driver memory already follows
+  │     the correct unlock/re-lock discipline. Key 1 is not yet locked at
+  │     this point (vmm_protect_driver and mpk_set_pkru run later), but the
+  │     trampoline path is exercised unconditionally so no call site ever
+  │     reaches driver memory through a direct call.
   │
   ├─ disk_init()
   │     Attempts AHCI (PCI scan for class 0x01 subclass 0x06 SATA controller).
   │     Falls back to ATA PIO on primary IDE channel (0x1F0).
-  │     Both expose disk_read_sectors() and disk_write_sectors() through disk.h.
+  │     Both expose disk_read_sectors() and disk_write_sectors().
   │
   ├─ init_network_stack(mmio_base, mac)
   │     lwip_init(), then netif_add() to register angelic_netif.
@@ -271,7 +270,7 @@ efi_main() [kernel.c]
   │     netif->linkoutput = low_level_output (scatter-gather TX through trampoline).
   │     IP: 10.0.2.15 / 255.255.255.0, gateway 10.0.2.2 (QEMU user networking).
   │
-  ├─ vmm_protect_driver()    ◄── MUST come BEFORE mpk_set_pkru
+  ├─ vmm_protect_driver()
   │     Iterates every 4 KB page in:
   │       [__secure_driver_code_start, __secure_driver_code_end)
   │       [__secure_driver_data_start, __secure_driver_data_end)
@@ -279,47 +278,37 @@ efi_main() [kernel.c]
   │       • walks live page tables to leaf PTE
   │       • clears bits [62:59] of PTE
   │       • sets bits [62:59] = 1 (Key 1)
-  │       • sets PTE_USER (required for PKRU enforcement on this page)
+  │       • sets PTE_USER, whis is required for PKRU enforcement on this page
   │       • issues INVLPG to flush TLB entry
   │
-  ├─ mpk_set_pkru(0x0000000C)   ◄── MUST come AFTER vmm_protect_driver
+  ├─ mpk_set_pkru(0x0000000C)
   │     [mpk.asm]: MOV EAX, EDI; XOR ECX, ECX; XOR EDX, EDX; WRPKRU
   │     PKRU = 0x0C: Key 1 AD=1, WD=1 — driver domain LOCKED.
   │     After this instruction, any direct access to Key-1 pages raises #PF.
   │
-  │     WHY THIS ORDER IS MANDATORY:
-  │     If mpk_set_pkru runs BEFORE vmm_protect_driver, the driver PTEs still
-  │     carry Key 0 in bits [62:59]. Key 0's AD bit is 0 (accessible) in PKRU,
-  │     so PKRU=0x0C has no effect on those pages — the driver is still freely
-  │     accessible. Protection only activates when PTEs carry Key 1 AND PKRU
-  │     locks Key 1. Setting PKRU first leaves a window where isolation is
-  │     declared but not enforced. Setting PTEs first (while PKRU=0 still allows
-  │     all access) is always safe because tagging with no restriction is a no-op.
   │
-  ├─ mpk_diagnostic()      [three-tier correctness check — see §4.4]
-  ├─ mpk_benchmark()       [WRPKRU cycle measurement — see §5]
+  ├─ mpk_diagnostic()      [correctness check]
+  ├─ mpk_benchmark()       [WRPKRU cycle measurement]
   ├─ STI                   [enable hardware interrupts]
   │
   ├─ xmpp_init_server()
-  │     xmpp_persist_load_all()    — restore all stores from disk (or fresh_start)
+  │     xmpp_persist_load_all()    — restore all stores from disk or fresh_start
   │     xmpp_tls_server_init()     — ECDSA P-256 keygen + self-signed cert
   │     tcp_new() + tcp_bind(:5222) + tcp_listen() + tcp_accept(callback)
   │
   └─ event_loop: while(1)
         ┌─ if (packet_pending):
-        │     packet_pending = 0       ← CLEAR FIRST (snapshot-and-drain)
-        │     for i in 0..4:           ← drain burst
-        │         angelic_netif_poll() → e1000_poll_receive via trampoline
-        │                                → lwIP → tcp_input → xmpp_recv_callback
+        │     packet_pending = 0       - clear first
+        │     for i in 0..4:           - drain
+        │         angelic_netif_poll() → e1000_poll_receive via trampoline → lwIP → tcp_input → xmpp_recv_callback
         ├─ for each client with tls_want_write:
-        │     xmpp_tls_handshake_step()  ← retry stalled TLS handshakes
+        │     xmpp_tls_handshake_step()  - retry stalled TLS handshakes
         ├─ for each client with sm_want_ack:
         │     sm_want_ack = 0
-        │     xmpp_sm_request_ack()      ← flush deferred XEP-0198 acks
-        └─ sys_check_timeouts()          ← lwIP TCP retransmission timers
+        │     xmpp_sm_request_ack()      - flush deferred XEP-0198 acks
+        └─ sys_check_timeouts()          - lwIP TCP retransmission timers
 ```
 
-**The snapshot-and-drain pattern** prevents a race condition discovered during development. The original code cleared `packet_pending` after polling. If the e1000 IRQ fired again mid-burst, the handler set packet_pending=1, the loop cleared it post-burst, and the new packet was lost until the next interrupt. In some cases lwIP's PCB list received the same TCP segment twice, causing the internal assertion `tcp_input: pcb->next != pcb`. The fix: clear packet_pending=0 before the first poll. If a new interrupt fires between the clear and the poll, packet_pending becomes 1 and the next iteration handles it — zero loss, no double processing.
 
 **The deferred Stream Management ack pattern** (`sm_want_ack`) prevents re-entrant send calls. The outbound stanza counter is incremented inside the single output path used by all XMPP handlers. If that counter immediately triggered an acknowledgement request back to the client, it would call the same output path recursively. Instead, a deferred flag is set and the event loop drains all pending ack requests at the top of each iteration, safely outside any active send stack frame.
 
