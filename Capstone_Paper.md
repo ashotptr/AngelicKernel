@@ -1177,7 +1177,12 @@ Four steps:
 
 ---
 
-## 10. Testing and Compliance
+## 10. Testing
+
+
+### §10.1 Client Interoperability
+
+### 10.2 Serial Log Output
 
 ### 10.3 External Compliance Validation (Future Work)
 
