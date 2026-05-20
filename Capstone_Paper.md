@@ -1294,25 +1294,46 @@ ejabberd's Erlang ecosystem includes two standalone libraries relevant to any C-
 
 ## 13. Conclusion
 
-AngelicKernel demonstrates that a complete XMPP server with hardware-enforced driver isolation can be built on bare x86-64 hardware without an operating system. WRPKRU instruction enforces a hardware boundary between the network driver and the XMPP protocol stack. On the QEMU+KVM test platform the measured cost is 36 cycles.
-
-On x86, a single WRPKRU instruction is sufficient to enforce an intra-kernel driver isolation boundary that would otherwise require separate processes or VMs.
+AngelicKernel demonstrates that a complete XMPP server with hardware-enforced 
+driver isolation can be built on bare x86-64 hardware without an operating 
+system. The WRPKRU instruction enforces a hardware boundary between the network 
+driver and the XMPP protocol stack — a boundary that would otherwise require 
+separate processes or VMs. On the QEMU+KVM test platform the measured WRPKRU 
+cost is 36 cycles. The server interoperates with real XMPP clients, validating 
+the implementation.
 
 **Future Work.** Several directions are prioritised:
 
-*Security hardening:* Intel CET shadow stacks; ASLR for the kernel image and static allocations; stack canaries (currently disabled via `-fno-stack-protector`); NX/XD bit enforcement on data-only pages (`PTE_NX` is defined but not applied in `vmm_map_page()`).
+*Security hardening:* Intel CET shadow stacks; ASLR for the kernel image and 
+static allocations; stack canaries (currently disabled via `-fno-stack-protector`); 
+NX/XD bit enforcement on data-only pages (`PTE_NX` is defined but not applied 
+in `vmm_map_page()`).
 
-*SASL and TLS improvements:* SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) to eliminate plaintext credential transmission; a CA-signed certificate to allow client-side server identity verification.
+*SASL and TLS improvements:* SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) to 
+eliminate plaintext credential transmission; a CA-signed certificate to allow 
+client-side server identity verification.
 
-*Protocol extensions:* XEP-0313 (Message Archive Management); XEP-0384 (OMEMO); XEP-0359 (Unique Stanza IDs); XEP-0333 (Chat Markers); XEP-0085 (Chat State Notifications); XEP-0115 (Entity Capabilities); XEP-0077 (In-Band Registration); XEP-0198 session resumption with full stanza queue persistence on disk; XEP-0191 Blocklist full policy enforcement.
+*Protocol extensions:* XEP-0313 (Message Archive Management); XEP-0384 
+(OMEMO); XEP-0359 (Unique Stanza IDs); XEP-0333 (Chat Markers); XEP-0085 
+(Chat State Notifications); XEP-0115 (Entity Capabilities); XEP-0077 
+(In-Band Registration); XEP-0198 session resumption with full stanza queue 
+persistence on disk; XEP-0191 Blocklist full policy enforcement.
 
-*Architectural extensibility:* Replace the monolithic routing table with a per-XEP module structure and hook-and-handler dispatch. Replace `snprintf`-assembled stanzas with typed stanza builder objects.
+*Architectural extensibility:* Replace the monolithic routing table with a 
+per-XEP module structure and hook-and-handler dispatch. Replace 
+`snprintf`-assembled stanzas with typed stanza builder objects.
 
-*Memory management:* Replace the bump allocator with a buddy or slab allocator to support `free()` and sub-page allocations [OSDev_MemAlloc] [OSDev_BrendanMMGuide] [Slab].
+*Memory management:* Replace the bump allocator with a buddy or slab allocator 
+to support `free()` and sub-page allocations [OSDev_MemAlloc] 
+[OSDev_BrendanMMGuide] [Slab].
 
-*Hardware and platform:* RTC integration for accurate XEP-0203 delay stamps; APIC timer to replace TSC-based timekeeping; SMP support; real-hardware validation of all §9.2 metrics.
+*Hardware and platform:* RTC integration for accurate XEP-0203 delay stamps; 
+APIC timer to replace TSC-based timekeeping; SMP support; real-hardware 
+validation of all §9.2 metrics.
 
-*External compliance:* Evaluate against compliance.conversations.im and connect.xmpp.net once a public IPv4/IPv6 address and CA-signed certificate are available.
+*External compliance:* Evaluate against compliance.conversations.im and 
+connect.xmpp.net once a public IPv4/IPv6 address and CA-signed certificate 
+are available.
 
 ---
 
