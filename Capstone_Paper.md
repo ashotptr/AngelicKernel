@@ -393,16 +393,21 @@ without a trampoline, which is not invoked from interrupt context by design. Ins
 
 Interrupt Gates are chosen for all ISR entries: the CPU automatically clears the IF flag on entry, preventing a re-entrant interrupt from corrupting the handler's stack before it has had a chance to save registers. The IDT register (IDTR) is loaded via the `LIDT` instruction with a 10-byte operand (limit + 64-bit base pointer).
 
-**GDT and flat memory model.** A minimal flat GDT with a 64-bit code segment (type 0x9A) and data segment (type 0x92) is configured. Segmentation is not used for memory protection — the x86-64 flat model is in effect, with protection delegated entirely to PTE flags (W, U/S, NX) and MPK [OSDev_GDT]. A Task State Segment (TSS) is not configured; no privilege-level-3 code exists to require ring-0 stack switching on exception entry. Segmentation as a protection mechanism is deliberately avoided: it is a legacy model, incompatible with the flat 64-bit address space required for MMIO identity mapping, and its page-granularity successor (PTE flags) is strictly more expressive [IntelSDM, Vol. 3A §5; OSDev_Segmentation].
+**GDT and flat memory model.** AngelicKernel does not configure its own GDT. 
+The flat 64-bit GDT established by UEFI firmware before `efi_main()` is called 
+is used as-is: a code segment at selector 0x38 and a data segment covering the 
+full 64-bit address space. The only GDT reference in the kernel is the hardcoded 
+`kernel_cs = 0x38` in `idt_set_gate()`, which references the UEFI-provided code 
+segment that the CPU switches to on interrupt entry.
 
 **CR2 register and page fault handling philosophy.** When the CPU raises a page-fault exception (#PF, vector 14), it stores the *linear address* that caused the fault into the CR2 register before invoking the IDT handler [IntelSDM, Vol. 3A §2.5]. The error code pushed to the stack encodes: bit 0 (P — page present), bit 1 (W/R — write vs. read), bit 2 (U/S — user vs. supervisor), bit 4 (I/D — instruction fetch), and bit 5 (PK — protection-key violation). AngelicKernel's page-fault handler reads CR2 and the error code to classify the fault:
 
 - **PK bit (bit 5) set:** MPK protection-key violation — expected during self-test. The handler clears the violation, increments the recovery counter, and resumes.
 - **All other page faults:** treated as fatal kernel errors. The handler prints via serial and halts with `CLI; HLT`. There is no recovery for faults.
 
-**PIC special modes not used.** The following 8259 PIC operating modes are not applicable to AngelicKernel's single-device workload and are explicitly not configured: Special Fully Nested Mode (used to allow a slave-cascade IRQ to be pre-empted by a lower-priority slave IRQ — irrelevant with one device), Buffered Mode (used in large cascaded systems where the /SP-/EN pin is repurposed — not applicable on QEMU/pc), Poll Mode (software-polling the ISR instead of hardware interrupt delivery — slower than interrupt-driven reception), and Special Mask Mode (allows an ISR bit to be temporarily masked during handler execution — not needed with a single active IRQ line) [OSDev_PIC] [IntelSDM, Vol. 3A §8.8].
+**PIC special modes not used.** The following 8259 PIC operating modes are not applicable to AngelicKernel's single-device workload and are explicitly not configured: Special Fully Nested Mode, Buffered Mode, Poll Mode (software-polling the ISR instead of hardware interrupt delivery), and Special Mask Mode [OSDev_PIC].
 
-**Programmable Interval Timer (PIT).** The PIT (Intel 8253/8254) is not programmed by AngelicKernel. The TSC-based timestamp implementation provides sufficient timer resolution for lwIP retransmission timeouts. PIT-based timekeeping would require calibration against the TSC and add interrupt-driven overhead; TSC polling in the event loop is simpler and introduces no additional interrupt latency.
+**Programmable Interval Timer (PIT).** The PIT (Intel 8253/8254) is not programmed by AngelicKernel. The TSC-based timestamp implementation provides sufficient timer resolution for lwIP retransmission timeouts.
 
 **APIC (Advanced Programmable Interrupt Controller).** The Local APIC (LAPIC) and I/O APIC [OSDev_APIC] replace the dual-8259 PIC on modern UEFI systems. AngelicKernel uses the legacy 8259 PIC because it is simpler and works correctly.
 
@@ -549,25 +554,41 @@ CR3 → PML4 (Page Map Level 4, 512 entries)
 
 Each level is a 4 KB page of 64-bit entries. The page-mapping routine walks this hierarchy, allocating new table pages from the physical memory allocator as needed. All tables are allocated with `PTE_PRESENT | PTE_WRITE | PTE_USER` — the `PTE_USER` bit is critical at every level because Intel SDM §4.6.2 requires U/S=1 in all entries for PKRU enforcement to apply to a leaf page.
 
-**Control registers relevant to AngelicKernel:**
+**Control registers relevant to AngelicKernel** [IntelSDM, Vol. 3A §2.5]:
 
 | Register | Bit / Field | Role |
-|----------|-------------|------|
+|----------|------------|------|
 | CR0 | bit 31 (PG) | Enables paging; set by UEFI long-mode entry before `efi_main()` |
-| CR0 | bit 16 (WP) | Write-protect: prevents ring-0 writes to read-only user pages; not currently set |
 | CR3 | [51:12] | Physical base address of the active PML4; written by `vmm_init()` |
-| CR4 | bit 22 (PKE) | Enables PKRU / WRPKRU / RDPKRU; set by `mpk_enable()` |
-| CR4 | bit 24 (PKS) | Enables PKRS for **supervisor**-mode protection keys; **NOT set** in AngelicKernel |
-| CR4 | bits OSFXSR/OSXMMEXCPT | Enable SSE; set by `enable_sse()` |
-| EFER | bit 11 (NXE) | Enables the XD/NX bit in PTEs; set by UEFI before long mode |
+| CR4 | bit 9 (OSFXSR) | Enables SSE instruction execution and FXSAVE/FXRSTOR for XMM registers; set by `enable_sse()` |
+| CR4 | bit 10 (OSXMMEXCPT) | Enables #XM exception for unmasked SIMD FP exceptions; set by `enable_sse()` |
+| CR4 | bit 22 (PKE) | Enables PKRU and WRPKRU/RDPKRU instructions; set by `mpk_enable()` |
+| EFER | bit 11 (NXE) | Enables XD/NX bit in PTEs; set by UEFI before long mode [IntelSDM, Vol. 3A §2.2.1] |
 
-**PKS (Protection Key Supervisor, CR4 bit 24) is deliberately not enabled.** PKS would allow the PKRS MSR to gate supervisor-mode accesses the same way PKRU gates user-mode accesses. AngelicKernel does not enable PKS because all code runs in ring 0, and the PKRU register already provides the needed user-page-based enforcement at ring 0 when U/S=1 at all levels. Enabling PKS would require configuring an additional MSR (IA32_PKRS) and would introduce a second path of protection-key enforcement to audit — complexity without benefit in a single-privilege unikernel.
+**CR4.PKE (bit 22) — set by `mpk_enable()`.** The SDM defines this as: "Enables 
+IA-32e paging to associate each linear address with a protection key. The PKRU 
+register specifies, for each protection key, whether user-mode linear addresses 
+with that protection key can be read or written. This bit also enables access to 
+the PKRU register using the RDPKRU and WRPKRU instructions." Without this bit, 
+any WRPKRU call raises #UD.
 
-**XD/NX bit (Execute Disable).** When `EFER.NXE=1`, bit 63 of a PTE is the XD (Execute Disable) flag. Pages with XD=1 raise #PF on instruction fetch. AngelicKernel's page-mapping logic does not currently set XD on data pages — a security improvement tracked in future work that would prevent code injection into XMPP data buffers.
+**EFER.NXE (bit 11) — set by UEFI.** Enables bit 63 of each PTE as the XD 
+(Execute Disable) flag. When set on a page, any instruction fetch from that page 
+raises #PF. UEFI enables NXE before calling `efi_main()`. [IntelSDM, Vol. 3A §2.2.1, Table 2-1].
 
-**PAT (Page Attribute Table).** The PAT MSR allows associating each page with a caching type (WB, WT, UC, WC, etc.) via three bits in the PTE. AngelicKernel uses the default PAT configuration established by UEFI firmware, which maps MMIO BAR regions as Uncacheable (UC) before ExitBootServices(). No explicit PAT reprogramming is performed; a future enhancement for high-throughput I/O would assign Write-Combining (WC) to PCIe prefetchable regions for improved DMA throughput [IntelSDM, Vol. 3A §11.12].
+**PAT (Page Attribute Table)** [IntelSDM, Vol. 3A §11.12]. The PAT MSR (0x277) 
+maps each combination of PAT/PCD/PWT bits in a PTE to a memory type. It is 
+always active with no separate enable bit. AngelicKernel never writes the PAT 
+MSR, so the power-on defaults apply: PA0=WB, PA3=UC. All pages are mapped with 
+PAT=PCD=PWT=0, selecting PA0=WB — correct for RAM. UEFI's MTRR configuration 
+marks the e1000 MMIO BAR as UC, which takes precedence over the PAT for those 
+addresses, so no explicit PTE caching flags are needed.
 
-**TLB management.** The TLB (Translation Lookaside Buffer) is a purely hardware structure — software cannot directly read or write individual TLB entries. The software responsibility is to issue `INVLPG <addr>` after modifying a PTE, forcing the hardware to discard any cached translation for that address. AngelicKernel issues `INVLPG` in the key-assignment routine after every PTE modification.
+**TLB management.** The TLB is a hardware structure — software cannot read or 
+write individual entries directly. After any PTE modification, software must issue 
+`INVLPG <addr>` to force the CPU to discard the cached translation for that 
+address [IntelSDM, Vol. 3A §2.8.4]. AngelicKernel issues `INVLPG` in 
+`vmm_set_pkey()` after every PTE modification.
 
 ### 4.6 Physical Memory Allocator
 
@@ -632,17 +653,17 @@ lwIP 2.x runs in NO_SYS=1 mode: no threads, no blocking sockets, no separate tim
 
 The lwIP timestamp function reads the TSC and divides by 2,000,000 (assuming 2 GHz TSC) to return milliseconds for lwIP's TCP retransmission timers.
 
-**Detailed lwIP pool configuration.** The static memory pool is set to 128 KB, which accommodates all simultaneous TCP connections, pending acknowledgements, and ARP table entries within a predictable footprint. The pbuf pool is configured with 16 pointer-only pbuf slots (used by the zero-copy transmit path to reference existing payload buffers without data copying) and 64 pool pbufs each with an attached data buffer (one consumed per incoming frame and returned to the pool after the stack finishes processing it). The TCP connection pool is sized to 16 entries, capping simultaneous XMPP sessions at 16 since each connection consumes exactly one entry holding the full TCP state. The transmit segment pool is set to 64 slots shared across all connections, providing capacity for data sitting in send and retransmit queues awaiting acknowledgement.
+**Detailed lwIP pool configuration.** The static memory pool is set to 128 KB, which accommodates all simultaneous TCP connections, pending acknowledgements, and ARP table entries within a predictable footprint. The pbuf pool is configured with 16 pointer-only pbuf slots and 64 pool pbufs each with an attached data buffer. The TCP connection pool is sized to 16 entries, capping simultaneous XMPP sessions at 16 since each connection consumes exactly one entry holding the full TCP state. The transmit segment pool is set to 64 slots shared across all connections, providing capacity for data sitting in send and retransmit queues awaiting acknowledgement.
 
-The TCP maximum segment size is set to 1460 bytes (the standard value for Ethernet with 20-byte IP and 20-byte TCP headers within a 1500-byte MTU). Both the receive window and the send buffer are set to eight times the MSS, giving 11,680 bytes — large enough to avoid stalling on XMPP stanzas, which can be several kilobytes for OMEMO key bundles.
+The TCP maximum segment size is set to 1460 bytes (the standard value for Ethernet with 20-byte IP and 20-byte TCP headers within a 1500-byte MTU). Both the receive window and the send buffer are set to eight times the MSS, giving 11,680 bytes — large enough for OMEMO key bundles.
 
-**Disabled lwIP subsystems.** ARP, Ethernet, IPv4, TCP, UDP, and ICMP are enabled. DHCP is disabled because the kernel uses a static IP address. The NetConn and socket APIs are disabled because they require OS threading abstractions unavailable in a NO_SYS=1 build. DNS is disabled because the kernel never initiates outbound connections by name — clients resolve `angelic.local` on their own machines before connecting, and the kernel sees only raw IP addresses. The checksum generation and verification flags are all enabled; the e1000 hardware is capable of checksum offload, but using software checksums keeps the driver interface simpler.
+**Disabled lwIP subsystems.** ARP, Ethernet, IPv4, TCP, UDP, and ICMP are enabled. DHCP is disabled because the kernel uses a static IP address. The NetConn and socket APIs are disabled because they require OS threading abstractions unavailable in a NO_SYS=1 build. DNS is disabled because the kernel never initiates outbound connections by name — clients resolve `angelic.local` on their own machines before connecting, and the kernel sees only raw IP addresses. The checksum generation and verification flags are all enabled.
 
 **lwIP porting contract.** Three header files constitute the porting contract between lwIP and the bare-metal environment:
 
 The type-mapping header maps lwIP's internal type names onto the platform's fixed-width integer types. The pointer arithmetic type is mapped to `uintptr_t` rather than a fixed-width type so that pointer arithmetic inside lwIP's memory allocator is always the correct width. The byte-order macro is set to `LITTLE_ENDIAN`. The structure-packing macros use GCC's `__attribute__((packed))` on the struct itself, which is sufficient and avoids the need for per-field or pragma-based packing. The random number source is aliased to the kernel's TSC-based timestamp function. Diagnostic output is routed through the kernel's serial-backed printf, and assertion failures print to serial and halt with CLI; HLT.
 
-The architecture-abstraction header satisfies lwIP's threading abstraction requirements for the NO_SYS=1 build mode. The mailbox and semaphore null values are defined. The critical-section protection type and hooks are defined as no-ops, since in a single-threaded cooperative kernel there is nothing to protect against between lwIP calls.
+The architecture-abstraction header satisfies lwIP's threading abstraction requirements for the NO_SYS=1 build mode. The mailbox and semaphore null values are defined. The critical-section protection type and hooks are defined as no-ops, since in a single-threaded kernel there is nothing to protect against between lwIP calls.
 
 ### 5.2 Receive Path
 
