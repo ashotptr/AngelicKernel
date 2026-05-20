@@ -7,7 +7,7 @@
 
 ## Abstract
 
-We present AngelicKernel, a bare-metal XMPP server unikernel that uses Intel Memory Protection Keys (MPK) to isolate its network driver from the protocol stack without the overhead of separate processes or virtual machines. The system boots directly from UEFI into a Long Mode kernel, integrates lwIP 2.x for cooperative networking, and runs a complete XMPP server covering RFC 6120 Core, RFC 6121 Instant Messaging, XEP-0045 Multi-User Chat, XEP-0049 Private XML Storage, XEP-0160 Offline Messages, XEP-0198 Stream Management, XEP-0199 Ping, XEP-0030 Service Discovery, XEP-0092 Software Version, and XEP-0012 Last Activity — all within a single address space. The Intel e1000 Gigabit Ethernet driver is confined to an MPK protection domain (Key 1) by tagging its pages in the live page table with protection key 1 and setting PKRU = 0x0000000C at boot. Every call from the XMPP stack into the driver crosses a hand-written NASM assembly trampoline that atomically unlocks and re-locks Key 1 around the call using two WRPKRU instructions. An 80-test compliance suite — comprising a 60-test raw TCP harness and a 20-test slixmpp library suite — executed against a live server achieves 100% pass rate across RFC 6120, RFC 6121, XEP-0045, XEP-0092, XEP-0160, XEP-0199, and XEP-0030. Under QEMU+KVM the WRPKRU instruction costs  on the test platform the measured cost is 36 cycles. The unikernel executable is under 1 MB on disk and allocates under 1 MB of static XMPP state in BSS.
+We present AngelicKernel, a bare-metal XMPP server unikernel that uses Intel Memory Protection Keys (MPK) to isolate its network driver from the protocol stack without the overhead of separate processes or virtual machines. The system boots directly from UEFI into a Long Mode kernel, integrates lwIP 2.x for cooperative networking, and runs a complete XMPP server covering RFC 6120 Core, RFC 6121 Instant Messaging, XEP-0045 Multi-User Chat, XEP-0049 Private XML Storage, XEP-0160 Offline Messages, XEP-0198 Stream Management, XEP-0199 Ping, XEP-0030 Service Discovery, XEP-0092 Software Version, and XEP-0012 Last Activity — all within a single address space. The Intel e1000 Gigabit Ethernet driver is confined to an MPK protection domain (Key 1) by tagging its pages in the live page table with protection key 1 and setting PKRU = 0x0000000C at boot. Every call from the XMPP stack into the driver crosses a hand-written NASM assembly trampoline that atomically unlocks and re-locks Key 1 around the call using two WRPKRU instructions. Under QEMU+KVM the WRPKRU instruction costs  on the test platform the measured cost is 36 cycles. The unikernel executable is under 1 MB on disk and allocates under 1 MB of static XMPP state in BSS.
 
 *Keywords:* unikernel, Intel MPK, XMPP, driver isolation, memory protection keys, bare-metal x86-64, UEFI, lwIP, mbedTLS, NASM
 
@@ -29,11 +29,11 @@ Intel Memory Protection Keys (MPK), available on x86-64 CPU, offer a hardware me
 
 1. **Correctness**: Can MPK protection keys be configured correctly in ring 0 on a freestanding x86-64 kernel, and can correctness be verified programmatically without an OS?
 2. **Overhead**: How many CPU cycles does an MPK gate crossing cost?
-3. **Viability**: Does a bare-metal XMPP server with MPK pass 100% of RFC/XEP compliance tests, and fit inside a smaller memory footprint than competing implementations?
+3. **Viability**: Does a bare-metal XMPP server with MPK work with xmpp clients, and fit inside a smaller memory footprint than competing implementations?
 
 ### 1.3 Contributions
 
-1. First full-featured XMPP server on bare-metal UEFI x86-64 with hardware-enforced driver isolation, passing 80/80 protocol compliance tests (60 raw TCP, 20 slixmpp library tests).
+1. First full-featured XMPP server on bare-metal UEFI x86-64 with hardware-enforced driver isolation.
 2. Three-tier MPK correctness verification suite (PKRU register readback, PTE walk, violation self-test with IDT recovery) that detects misconfiguration before the server accepts any connection.
 3. Write-through ATA disk persistence layer using only PIO I/O registers (no UEFI protocols, no filesystem) for durable XMPP state across reboots.
 4. Quantification of the security-performance Pareto frontier for intra-kernel driver isolation on commodity x86 hardware.
@@ -65,9 +65,9 @@ Intel MPK is an x86 feature available since Skylake (2015). Each 4 KB page carri
 | 2k   | AD   | Access Disable: any read or write to pages with key k raises #PF |
 | 2k+1 | WD   | Write Disable: only writes to pages with key k raise #PF |
 
-With 16 keys, PKRU is a 32-bit register. Key 0 occupies bits [1:0], Key 1 occupies bits [3:2]. Writing PKRU requires WRPKRU with EAX = new value, ECX = 0, EDX = 0; non-zero ECX or EDX causes #GP. RDPKRU returns the current value in EAX. WRPKRU is not a serialising instruction in the sense of CPUID or MFENCE, but on most microarchitectures it effectively prevents speculative execution from crossing the PKRU write — a property important for Spectre-variant attacks where an attacker might exploit a speculative window between WRPKRU and the first load. This is also why the benchmark in §9.1 brackets measurements with CPUID rather than bare RDTSC.
+With 16 keys, PKRU is a 32-bit register. Key 0 occupies bits [1:0], Key 1 occupies bits [3:2]. Writing PKRU requires WRPKRU with EAX = new value, ECX = 0, EDX = 0; non-zero ECX or EDX causes #GP. RDPKRU returns the current value in EAX. WRPKRU is not a serialising instruction in the sense of CPUID or MFENCE, but on most microarchitectures it effectively prevents speculative execution from crossing the PKRU write — a property important for Spectre-variant attacks where an attacker might exploit a speculative window between WRPKRU and the first load.
 
-A critical property defined in Intel SDM section 4.6.2: PKRU enforcement applies **only to user-mode pages** — those with U/S = 1 in every level of the paging hierarchy. If any of PML4E, PDPE, PDE, PTE has U/S = 0, PKRU checks are bypassed for that page. AngelicKernel's page-mapping logic sets PTE_USER at all four levels when building the identity map, and the per-page key-assignment routine explicitly sets PTE_USER in the leaf PTE entry when assigning a protection key.
+A critical property: PKRU enforcement applies **only to user-mode pages** — those with U/S = 1 in every level of the paging hierarchy. If any of PML4E, PDPE, PDE, PTE has U/S = 0, PKRU checks are bypassed for that page. AngelicKernel's page-mapping logic sets PTE_USER at all four levels when building the identity map, and the per-page key-assignment routine explicitly sets PTE_USER in the leaf PTE entry when assigning a protection key.
 
 AngelicKernel uses two keys:
 - **Key 0** (PKRU bits [1:0] = 00): Kernel code, XMPP data, lwIP state, mbedTLS buffers. Always accessible. AD=0, WD=0.
@@ -93,7 +93,7 @@ The Extensible Messaging and Presence Protocol (XMPP) is defined in RFC 6120 (Co
 | XEP-0092 | Software Version |
 | XEP-0012 | Last Activity |
 
-The following extensions were surveyed during design but are not yet implemented and are candidates for future work: XEP-0048 (Bookmark Storage), XEP-0071 (XHTML-IM rich text), XEP-0077 (In-Band Registration), XEP-0085 (Chat State Notifications), XEP-0107 (User Mood), XEP-0115 (Entity Capabilities), XEP-0153 (vCard-Based Avatars), XEP-0201 (Message Threads), XEP-0313 (Message Archive Management), XEP-0333 (Chat Markers), XEP-0359 (Unique and Stable Stanza IDs), and XEP-0384 (OMEMO end-to-end encryption).
+The following extensions were evaluated during design but are not yet implemented and are candidates for future work: XEP-0048 (Bookmark Storage), XEP-0071 (XHTML-IM rich text), XEP-0077 (In-Band Registration), XEP-0085 (Chat State Notifications), XEP-0107 (User Mood), XEP-0115 (Entity Capabilities), XEP-0153 (vCard-Based Avatars), XEP-0201 (Message Threads), XEP-0313 (Message Archive Management), XEP-0333 (Chat Markers), XEP-0359 (Unique and Stable Stanza IDs), and XEP-0384 (OMEMO end-to-end encryption).
 
 ---
 
@@ -103,39 +103,39 @@ The following extensions were surveyed during design but are not yet implemented
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                  AngelicKernel Image                     │
-│                                                          │
+│                  AngelicKernel Image                    │
+│                                                         │
 │  ┌─────────────┐   ┌─────────────┐   ┌───────────────┐  │
 │  │ XMPP Stack  │   │  lwIP 2.x   │   │ Memory System │  │
-│  │  (Key 0)    │◄─►│ (NO_SYS=1) │◄─►│  pmm+vmm+MPK  │  │
-│  └──────┬──────┘   └──────┬──────┘   └───────────────┘  │
-│         │                 │                               │
-│         └────────┬────────┘                              │
-│               MPK Gate                                    │
-│         ┌─────────────────┐                              │
-│         │  Trampolines    │                              │
-│         │  WRPKRU(0)      │                              │
-│         │  WRPKRU(0x0C)   │                              │
-│         └────────┬────────┘                              │
-│                  │                                        │
-│  ┌───────────────▼───────────────────────────────────┐  │
-│  │          e1000 Driver Domain (Key 1)               │  │
-│  │  .secure_driver_code  |  .secure_driver_data       │  │
-│  └────────────────────────────────────────────────────┘  │
-│                                                           │
-│  ┌─────────────────────────────────────────────────────┐ │
-│  │  mbedTLS 3.6.4 (Key 0, 288 KB static pool)         │ │
-│  └─────────────────────────────────────────────────────┘ │
-│                                                           │
-│  ┌─────────────────────────────────────────────────────┐ │
-│  │  ATA PIO / AHCI DMA Disk Persistence                │ │
-│  └─────────────────────────────────────────────────────┘ │
-└───────────────────────────────────────────────────────────┘
+│  │  (Key 0)    │   │ (NO_SYS=1)  │   | pmm+vmm+MPK   │  │
+│  └─────────────┘   └─────────────┘   └───────────────┘  │
+│                                                         │
+│                                                         │
+│               MPK Gate                                  │
+│         ┌─────────────────┐                             │
+│         │  Trampolines    │                             │
+│         │  WRPKRU(0)      │                             │
+│         │  WRPKRU(0x0C)   │                             │
+│         └─────────────────┘                             │
+│                                                         │
+│  ┌────────────────────────────────────────────────────┐ │
+│  │          e1000 Driver Domain (Key 1)               │ │
+│  │  .secure_driver_code  |  .secure_driver_data       │ │
+│  └────────────────────────────────────────────────────┘ │
+│                                                         │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │  mbedTLS 3.6.4 (Key 0, 288 KB static pool)          ││
+│  └─────────────────────────────────────────────────────┘│
+│                                                         │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │  ATA PIO / AHCI DMA Disk Persistence                ││
+│  └─────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────┘
 ```
 
 ### 3.3 Toolchain and Build System
 
-AngelicKernel uses the GNU-EFI toolkit rather than a dedicated cross-compiler. GCC compiles all C and NASM source to ELF64 object files; `objcopy` then converts the final ELF binary to a UEFI-compatible PE32+ executable [gnuefi]. This works correctly for a single-component unikernel image. A dedicated cross-compiler targeting `x86_64-w64-mingw32` or a PE/COFF target would be required only if the build needed to produce user-mode UEFI applications that link against host Linux libraries, or if `objcopy` section conversion produced incorrect attributes for a future image layout [OSDev_CC]. The host OS is Linux (Ubuntu 24); QEMU with OVMF (`sudo apt install ovmf`) is used for development and automated testing. For source-level debugging, QEMU's GDB stub (`-s -S` flags) combined with a GDB hardware-watchpoint script can single-step through UEFI boot code [OSDev_GDB]. Secure-boot signing (`sbsigntool`) is available but not used because the self-signed image would not pass firmware verification.
+AngelicKernel uses the GNU-EFI toolkit rather than a dedicated cross-compiler. GCC compiles all C and NASM source to ELF64 object files; `objcopy` then converts the final ELF binary to a UEFI-compatible PE32+ executable [gnuefi]. This works correctly for a single-component unikernel image. A dedicated cross-compiler targeting `x86_64-w64-mingw32` or a PE/COFF target would be required only if the build needed to produce user-mode UEFI applications that link against host Linux libraries, or if `objcopy` section conversion produced incorrect attributes for a future image layout [OSDev_CC]. The host OS is Linux (Ubuntu); QEMU with OVMF (`sudo apt install ovmf`) is used for development and testing. For source-level debugging, QEMU's GDB stub (`-s -S` flags) combined with a GDB hardware-watchpoint script can perform instruction-level debugging of UEFI boot code [OSDev_GDB]. Secure-boot signing (`sbsigntool`) is available but not used because the self-signed image would not pass firmware verification.
 
 **Build system prerequisites and dependency management.** The Makefile begins by verifying the presence of every required tool — the C compiler for kernel source, the NASM assembler for the MPK assembly module, the binary conversion utility for ELF-to-PE32+ translation, the linker, the disk image creation tool, and the EFI header package required to compile against the GNU-EFI framework. Any missing tool causes the build to abort with a diagnostic message before a single source file is compiled. The mbedTLS dependency is version-pinned at 3.6.4 LTS and fetched via a dedicated Makefile target that automates the download, preventing unintentional version drift.
 
@@ -151,14 +151,14 @@ AngelicKernel uses the GNU-EFI toolkit rather than a dedicated cross-compiler. G
 | `-fshort-wchar` | 2-byte `wchar_t`; matches the UEFI UTF-16 ABI |
 | `-mno-red-zone` | Disables the 128-byte red zone below the stack pointer; required to prevent interrupt handlers from corrupting function-local data |
 | `-mno-sse`, `-mno-avx`, `-mno-mmx` | Globally disables SIMD to avoid unmanaged floating-point register state in general kernel code |
-| `-DMBEDTLS_CONFIG_FILE` | Injects the custom mbedTLS configuration (see above) |
+| `-DMBEDTLS_CONFIG_FILE` | Injects the custom mbedTLS configuration |
 | `-DNO_SYS=1` | Configures lwIP for bare-metal operation with no OS abstraction layer |
 | `-DUSE_MPK` | Activates the MPK-related code paths and trampoline call sites |
 | `-DGNU_EFI_USE_MS_ABI` | Enables the Microsoft x64 ABI wrappers required for UEFI firmware calls |
 
 GCC's internal runtime library (`libgcc`) is linked explicitly. Although the kernel is built as a freestanding binary, the compiler still emits calls to libgcc for operations such as 64-bit integer arithmetic helpers, and these implicit dependencies must be resolved at link time to prevent undefined-reference errors.
 
-**Hardware acceleration overrides.** To maintain general kernel safety, SIMD instructions are disabled globally. However, two specific subsystems benefit from hardware acceleration and are compiled under dedicated Makefile rules that filter out the global SIMD-disable flags and replace them with the appropriate extension flags. The mbedTLS AES, AES-NI, and GCM source files are compiled with SSE4.2, AES, and PCLMUL extension flags enabled, allowing the library to use hardware AES intrinsics. The vectorised XML scanner is compiled with SSE4.2 enabled. Because SSE is explicitly enabled by the boot sequence before any of these code paths can execute, this is safe in practice.
+**Hardware acceleration overrides.** To maintain general kernel safety, SIMD instructions are disabled globally. However, two specific subsystems benefit from hardware acceleration and are compiled under dedicated Makefile rules that filter out the global SIMD-disable flags and replace them with the appropriate extension flags. The mbedTLS AES, AES-NI, and GCM source files are compiled with SSE4.2, AES, and PCLMUL extension flags enabled, allowing the library to use hardware AES intrinsics. The vectorised XML scanner is compiled with SSE4.2 enabled. Because SSE is explicitly enabled by the boot sequence before any of these code paths can execute.
 
 **EFI two-step build process.** Because UEFI firmware expects PE32+ (Portable Executable) binaries, producing a unikernel on a Linux host requires two distinct steps. First, the linker combines all compiled objects, the GNU-EFI C runtime, and libgcc into an ELF shared object using `-shared -Bsymbolic` (position-independent, no fixed load address), `-nostdlib` (no glibc startup files), and the custom linker script. The `--no-undefined` flag causes the linker to fail on any missing symbol at link time rather than producing a binary that will crash at runtime. Second, the binary conversion tool transforms the ELF shared object into a PE32+ UEFI application, copying only the sections the firmware can parse (code, data, read-only data, relocation information) and discarding ELF-specific metadata. Debug symbols are extracted into a separate file to keep the final EFI binary lightweight while still enabling GDB-based debugging. The resulting image is placed in a directory hierarchy that mirrors a standard UEFI boot partition structure.
 
@@ -170,15 +170,15 @@ The custom linker script (`linker.ld`) uses GNU Binutils LD to place `.secure_dr
 
 **Debug output and graphics.** UEFI provides the Graphics Output Protocol (GOP, `EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID`) for framebuffer-level pixel drawing [OSDev_GOP]. AngelicKernel chose serial output over GOP: the UART at COM1 (I/O base 0x3F8) continues to function via raw port instructions indefinitely after ExitBootServices(), produces machine-readable line-by-line output forwarded directly to the QEMU host terminal, and is compatible with GDB remote-serial debugging. GOP output is confined to the boot-services phase without explicit framebuffer address retention and requires additional code to remain usable post-ExitBootServices. A framebuffer console is tracked as a future addition for bare-metal display diagnostics.
 
-**Alternative bootloaders surveyed.** UEFI direct boot (current approach) is one of several viable entry strategies. The Limine bootloader [Limine] is a modern, feature-rich multiboot2-compatible bootloader that can load a 64-bit ELF kernel from a FAT32 ESP without requiring GNU-EFI; it handles the GDT, paging, and higher-half mapping before transferring control. For XMPP server use this offers no advantage over direct UEFI entry — UEFI already provides the EFI System Table, memory map, and PCI services that Limine would otherwise abstract. GRUB 2 (multiboot2) was also considered and rejected for the same reason. The OSDev wiki's "Bare Bones" and "Meaty Skeleton" tutorial sequences [OSDev_BareBones] [OSDev_MeatySkel] use GRUB multiboot as their entry model; AngelicKernel's UEFI entry is documented as an alternative path in [OSDev_LimineBareBones].
+**Alternative bootloaders surveyed.** UEFI direct boot is one of several viable entry strategies. The Limine bootloader [Limine] is a modern, feature-rich Multiboot2-compatible bootloader capable of loading a 64-bit ELF kernel from a FAT32 ESP without requiring GNU-EFI. It provides a standardized boot protocol and optional early system initialization features such as framebuffer setup, memory map abstraction, and kernel boot configuration. For XMPP server use, these abstractions provide limited benefit compared to direct UEFI entry, since UEFI already exposes the EFI System Table, memory map, and hardware interfaces required during early initialization. GRUB 2 (Multiboot2) was also considered and rejected for similar reasons. The OSDev wiki sources [OSDev_BareBones] [OSDev_MeatySkel] use GRUB Multiboot as their reference entry model; AngelicKernel’s UEFI-based boot path follows the standard UEFI application entry paradigm rather than a Multiboot-style boot protocol.
 
-**Local hostname.** During development and automated testing, the hostname `angelic.local` is registered in the test machine's `/etc/hosts` as an alias for `127.0.0.1`. The XMPP server domain is hard-coded as `angelic.local`; every test client, every raw TCP harness script, and every Tsung scenario file connects to `angelic.local:5222`. This avoids requiring a real DNS entry and allows the test suite to run fully offline.
+**Local hostname.** During development and testing, the hostname `angelic.local` is registered in the test machine's `/etc/hosts` as an alias for `127.0.0.1`. The XMPP server domain is hard-coded as `angelic.local`; every test client connects to `angelic.local:5222`. This allows the test suite to run in LAN.
 
 ### 3.4 Boot Sequence: From UEFI to First Connection
 
-The boot sequence is strictly ordered. Each step builds on the last, and the ordering of steps (c) vmm_protect_driver and (d) mpk_set_pkru is not arbitrary — it has a security-critical meaning documented below.
+The boot sequence is strictly ordered. Each step builds on the last.
 
-**Bootloader responsibilities.** A bootloader's four canonical duties are: (1) bring the kernel and all bootstrap data into memory; (2) provide the kernel with the information it needs to operate (memory map, ACPI tables, etc.); (3) switch to an environment the kernel expects (64-bit long mode, paging enabled, A20 line active); and (4) transfer control to the kernel entry point [OSDev_Bootloader]. UEFI firmware performs all four duties before calling `efi_main()`: it loads the PE32+ image, provides the EFI System Table (memory map, configuration tables), and enters long mode with a flat identity map. The A20 line is always enabled by UEFI — the historical 8042 keyboard controller toggle is a BIOS-only concern [OSDev_A20].
+**Bootloader responsibilities.** A bootloader's four canonical duties are: (1) bring the kernel and all bootstrap data into memory; (2) provide the kernel with the information it needs to operate (memory map, ACPI tables, etc.); (3) switch to an environment the kernel expects (64-bit long mode, paging enabled, A20 line active); and (4) transfer control to the kernel entry point [OSDev_Bootloader]. UEFI firmware performs all four duties before calling `efi_main()`: it loads the PE32+ image, provides the EFI System Table (memory map, configuration tables), and enters long mode with a flat identity map. The A20 line is always enabled by UEFI — the 8042 keyboard controller toggle is a BIOS-only concern [OSDev_A20].
 
 **Two-phase kernel entry.** The kernel entry point executes in two distinct phases. The first phase runs under UEFI Boot Services, during which firmware services are still available. The second phase begins after ExitBootServices() returns and the firmware's runtime environment is permanently gone; from that point every function uses only what the kernel itself provides. The UEFI two-attempt handshake pattern is used for the boot-services exit: the memory map is retrieved once to obtain the map key, and ExitBootServices() is called with that key. Because Boot Services may have modified the map in the interval between the two calls, one retry is permitted — if the first attempt returns an invalid-parameter error, the map is re-fetched and the call is retried once. If both attempts fail, execution spins indefinitely because there is no safe state to return to.
 
@@ -190,12 +190,12 @@ The boot sequence is strictly ordered. Each step builds on the last, and the ord
 | NX/XD (Execute Disable) | EFER.NXE=1 | Set by UEFI before entry; verified, not re-set |
 | MPK / PKE | CR4.PKE=1 | Enabled by `mpk_enable()` in mpk.asm |
 | RDRAND | CPUID EAX=1 ECX[30] | Checked in `secure_random_u32()`; falls back to xorshift64* if absent |
-| AES-NI | CPUID EAX=1 ECX[25] | Detected by mbedTLS; AES-CBC hardware-accelerated if present |
+| AES-NI | CPUID EAX=1 ECX[25] | Detected by mbedTLS; AES-GCM hardware-accelerated if present |
 | x87 FPU | CR0.NE=1, `FINIT` | Implicitly enabled by UEFI; not explicitly touched |
-| PCID | CR4.PCIDE — not enabled | Future: improves TLB efficiency on context switch |
-| SMEP | CR4.SMEP — not enabled | Future: prevents ring-0 executing user-page code |
+| PCID | CR4.PCIDE — not enabled | Not applicable: improves TLB efficiency on context switch |
+| SMEP | CR4.SMEP — not enabled | Incompatible: driver pages are tagged U/S=1 for MPK Key 1 enforcement; SMEP would fault on ring-0 access to those pages |
 | SYSCALL/SYSRET | EFER.SCE — not enabled | Not applicable: no user-mode code |
-| Global Pages | CR4.PGE — not enabled | Future: marks kernel PTEs global to avoid TLB flush on CR3 reload |
+| Global Pages | CR4.PGE — not enabled | Not applicable: marks kernel PTEs global to avoid TLB flush on CR3 reload |
 
 Features intentionally not enabled: SMEP (no user-mode code to protect against), PCID (no process switches), Global Pages (no address-space switches), SYSCALL (no user/supervisor boundary). APIC configuration is deferred to future work (§13).
 
