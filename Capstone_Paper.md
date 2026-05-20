@@ -1294,27 +1294,25 @@ ejabberd's Erlang ecosystem includes two standalone libraries relevant to any C-
 
 ## 13. Conclusion
 
-AngelicKernel demonstrates that a complete XMPP server with hardware-enforced driver isolation can be built on bare x86-64 hardware without an operating system, achieving 100% of an 80-test RFC/XEP compliance suite (60 raw TCP tests and a 20-test slixmpp library suite). MPK isolation costs 4–8 cycles per WRPKRU instruction on real Intel hardware — representing approximately 0.31% of CPU time at 1 GbE line rate — while enforcing a meaningful memory boundary between the network driver and the XMPP protocol stack. On the QEMU+KVM test platform, the measured WRPKRU cost is 36 cycles, exceeding the 20-cycle target due to PKRU-switch virtualisation overhead; bare-metal results confirm the target holds on real hardware.
+AngelicKernel demonstrates that a complete XMPP server with hardware-enforced driver isolation can be built on bare x86-64 hardware without an operating system. WRPKRU instruction enforces a hardware boundary between the network driver and the XMPP protocol stack. On the QEMU+KVM test platform the measured cost is 36 cycles.
 
-The security-performance Pareto frontier for intra-kernel driver isolation on x86 is more favourable than expected: a single WRPKRU instruction, available since Skylake 2015, is sufficient to enforce a hardware boundary that would otherwise require separate processes, VMs, or memory-safe languages.
-
-Key engineering insights surfaced during implementation: PTE_USER must be set at all four paging levels for PKRU to apply to ring-0 accesses; the driver page-table protection pass must precede the PKRU lock activation to avoid a correctness window; the snapshot-and-drain pattern prevents a lwIP PCB corruption race; deferred XEP-0198 acks prevent recursive send calls; and the SASL namespace must be excluded from the routing table to block post-authentication SASL re-injection.
+On x86, a single WRPKRU instruction is sufficient to enforce an intra-kernel driver isolation boundary that would otherwise require separate processes or VMs.
 
 **Future Work.** Several directions are prioritised:
 
-*Security hardening:* Intel CET shadow stacks; ASLR for the kernel image and static allocations; stack canaries; NX/XD bit enforcement on all data-only pages.
+*Security hardening:* Intel CET shadow stacks; ASLR for the kernel image and static allocations; stack canaries (currently disabled via `-fno-stack-protector`); NX/XD bit enforcement on data-only pages (`PTE_NX` is defined but not applied in `vmm_map_page()`).
 
-*SASL and TLS improvements:* SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) to eliminate transmission of cleartext credentials even over TLS; a CA-signed certificate to allow client-side server identity verification.
+*SASL and TLS improvements:* SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) to eliminate plaintext credential transmission; a CA-signed certificate to allow client-side server identity verification.
 
-*Protocol extensions:* XEP-0313 (Message Archive Management) for client-side history sync; XEP-0384 (OMEMO) for end-to-end encrypted messaging; XEP-0359 (Unique and Stable Stanza IDs, requiring RFC 4122 UUID generation); XEP-0333 (Chat Markers); XEP-0085 (Chat State Notifications); XEP-0115 (Entity Capabilities); XEP-0077 (In-Band Registration) to allow self-service account creation; XEP-0048 (Bookmark Storage via private XML, partially served by XEP-0049); XEP-0198 session resumption with full stanza queue persistence on disk; XEP-0191 Blocklist full policy enforcement.
+*Protocol extensions:* XEP-0313 (Message Archive Management); XEP-0384 (OMEMO); XEP-0359 (Unique Stanza IDs); XEP-0333 (Chat Markers); XEP-0085 (Chat State Notifications); XEP-0115 (Entity Capabilities); XEP-0077 (In-Band Registration); XEP-0198 session resumption with full stanza queue persistence on disk; XEP-0191 Blocklist full policy enforcement.
 
-*Architectural extensibility:* Replace the monolithic routing table with a per-XEP module structure and a hook-and-handler dispatch system. Replace hardcoded `snprintf`-assembled stanzas with typed stanza builder objects, reducing the risk of malformed XML and simplifying addition of new extensions.
+*Architectural extensibility:* Replace the monolithic routing table with a per-XEP module structure and hook-and-handler dispatch. Replace `snprintf`-assembled stanzas with typed stanza builder objects.
 
-*Memory management:* Replace the bump allocator with a buddy allocator or slab allocator to support `free()` and sub-page allocations [OSDev_MemAlloc] [OSDev_BrendanMMGuide] [Slab]. 
+*Memory management:* Replace the bump allocator with a buddy or slab allocator to support `free()` and sub-page allocations [OSDev_MemAlloc] [OSDev_BrendanMMGuide] [Slab].
 
-*Hardware and platform:* RTC integration for accurate XEP-0203 delay stamps; APIC timer (Local APIC timer register) to replace TSC-based timekeepings; SMP support; real-hardware validation of all metrics.
+*Hardware and platform:* RTC integration for accurate XEP-0203 delay stamps; APIC timer to replace TSC-based timekeeping; SMP support; real-hardware validation of all §9.2 metrics.
 
-*External compliance:* Evaluate against compliance.conversations.im and connect.xmpp.net once a public IPv4/IPv6 address and CA-signed certificate are obtained.
+*External compliance:* Evaluate against compliance.conversations.im and connect.xmpp.net once a public IPv4/IPv6 address and CA-signed certificate are available.
 
 ---
 
@@ -1326,7 +1324,7 @@ Key engineering insights surfaced during implementation: PTE_USER must be set at
 
 [Hedayati2019] M. Hedayati et al., "Hodor: Intra-Process Isolation for High-Throughput Data Plane Libraries," USENIX ATC 2019.
 
-[Koning2017] V. Koning, N. Abu-Ghazaleh, D. Ponomarev, "PKRU-Safe: Automatically Locking Down the Heap Between Safe and Unsafe Languages," *Proceedings of the 12th European Conference on Computer Systems (EuroSys)*, 2017.
+[Koning2017] K. Koning, X. Chen, H. Bos, C. Giuffrida, E. Athanasopoulos, "No Need to Hide: Protecting Safe Regions on Commodity Hardware," *Proceedings of the Twelfth European Conference on Computer Systems (EuroSys)*, 2017.
 
 [Manco2017] F. Manco et al., "My VM is Lighter (and Safer) than your Container," ACM SOSP 2017.
 
