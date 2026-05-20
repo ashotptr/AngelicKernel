@@ -675,17 +675,16 @@ The precise ordering is what makes the receive architecture safe:
 2.  NIC converts electrical signals into an Ethernet frame
 
 3.  NIC DMA-writes the frame bytes into rx_ring[i].addr
-    (the page allocated by pmm_alloc_page() in e1000_init)
 
 4.  NIC DMA-writes DD=1 into rx_ring[rx_idx].status
 
-5.  *** Only now does the interrupt fire ***
+5.  Interrupt fires
 
 6.  CPU vectors through the IDT to interrupt_handler()
 
 7.  interrupt_handler() sets packet_pending=1, sends EOI, returns
 
-8.  Main loop sees packet_pending, clears it (snapshot-and-drain)
+8.  Main loop sees packet_pending, clears it
 
 9.  angelic_netif_poll() via mpk_trampoline_3
 
@@ -693,11 +692,11 @@ The precise ordering is what makes the receive architecture safe:
 
 11. lwIP: ethernet_input → ip4_input → tcp_input → xmpp_recv_callback
 
-The NIC hardware guarantees steps 3 and 4 complete before step 5. By the time interrupt_handler() executes, the frame is already sitting in RAM — the interrupt is not a signal that a packet is arriving, it is a signal that a packet has arrived. This is why interrupt_handler() does not read the NIC at all: there is nothing to race against.
+The NIC hardware guarantees steps 3 and 4 complete before step 5. By the time interrupt_handler() executes, the frame is already sitting in RAM — the interrupt is not a signal that a packet is arriving, it is a signal that a packet has arrived.
 
-Three independent subsystems cooperate to deliver a packet from the NIC to the application layer. The e1000 NIC has no knowledge of the IDT — when a packet arrives, it simply raises its IRQ line on the PCI bus. The 8259 PIC receives that signal, translates it to a vector number by adding the remapping offset of 32, and asserts the CPU's interrupt pin. The CPU looks up that vector in the IDT, finds the stub installed by init_idt(), and jumps to interrupt_handler(). The handler sets packet_pending = 1 and sends EOI back to the PIC so it can deliver future interrupts, then returns immediately without touching the NIC or lwIP. The main loop later sees the flag, clears it, and calls the network polling function through the MPK trampoline to drain the NIC ring. Each of the three subsystems — NIC, PIC, IDT — does exactly one part of the job.
+Three independent subsystems cooperate to deliver a packet from the NIC to the application layer. The e1000 NIC has no knowledge of the IDT — when a packet arrives, it simply raises its IRQ line on the PCI bus. The 8259 PIC receives that signal, translates it to a vector number by adding the remapping offset of 32, and asserts the CPU's interrupt pin. The CPU looks up that vector in the IDT, finds the stub installed by init_idt(), and jumps to interrupt_handler(). The handler sets packet_pending = 1 and sends EOI back to the PIC so it can deliver future interrupts, then returns immediately without touching the NIC or lwIP. The main loop later sees the flag, clears it, and calls the network polling function through the MPK trampoline to drain the NIC ring.
 
-The e1000 raises a legacy PCI IRQ on packet receipt. The IDT handler sets `volatile int packet_pending = 1` and returns immediately — no lwIP processing in interrupt context. The event loop detects packet_pending, clears it first (snapshot-and-drain pattern), then calls the receive poll function up to 4 times per burst.
+The e1000 raises a PCI IRQ on packet receipt. The IDT handler sets `volatile int packet_pending = 1` and returns immediately — no lwIP processing in interrupt context. The event loop detects packet_pending, clears it first, then calls the receive poll function up to 4 times per burst.
 
 The network receive poll calls the driver's receive function through the MPK trampoline. If a packet is available, it allocates a pbuf from the static pool, copies the bytes in, and calls the network interface input function, which chains through ethernet_input → ip4_input → tcp_input → xmpp_recv_callback(). If pbuf allocation fails or the input function returns an error, the pbuf is freed immediately to prevent pool exhaustion rather than leaving a leaked slot.
 
@@ -705,11 +704,9 @@ The network interface initialisation callback sets the interface name, registers
 
 ### 5.3 Transmit Path: Zero-Copy Scatter-Gather
 
-The link-layer output callback counts pbuf chain fragments. For chains of up to MAX_TX_SEGS=8 fragments — the common case for XMPP stanzas — it builds a scatter array of (address, length) pairs directly from the pbuf chain and passes it to the scatter-gather transmit function through the MPK trampoline. No data is copied.
+The link-layer output callback counts pbuf chain fragments. For chains of up to MAX_TX_SEGS=8 fragments it builds a scatter array of (address, length) pairs directly from the pbuf chain and passes it to the transmit function through the MPK trampoline. No data is copied.
 
 For unusually deep chains (more than 8 fragments), a static fallback buffer `tx_buffer_fallback[1514]` is used: the chain is flattened via memcpy, then sent through the single-buffer transmit trampoline.
-
-A bug fixed during development: the original source had `static char tx_buffer[1514];#define MAX_TX_SEGS 8` on one line — the #define concatenated onto the variable declaration, creating a syntax error. Fixed by splitting onto separate lines.
 
 ### 5.4 e1000 NIC Driver: Hardware Initialisation Sequence
 
@@ -717,19 +714,17 @@ The Intel 82540EM (e1000) is initialised before ExitBootServices() for BAR disco
 
 1. **PCI bus scan.** The PCI scanner iterates bus/device/function triples writing to I/O port 0xCF8 (CONFIG_ADDRESS) and reading from 0xCFC (CONFIG_DATA), searching for vendor ID 0x8086 / device ID 0x100E. On match, BAR0 (Base Address Register 0) yields the MMIO base address for the NIC's register file.
 
-2. **MMIO base extraction.** BAR0 is a 32-bit or 64-bit memory BAR. The lower 4 bits (type flags) are masked off with `& ~0xF` to get `global_mmio_base`. All subsequent register accesses use `volatile uint32_t *` reads/writes to this base plus fixed offsets. The `volatile` qualifier is mandatory — without it, GCC may reorder or eliminate MMIO reads/writes as "dead stores" [OSDev_MMIO].
+2. **MMIO base extraction.** BAR0 is a 32-bit or 64-bit memory BAR. The lower 4 bits (type flags) are masked off with `& ~0xF` to get `global_mmio_base`. All subsequent register accesses use `volatile uint32_t *` reads/writes to this base plus fixed offsets. The `volatile` qualifier is mandatory — without it, GCC may reorder MMIO reads/writes.
 
 3. **MAC address detection.** The hardware MAC is read from the Receive Address Low (RAL) and Receive Address High (RAH) registers in the NIC EEPROM. RAL holds bytes 0–3 of the MAC; RAH holds bytes 4–5 plus a validity bit. If RAH bit 31 is clear, the address is invalid.
 
 4. **RX/TX descriptor rings.** Both rings are allocated from the PMM: 32 descriptors each, statically sized at 16-byte alignment per descriptor. The Receive Descriptor Base Address Low/High registers point to the physical address of the RX ring; RDLEN holds ring size in bytes; RDH and RDT are the hardware head and software tail pointers. The NIC advances RDH on successful receipt; software advances RDT to hand new descriptors back. TX ring configuration is symmetric: TDBAL/TDBAH/TDLEN/TDH/TDT.
 
-5. **Interrupt mask.** The Interrupt Mask Set register (IMS) enables two cause bits: bit 7 (RXT0 — Receiver Timer Interrupt, fires after a configurable delay following packet receipt) and bit 2 (LSC — Link Status Change). The Interrupt Cause Read (ICR) register is read at the start of every IRQ handler; reading it atomically clears all set bits, deasserts the PCI INTx line, and returns the bitmask of pending causes. This is the "read-to-clear" pattern required for level-triggered PCI interrupts.
+5. **Interrupt mask.** The Interrupt Mask Set register (IMS) enables two cause bits: bit 7 (RXT0 — Receiver Timer Interrupt, fires after a configurable delay following packet receipt) and bit 2 (LSC — Link Status Change). The Interrupt Cause Read (ICR) register is read at the start of every IRQ handler; reading it atomically clears all set bits, deasserts the PCI INTx line, and returns the bitmask of pending causes.
 
-6. **PIO vs. MMIO vs. DMA.** The e1000 uses MMIO for control registers (BAR0) and DMA for packet data. DMA buffers — the memory regions pointed to by RX/TX descriptors — must be declared `volatile` and must not be placed in cached memory regions if the NIC's DMA controller bypasses the CPU cache. In the identity-mapped PAT-default configuration, these buffers reside in Write-Back cacheable memory; the e1000's DMA engine performs cache-coherent transactions on Nehalem and later CPUs, so no explicit cache flush is required. On older hardware or with MMIO-typed regions, explicit `clflush` or PAT write-through would be needed [OSDev_MMIO].
+**Detailed hardware initialisation sequence.** The driver performs a software reset by setting and polling the reset bit in the control register, which returns all hardware state to power-on defaults. After reset, three control bits are set: full-duplex mode, the link-up enable bit (required for the link to come up at all), and auto-speed detection. The 128-entry multicast table array is zeroed before the receiver is enabled to prevent spurious frame delivery. The transmit inter-packet gap register is set to the IEEE 802.3 standard values (IPGT=8, IPGR1=4, IPGR2=6), producing the standard 96-bit inter-frame gap. The receive control register enables the receiver, accepts multicast and broadcast frames, sets 2 KB receive buffers, and strips the 4-byte Ethernet CRC so the upper layer never sees it. The transmit control register enables the transmitter, pads short frames to the 64-byte Ethernet minimum, and sets the collision threshold and distance for full-duplex operation. The sequence ends by clearing any interrupts that arrived during initialisation (via the read-to-clear interrupt cause register) and arming three interrupt causes: packet received, receive ring overrun, and link status change.
 
-**Detailed hardware initialisation sequence.** The driver performs a software reset by setting and polling the reset bit in the control register, which returns all hardware state to power-on defaults. After reset, three control bits are set: full-duplex mode, the link-up enable bit (required for the link to come up at all), and auto-speed detection. The 128-entry multicast table array is zeroed before the receiver is enabled to prevent spurious frame delivery. The transmit inter-packet gap register is set to the IEEE 802.3 standard values (IPGT=8, IPGR1=4, IPGR2=6), producing the standard 96-bit inter-frame gap. The receive control register enables the receiver, accepts multicast and broadcast frames, sets 2 KB receive buffers, and strips the 4-byte Ethernet CRC so the upper layer never sees it. The transmit control register enables the transmitter, pads short frames to the 64-byte Ethernet minimum, and sets the collision threshold and distance for full-duplex operation. The 9-step sequence ends by clearing any interrupts that arrived during initialisation (via the read-to-clear interrupt cause register) and arming three interrupt causes: packet received, receive ring overrun, and link status change.
-
-All driver state — the descriptor rings, the MMIO base address, and the transmit tail index — resides in the `.secure_driver_data` section, placing it under MPK Key 1 protection. All register-access helpers reside in the `.secure_driver_code` section. Being declared static, these helpers cannot be called by any unprotected kernel code directly, and the driver data fields they operate on are inaccessible to the XMPP stack without a trampoline crossing.
+All driver state — the descriptor rings, the MMIO base address, and the transmit tail index — resides in the `.secure_driver_data` section, placing it under MPK Key 1 protection. All register-access helpers reside in the `.secure_driver_code` section.
 
 **Scatter-gather transmit.** The multi-segment transmit variant maps each element of a scatter array to a separate TX descriptor. The EOP (End of Packet) flag is set only on the last descriptor, telling the NIC that the entire logical frame spans all segments. This avoids the memcpy flatten that the single-buffer fallback path performs for deep pbuf chains.
 
@@ -746,7 +741,7 @@ All driver state — the descriptor rings, the MMIO base address, and the transm
 | `ethernetif_init()` | Registers the netif and calls `low_level_init()` |
 | `ethernet_input()` | Called on received pbuf; dispatches ARP vs. IPv4 |
 
-The porting contract (`lwipopts.h`, `cc.h`, `sys_arch.h`) configures lwIP for the bare-metal environment: no threads, no locking primitives (`SYS_LIGHTWEIGHT_PROT=0`), no dynamic allocation beyond the static pool, and `LWIP_NETIF_STATUS_CALLBACK=1` for link-state events [lwIPBMPort] [OSDev_lwIP].
+The porting contract (`lwipopts.h`, `cc.h`, `sys_arch.h`) configures lwIP for the bare-metal environment: no threads, no locking primitives (`SYS_LIGHTWEIGHT_PROT=0`), no dynamic allocation beyond the static pool [lwIPBMPort] [OSDev_lwIP].
 
 ### 5.5 PCI Bus Scanner
 
@@ -760,7 +755,7 @@ The NIC detection entry point iterates over a compile-time table of supported In
 
 ### 5.6 Storage Subsystem
 
-All persistent XMPP state is written to a 1 MB raw disk image attached as a secondary drive. The storage abstraction layer selects between two backend drivers at boot time, trying the higher-performance option first and falling back to the universal fallback if it is unavailable.
+All persistent XMPP state is written to a 1 MB raw disk image attached as a secondary drive. The storage abstraction layer selects between two backend drivers at boot time, trying the higher-performance option first and falling back to a fallback if it is unavailable.
 
 **AHCI DMA driver.** The AHCI driver targets a single data drive on the first port with a connected ATA device and uses command slot 0 exclusively for polled DMA transfers with no interrupt-driven completion, no native command queuing, and no port multiplier support.
 
@@ -778,7 +773,7 @@ A 400-nanosecond delay is required after writing the Command or Drive/Head regis
 
 Probing for drives uses the IDENTIFY DEVICE command. Before waiting for the data-ready bit, the driver checks the LBA Mid and High registers: if those registers contain 0x14 and 0xEB respectively, the device is ATAPI (optical drive) and is skipped, since the kernel has no SCSI packet layer. For confirmed ATA drives, the 256-word IDENTIFY response is read and the model string and sector count are extracted and printed to serial.
 
-The per-word write loop in the sector write path is deliberate: some controllers require a small gap between successive words, which the individual port-write instructions provide naturally. A bulk REP OUTSW might outrun the controller's internal FIFO on marginal hardware. After all sectors are written, a FLUSH CACHE command (opcode 0xE7) is issued and its timeout is treated as a fatal error, reflecting the more synchronous nature of PIO operation.
+After all sectors are written, a FLUSH CACHE command (opcode 0xE7) is issued and its timeout is treated as a fatal error, reflecting the more synchronous nature of PIO operation.
 
 **Storage abstraction layer.** The disk abstraction layer tries AHCI first. If that initialisation succeeds, the backend is locked in. If AHCI is unavailable, it falls back to ATA PIO and checks whether the data drive (the secondary device on the primary IDE channel, as defined by a compile-time constant) is present in the probed drive bitmask. If neither backend produces a usable drive, the backend is set to a no-storage sentinel value and persistence is disabled for the session; the server operates without durability rather than refusing to start.
 
@@ -824,19 +819,19 @@ STATE_SESSION      Session IQ accepted; XEP exchange allowed
 STATE_READY        Full session active; all stanza types accepted
 ```
 
-**State machine design rationale.** The connection state machine tracks each client through the mandatory negotiation order imposed by RFC 6120 §4. The state values are assigned in ascending order so that a single integer comparison is sufficient to enforce minimum-state requirements: a stanza arriving before the connection has reached the appropriate phase is rejected with a single comparison against the routing table's minimum-state field rather than a chain of conditional checks. The STARTTLS state routes incoming bytes to the TLS staging buffer rather than the XML receive buffer; on handshake completion the state returns to STATE_CONNECTED with the TLS-established flag set, because RFC 6120 §5.2 step 5c mandates that both sides reset the XML stream after TLS completes — the next bytes from the client will be a fresh stream opening, not a continuation of the pre-TLS stream. The post-authentication states (STATE_BIND and STATE_SESSION) gate resource binding and session establishment respectively, with STATE_SESSION serving as the terminal state through which all normal stanza exchange is permitted.
+**State machine design rationale.** The connection state machine tracks each client through the mandatory negotiation order imposed by RFC 6120 §4. The state values are assigned in ascending order so that a single integer comparison is sufficient to enforce minimum-state requirements: a stanza arriving before the connection has reached the appropriate phase is rejected with a single comparison against the routing table's minimum-state field rather than a chain of conditional checks. The STARTTLS state routes incoming bytes to the TLS staging buffer rather than the XML receive buffer; on handshake completion the state returns to STATE_CONNECTED with the TLS-established flag set, because RFC 6120 §5.2 mandates that both sides reset the XML stream after TLS completes — the next bytes from the client will be a fresh stream opening, not a continuation of the pre-TLS stream. The post-authentication states (STATE_BIND and STATE_SESSION) gate resource binding and session establishment respectively, with STATE_SESSION serving as the terminal state through which all normal stanza exchange is permitted.
 
 **Credential store.** The authentication backing store for SASL PLAIN is a compile-time array of username and password string pairs. Adding a user requires editing this array and recompiling. SASL ANONYMOUS bypasses the table entirely; any client selecting that mechanism is admitted and assigned the default username "user". The ANONYMOUS mechanism is accepted but not advertised in the server's stream features block; only PLAIN appears in the features advertisement.
 
-**MUC data structures.** The room structure owns an array of participant slots, a ban list of bare JIDs, and a set of boolean configuration flags whose names mirror the XEP-0045 §10.2 Data Forms field names: persistent, moderated, and members-only. The creator JID is stored separately from the participant list so that affiliation queries can return the correct owner even after the creator has left the room. The semi-anonymous flag controls the XEP-0045 §7.2.3 anonymity mode: in semi-anonymous mode, real JIDs are visible only to moderators and the owner. The locked flag implements the XEP-0045 §10.1 locked-room state: a newly created room must remain locked until the owner submits a configuration form or an instant-room request. A participant structure binds a TCP connection reference to an occupant's nick and real bare JID.
+**MUC data structures.** The room structure owns an array of participant slots, a ban list of bare JIDs, and a set of boolean configuration flags persistent, moderated, and members-only. The creator JID is stored separately from the participant list so that affiliation queries can return the correct owner. The semi-anonymous flag controls the XEP-0045 §7.2.3 anonymity mode: in semi-anonymous mode, real JIDs are visible only to moderators and the owner. The locked flag implements the XEP-0045 §10.1 locked-room state: a newly created room must remain locked until the owner submits a configuration form or an instant-room request. A participant structure binds a TCP connection reference to an occupant's nick and real bare JID.
 
-**Offline and subscription queues.** The offline message store and pending subscription queue are each declared with external linkage so the persistence layer can access them directly and write them to disk. The offline message store holds queued messages with their sender JID, recipient bare JID, extracted local-part, stanza ID, and verbatim payload. The pending subscription queue holds RFC 6121 §4.3 subscription stanzas that arrived while their target user had no active session.
+**Offline and subscription queues.** The offline message store and pending subscription queue are each declared with external linkage so the persistence layer can access them directly and write them to disk. The offline message store holds queued messages with their sender JID, recipient bare JID, extracted local-part, stanza ID, and verbatim payload. The pending subscription queue holds subscription stanzas that arrived while their target user had no active session.
 
-**Private storage and roster.** The private XML storage implements per-user, per-namespace XML blobs for XEP-0049, keyed on the inner child element's namespace. The roster store holds per-user contact entries each represented as raw `<item/>` XML. A monotonically incrementing version counter is returned as the `ver=` attribute in roster results per RFC 6121 §2.6, allowing clients to skip a full roster download when their cached version matches.
+**Private storage and roster.** The private XML storage implements per-user, per-namespace XMLs for XEP-0049, keyed on the inner child element's namespace. The roster store holds per-user contact entries each represented as raw `<item/>` XML. A monotonically incrementing version counter is returned as the `ver=` attribute in roster results per RFC 6121 §2.6, allowing clients to skip a full roster download when their cached version matches.
 
 ### 6.2 Three-Phase Stream Negotiation
 
-RFC 6120 mandates a mandatory negotiation sequence. AngelicKernel's stream-open handler enforces each step:
+RFC 6120 mandates a mandatory negotiation sequence. AngelicKernel enforces each step:
 
 **Phase 1 — STARTTLS (RFC 6120 §5):**
 Client opens stream -> Server sends features with `<starttls><required/></starttls>` as the sole feature (STARTTLS is mandatory per RFC 6120 §5.3.2 — no other features offered yet) -> Client sends `<starttls/>` -> Server sends `<proceed/>`, enters STATE_STARTTLS -> TLS handshake runs across one or more recv callbacks -> Completion sets tls_established=1, state returns to STATE_CONNECTED, both parties re-open the XML stream.
@@ -845,9 +840,9 @@ Client opens stream -> Server sends features with `<starttls><required/></startt
 Client re-opens stream over TLS -> Server offers `<mechanisms><mechanism>PLAIN</mechanism></mechanisms>` (only after TLS — never on cleartext, per RFC 6120 §13.8.4) -> Client sends `<auth mechanism='PLAIN'>BASE64</auth>` -> Server decodes base64 as {authzid NUL authcid NUL passwd} per RFC 4616 §2 -> Checks (authcid, passwd) against xmpp_credentials[] -> Failure: `<not-authorized/>` (RFC 6120 §6.5) -> Bad base64: `<incorrect-encoding/>` (RFC 6120 §6.5.5) -> Wrong mechanism: `<invalid-mechanism/>` (RFC 6120 §6.5.7) -> Success: `<success/>`, state=STATE_AUTHENTICATED.
 
 **Phase 3 — Bind and Session (RFC 6120 §7):**
-Client re-opens stream -> Server offers `<bind/>` and `<sm/>` -> Client sends bind IQ -> Server generates full JID (username@angelic.local/resource), state=STATE_BIND -> Client optionally sends session IQ (legacy) -> Server responds, state=STATE_READY.
+Client re-opens stream -> Server offers `<bind/>` and `<sm/>` -> Client sends bind IQ -> Server generates full JID (username@angelic.local/resource), state=STATE_BIND -> Client optionally sends session IQ -> Server responds.
 
-**Stream-open handler implementation.** The stream-open handler generates a fresh, unpredictable stream ID on every invocation by calling the hardware-entropy-backed random source, satisfying the RFC 6120 §4.7.3 requirement that stream IDs be hard to predict. The `to=` attribute in the server's response header is built from the client's supplied `from=` value if one was present, or omitted entirely if the client did not supply one, as required by RFC 6120 §4.7.2. Attribute extraction from the stream opening tag handles both single- and double-quoted attribute values.
+**Stream-open handler implementation.** The stream-open handler generates a unpredictable stream ID on every invocation by calling the hardware-entropy-backed random source, satisfying the RFC 6120 §4.7.3 requirement that stream IDs be hard to predict. The `to=` attribute in the server's response header is built from the client's supplied `from=` value if one was present, or omitted entirely if the client did not supply one, as required by RFC 6120 §4.7.2. Attribute extraction from the stream opening tag handles both single- and double-quoted attribute values.
 
 The connection teardown helper sends `</stream:stream>`, tears down TLS if active (writing the close tag through the encrypted channel, flushing the TCP send buffer, and sending a TLS close_notify alert before freeing the session context), and closes the TCP connection.
 
@@ -881,30 +876,29 @@ The urn:ietf:params:xml:ns:xmpp-sasl namespace is intentionally absent. SASL `<a
 
 Resource binding is similarly constrained: STATE_BIND is used as the minimum for the bind namespace rather than STATE_CONNECTED, so that a bind IQ arriving before the post-SASL stream re-open completes receives `<unexpected-request/>` rather than being silently dropped. An additional explicit maximum-state guard inside the bind handler separately blocks re-binding once the connection reaches STATE_SESSION, a case the minimum-state check alone cannot prevent since STATE_SESSION is numerically higher than STATE_BIND.
 
-**JID spoofing prevention (RFC 6120 §8.1.2):** Before any handler is invoked, the dispatcher overwrites the stanza's sender field with the server-assigned full JID stored in the connection context, regardless of whatever `from=` attribute the client supplied. This single operation protects all 14 handlers simultaneously — no handler can receive a spoofed sender identity.
+**JID spoofing prevention (RFC 6120 §8.1.2):** Before any handler is invoked, the dispatcher overwrites the stanza's sender field with the server-assigned full JID stored in the connection context, regardless of whatever `from=` attribute the client supplied. This operation protects all 14 handlers simultaneously.
 
 **Fallback dispatch.** When no routing table entry matches a stanza's namespace, the dispatcher falls through to a type-based fallback gated on STATE_SESSION. Chat messages reach the message handler through this path because a `<message>` stanza's namespace is always `jabber:client` regardless of whether it is a direct chat or a groupchat — the stanza type distinguishes them, not the namespace. Presence routing is the most branched section of the fallback: the target address determines whether the stanza goes to the MUC presence handler or the broadcast presence handler; the initial-presence flag on the connection context further determines whether the first available presence triggers offline-message drain and pending-subscription delivery. Unrecognised IQ get or set stanzas in the fallback path receive `<service-unavailable/>`, and the stanza ID is included in the error response only when it was present on the inbound stanza — when absent, it is omitted entirely rather than echoed as an empty string, per RFC 6120 §8.1.3.
 
-When the routing table state guard fires on an IQ get or set, the dispatcher constructs an `<unexpected-request/>` error and sends it rather than dropping the stanza, satisfying the RFC 6120 §8.2.3 requirement that every IQ get or set receive either a result or an error. Non-IQ stanzas that fail the state guard are silently dropped, which is acceptable because the stream is not yet ready for stanza exchange and no error type is defined for presence or message stanzas in this context.
+When the routing table state guard fires on an IQ get or set, the dispatcher constructs an `<unexpected-request/>` error and sends it rather than dropping the stanza, satisfying the RFC 6120 §8.2.3 requirement that every IQ get or set receive either a result or an error. Non-IQ stanzas that fail the state guard are silently dropped.
 
 ### 6.4 XML Parsing
 
-Stanzas are parsed by a modified yxml streaming parser [yxml]. yxml maintains state across multiple recv callbacks — essential because XMPP stanzas may arrive fragmented across TCP segments. The parser fills xmpp_stanza_t: name[64], xmlns[128], type[32], id[64], to[96], from[96], payload[1024].
+Stanzas are parsed by a modified yxml streaming parser [yxml]. The parser fills xmpp_stanza_t: name[64], xmlns[128], type[32], id[64], to[96], from[96], payload[1024].
 
-A SIMD-accelerated variant (yxml_sse.c) uses SSE 4.2 PCMPISTRI for substring searches in large stanzas, compiled with -msse4.2 separately from the rest of the kernel. SSE is valid because enable_sse() runs before any yxml call.
+A SIMD-accelerated variant (yxml_sse.c) uses SSE 4.2 PCMPISTRI for substring searches in large stanzas, compiled with -msse4.2 separately from the rest of the kernel.
 
 The static stanza pool holds MAX_STANZAS entries. If the allocator finds no free slot, the receive callback sends `<stream:error><resource-constraint/></stream:error>` and closes the connection (RFC 6120 §4.9.3.17).
 
 **Alternative XML parsers surveyed.** Three other parsers were evaluated before selecting yxml:
 
-| Parser | Size | Streaming? | Bare-metal? | Verdict |
-|--------|------|-----------|-------------|---------|
-| yxml (current) [yxml] | ~800 lines | Yes | Yes — zero stdlib deps | Selected |
-| Mini-XML (mxml) [mxml] | ~5,000 lines | Partial | Requires malloc | Rejected — needs heap |
-| libexpat [libexpat] | ~25,000 lines | Yes | Requires POSIX | Rejected — too large |
-| Hand-rolled (initial) | ~200 lines | No | Yes | Rejected — correctness risk |
+| Parser | Streaming? | Bare-metal? | Verdict |
+|--------|-----------|-------------|---------|
+| yxml (current) [yxml] | Yes | Yes — zero stdlib deps | Selected |
+| Mini-XML (mxml) [mxml] | Partial | Requires malloc | Rejected |
+| libexpat [libexpat] | Yes | Requires POSIX | Rejected |
 
-yxml was chosen because it is a single-file streaming parser with zero stdlib dependencies, making it trivially portable to a freestanding environment. Its state is a small struct that survives across `recv()` call boundaries — exactly the fragmentation model imposed by lwIP's callback interface. Mini-XML supports a pull-parser API but requires `malloc()` for the tree; libexpat is a production-grade streaming parser but pulls in POSIX I/O headers. A hand-rolled parser was the initial implementation but was retired after it failed to handle deeply nested MUC `<x>` payloads correctly.
+yxml was chosen because it is a single-file streaming parser with zero stdlib dependencies, making it trivially portable to a freestanding environment. Mini-XML supports a pull-parser API but requires `malloc()` for the tree; libexpat is a production-grade streaming parser but pulls in POSIX I/O headers.
 
 **Three-phase parse pipeline.** The parser accepts a raw byte buffer accumulated from one or more TCP deliveries and returns a fully populated stanza structure on each complete stanza boundary, advancing the caller's buffer pointer by exactly the number of bytes consumed.
 
@@ -914,11 +908,11 @@ This boundary scanner has a SIMD-accelerated path that uses the SSE4.2 PCMPISTRI
 
 Phase 1 of the parse is a yxml streaming pass. yxml is fed the stanza bytes one character at a time, tracking element depth and responding to element-start and attribute events. At depth 1 the element name determines the stanza kind (message, IQ, presence, or SASL auth). At depth 2, element names for resource binding and session establishment write their namespaces directly because these elements carry a known fixed namespace rather than an explicit xmlns= attribute. Attribute values are delivered by yxml one byte at a time, requiring accumulation into buffers before multi-character comparisons can be made; the IQ type and presence type buffers accumulate character by character and are compared against the full type strings only after the yxml loop completes. An unrecognised or absent IQ type attribute leaves the stanza type as the UNKNOWN constant, which the router rejects with `<bad-request/>`.
 
-Phase 2 is a namespace-detection fallback applied when yxml could not capture the relevant namespace. yxml visits only elements at depth 1 and 2; namespaces declared on deeper elements — notably `<x xmlns='http://jabber.org/protocol/muc'/>` inside a presence stanza, which sits at depth 3 — are invisible to it. The fallback copies up to 1023 bytes of the raw stanza and applies a series of substring checks against known namespace strings. The check ordering matters: the MUC owner and admin namespace strings must precede the plain MUC namespace string because the latter is a substring of neither of the former, but reversing the order would cause owner and admin namespaces to be misclassified as plain MUC.
+Phase 2 is a namespace-detection fallback applied when yxml could not capture the relevant namespace. yxml visits only elements at depth 1 and 2; namespaces declared on deeper elements — notably `http://jabber.org/protocol/muc`, which sits at depth 3 — are invisible to it. The fallback copies up to 1023 bytes of the raw stanza and applies a series of substring checks against known namespace strings. The check ordering matters: the MUC owner and admin namespace strings must precede the plain MUC namespace string because the latter is a substring of neither of the former, but reversing the order would cause owner and admin namespaces to be misclassified as plain MUC.
 
 Phase 3 extracts the inner XML payload of the stanza — the content between the opening tag's closing `>` and the matching closing tag. The payload is silently truncated at 1023 bytes. A self-closing opening tag results in an empty payload.
 
-**Single output path.** All XMPP data sent to clients passes through a single output function. When TLS is established the function writes through the mbedTLS session in a loop until the full buffer is consumed, handling a would-block return by flushing the TCP send buffer and retrying once. When TLS is not yet established the data is submitted directly through the lwIP TCP write and output functions. The XEP-0198 outbound stanza counter is incremented at the end of both paths.
+**Single output path.** All XMPP data sent to clients passes through a single output function. When TLS is established the function writes through the mbedTLS session in a loop until the full buffer is consumed. When TLS is not yet established the data is submitted directly through the lwIP TCP write and output functions. The XEP-0198 outbound stanza counter is incremented at the end of both paths.
 
 ### 6.5 Stream ID and Entropy Source
 
@@ -927,10 +921,9 @@ Stream IDs (RFC 6120 §4.7.3) and server-generated resource IDs (RFC 6120 §7.7.
 1. Attempt Intel RDRAND up to 10 times. RDRAND returns a hardware TRNG value seeded from thermal noise (available since Ivy Bridge). CF=0 means the result is invalid; retry.
 2. On failure, fall back to a seeded xorshift64* CSPRNG. Seed = two RDRAND reads XORed together.
 3. If RDRAND is unavailable for seeding: seed = 0xDEADBEEFCAFEBABEULL XOR (address of state variable) — provides minimal layout-based entropy and a warning to serial console.
-4. xorshift64* must never have state=0 (would produce only zeros forever); replace with 0x123456789ABCDEF0ULL if zero.
-5. Scrambler multiplier: 0x2545F4914F6CDD1D — a Weyl-sequence constant proven to give good statistical quality (Vigna, 2016); period 2^64-1.
+4. Scrambler multiplier: 0x2545F4914F6CDD1D — a Weyl-sequence constant proven to give good statistical quality (Vigna, 2016); period 2^64-1.
 
-rand() (plain LCG) is retained for ABI compatibility with a security warning: "MUST NOT be used for stream IDs, resource IDs, nonces, or any security-sensitive value."
+rand() (plain LCG) is retained for ABI compatibility.
 
 ### 6.6 Multi-User Chat (XEP-0045)
 
@@ -941,10 +934,6 @@ Rooms are stored in rooms[MAX_ROOMS]. Each room_t holds: name, creator_jid, subj
 In-room presence updates and nick changes are detected by scanning the participant array for the sender's bare JID. The scan compares against the bare JID specifically because the participant structure stores the resource-stripped form at join time; comparing against the full JID directly would never match. If found with the same nick, the updated presence payload is reflected to all occupants. If found with a different nick, the handler checks for conflicts, broadcasts type='unavailable' with status code 303 and the new nick to all occupants, updates the participant slot, then broadcasts the new available presence.
 
 The join sequence sends three ordered batches per XEP-0045 §7.2: existing occupants' presences to the new user, the new user's presence to all existing occupants, and the self-presence with status code 110 (plus status code 201 for a new room). Real JID exposure in the `<item jid='...'>` element is gated on the room's semi-anonymous flag and the receiving occupant's role, so owners always see real JIDs and regular members do not in semi-anonymous rooms. The final send is the room subject message.
-
-**Critical bug fixed:** MUC broadcast loops originally built a stack-local connection context with only the TCP connection pointer initialised, copied from the participant structure. If that client had disconnected, the participant's stored connection pointer referred to a freed PCB — use-after-free. The fix: a lookup function searches the live client registry for the slot whose full JID matches the participant JID. A null return means the client has disconnected and the send is safely skipped. The client registry is the single authoritative source of truth for live connections.
-
-**Initial presence fix:** The original router sent all presence stanzas to the broadcast presence handler, making the initial-presence handler — which calls offline message drain and pending subscription delivery — dead code: offline messages were stored but never delivered. The fix adds a flag to the connection context, zero-initialised by the memset in the accept callback. The first available presence after session establishment calls the initial presence handler; subsequent presences call the broadcast handler.
 
 **Room administration.** The kick handler locates the target occupant by nick, broadcasts type='unavailable' with status code 307 to all remaining occupants, and sends the kicked user the same presence with an additional status code 110. The ban handler performs the same broadcast with code 301 and additionally appends the target's bare JID to the ban list and persists the room state. For owner list queries, the creator JID stored at room creation is returned rather than proxying the first active occupant, which would give incorrect results when the creator has left the room.
 
@@ -964,7 +953,7 @@ On the recipient's next initial presence, the offline drain function delivers ea
 
 The fixed timestamp 2024-01-01T00:00:00Z is a known limitation: no wall-clock RTC exists after ExitBootServices(). After the full drain loop, the offline store is written to disk once at the end of the drain rather than once per delivered message, batching the disk write for the entire drain operation.
 
-A per-user soft cap is enforced at half the total pool size, preventing a single user's queue from starving all other users on a system with a small fixed pool. XEP-0160 §2 does not mandate per-user limits, but the cap is a practical necessity given the shared fixed-size pool. The cap check is performed before the enqueue attempt to avoid a partial write followed by an error return; a full per-user queue results in `<service-unavailable/>` without touching the store.
+A per-user soft cap is enforced at half the total pool size, preventing a single user's queue from starving all other users on a system with a small fixed pool. XEP-0160 does not mandate per-user limits, but the cap is a practical necessity given the shared fixed-size pool. The cap check is performed before the enqueue attempt to avoid a partial write followed by an error return; a full per-user queue results in `<service-unavailable/>` without touching the store.
 
 The already-wrapped flag in the message handler controls whether the payload is inserted verbatim or wrapped in `<body>...</body>`. This distinction matters for stanzas carrying structured children such as origin identifiers, chat-state notifications, or XHTML-IM content — all of which must pass through unmodified rather than being re-wrapped.
 
@@ -972,19 +961,9 @@ The already-wrapped flag in the message handler controls whether the payload is 
 
 ### 6.8 ATA Disk Persistence Layout
 
-All durable state is persisted to a 1 MB raw disk image (data.img) connected as IDE slave. disk_init() selects AHCI DMA (q35 chipset) or ATA PIO (pc chipset) automatically. The disk layout (version 5):
+All durable state is persisted to a 1 MB raw disk image (data.img) connected as IDE slave. disk_init() selects AHCI DMA or ATA PIO automatically. The disk layout:
 
-**ATA PIO implementation detail.** The ATA PIO driver (primary channel: I/O ports 0x1F0–0x1F7, secondary: 0x170–0x177) implements the 28-bit LBA addressing scheme. After selecting a drive (master/slave bit in the Drive/Head register at 0x1F6), the driver reads the Status register (0x1F7) **fifteen times** and uses only the last value — this creates a deliberate 14-read delay (~420 ns at 30 ns per I/O read) that allows the selected drive time to assert correct voltages on the bus before the status is trusted [OSDev_ATAPI]. Without this delay, a fast controller may read stale status from the previously selected drive.
-
-The three I/O modes evaluated during development [ATA8ACS]:
-
-| Mode | Throughput | Complexity | Status |
-|------|-----------|-----------|--------|
-| ATA PIO (current) | ~16 MB/s | Low | Implemented |
-| IDE Bus-Master DMA | ~100 MB/s | Medium (~200 lines) | Future work |
-| AHCI (native SATA) | ~300–600 MB/s | Hard (~700 lines) | Future work — AHCI scan present for q35 |
-
-For AngelicKernel's workload — sector-sized persistence writes on login/logout and message delivery — ATA PIO throughput is not a bottleneck. The 1 MB raw image fits entirely in 2,048 sectors; even at 16 MB/s, a full image read completes in under 1 ms. AHCI support remains valuable for large-scale deployments where message archive growth could exceed a few megabytes.
+**ATA PIO implementation detail.** The ATA PIO driver (primary channel: I/O ports 0x1F0–0x1F7, secondary: 0x170–0x177) implements the 28-bit LBA addressing scheme. After selecting a drive (master/slave bit in the Drive/Head register at 0x1F6), the driver reads the Status register (0x1F7) **fifteen times** and uses only the last value — this creates a deliberate 14-read delay that allows the selected drive time to assert correct voltages on the bus before the status is trusted [OSDev_ATAPI].
 
 | LBA Range | Sectors | Content |
 |-----------|---------|---------|
@@ -996,15 +975,15 @@ For AngelicKernel's workload — sector-sized persistence writes on login/logout
 | 186–193 | 8 | pending_subs[32]: 32 x 116 B = 3,712 B (RFC 6121 §4.3) |
 | 194–2047 | 1854 | Reserved |
 
-LBA numbers were corrected during development: the original layout had overlaps (offline at LBA 100 overlapped rooms at 99+8=107; pending_subs at LBA 179 overlapped offline at 100+79=179). Fixed: offline → LBA 107, pending_subs → LBA 186. _Static_assert expressions verify each store fits its sector allocation at compile time.
+_Static_assert expressions verify each store fits its sector allocation at compile time.
 
 **Disk persistence layer design.** Five sector-aligned static staging buffers serve as intermediaries between the live in-memory stores and the disk. Each save operation zeroes its staging buffer before packing data into it, preventing residual bytes from a previous write from appearing in unused padding. The on-disk projection of the room table excludes the participant array because that array contains TCP connection pointers, which are only valid during the current process lifetime; persisting pointer-valued fields across restarts would produce dangling pointers and corrupt the TCP stack on load. Room configuration — name, creator JID, subject, the four boolean flags, ban count, and ban list — is all that persists; occupants simply rejoin after restart.
 
-The disk image is versioned. A header sector at LBA 0 holds a magic number, a schema version, and a CRC32 over all five payload regions computed using the IEEE 802.3 polynomial. The version field is checked against the current compile-time version on every load; a mismatch causes the entire image to be discarded and reinitialised rather than attempting migration, which prevents a corrupted or partially-migrated store from reaching the running server. The current version number was bumped specifically to force a clean reinitialisation on any images written with an incorrect earlier layout.
+The disk image is versioned. A header sector at LBA 0 holds a magic number, a schema version, and a CRC32 over all five payload regions computed using the IEEE 802.3 polynomial. The version field is checked against the current compile-time version on every load; a mismatch causes the entire image to be discarded and reinitialised rather than attempting migration, which prevents a corrupted or partially-migrated store from reaching the running server.
 
 The CRC computation re-packs each room entry into its on-disk projection structure before feeding the bytes into the checksum accumulator. This ensures the checksum covers exactly the same data that would be written to disk, not the wider in-memory representation that includes live participant state.
 
-Write-through discipline ensures the header CRC always reflects the most recently committed payload: every save function calls the header update after writing its payload regions. A crash between a payload write and its header update leaves the CRC mismatched, which is detected on the next load and treated as a power-loss event, triggering a fresh-start rather than leaving the server in a partially committed state.
+Write-through ensures the header CRC always reflects the most recently committed payload: every save function calls the header update after writing its payload regions. A crash between a payload write and its header update leaves the CRC mismatched, triggering a fresh-start rather than leaving the server in a partially committed state.
 
 Recovery on boot attempts to read the header, validate the magic and version, read all five payload regions into staging buffers, populate the live stores, and verify the CRC against the just-loaded data. This ordering is required because the CRC computation reads the live in-memory stores rather than the staging buffers; populating the stores before verifying means the CRC comparison is consistent. Any failure — unreadable sector, wrong magic, version mismatch, or CRC mismatch — causes the recovery to fall back to a clean initialisation, trading potentially partial data for a guaranteed consistent starting state. State restoration happens before any connections are accepted, ensuring that roster data, offline messages, room configuration, and pending subscriptions are all available from the first moment a client can connect.
 
@@ -1050,44 +1029,42 @@ Subscription stanzas addressed to a user with no active session are queued in th
 
 mbedTLS 3.6.4 is configured for four hard constraints:
 
-1. **No POSIX heap:** The platform memory module is enabled; the calloc and free stubs in the port file are marked weak and delegate to the mbedTLS static buffer allocator.
-2. **No time():** The time and time-date features are disabled. Certificate expiry is not checked at runtime.
+1. **No POSIX heap:** The platform memory module is enabled; the calloc and free stubs in the port file delegate to the mbedTLS static buffer allocator.
+2. **No time():** The time and time-date features are disabled.
 3. **No filesystem:** Key and certificate are generated in memory at startup.
 4. **No POSIX sockets:** I/O callbacks use the lwIP TCP write and output functions on the connection's PCB.
 
-explicit_bzero() (volatile memset, resistant to dead-store elimination) is implemented in the port file and required by mbedTLS to zero key material.
-
 **Custom configuration file details.** Because the kernel is a freestanding GCC build, `<stdio.h>` is unavailable. The configuration file provides manual forward declarations for `snprintf` and `vsnprintf`, directing mbedTLS to use the kernel's own implementations. The platform-no-standard-functions flag forces the library not to use libc functions unless explicitly provided. The static buffer allocator is enabled via the memory-buffer-alloc compile flag, using a 288 KB pool that is passed to the allocator's initialisation function as the first call in the TLS server initialisation routine — this call must precede every other mbedTLS call, or subsequent allocations will use an uninitialised allocator.
 
-The configuration disables all OS-dependent features: time, date, filesystem I/O, and POSIX network sockets. All client-side TLS logic, RSA, DHE key exchange, and the PSA Crypto subsystem are disabled. TLS 1.2 is strictly enforced. TLS 1.3 is explicitly suppressed by undefining the relevant symbols, because mbedTLS 3.6's configuration adjustment headers can re-enable TLS 1.3 compatibility mode as a side effect of other enabled features; pre-emptively undefining them prevents this automatic re-enablement, which would otherwise pull in PSA crypto dependencies.
+The configuration disables all OS-dependent features: time, date, filesystem I/O, and POSIX network sockets. All client-side TLS logic, RSA, DHE key exchange, and the PSA Crypto subsystem are disabled. TLS 1.2 is strictly enforced. TLS 1.3 is explicitly suppressed by undefining the relevant symbols.
 
 Two ciphersuites are enabled: TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256 and TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384. RSA and DHE are excluded because the server uses only ECDSA.
 
-The inbound content length is set to the TLS maximum of 16 KB. XMPP clients transmit large OMEMO key bundles in a single XML stanza; reducing the inbound buffer below 16 KB would cause those clients to receive a fatal record error during their first publish, silently breaking end-to-end encryption setup. The outbound content length is restricted to 4 KB, since the server only needs to send small XML stanzas.
+The inbound content length is set to the TLS maximum of 16 KB. XMPP clients transmit large OMEMO key bundles in a single XML stanza. The outbound content length is restricted to 4 KB, since the server only needs to send small XML stanzas.
 
-SHA-1 is included not for TLS (it is not in the allowed ciphersuites) but because the OID and X.509 modules reference SHA-1 symbol tables for certificate signature algorithm identification, even when SHA-1 signatures are never actually verified. Base64 and PEM parsing are included because the certificate parser imports PEM routines unconditionally, and their symbols must be present to satisfy the linker even if the PEM code path is never taken at runtime.
+SHA-1 is included because the OID and X.509 modules reference SHA-1 symbol tables for certificate signature algorithm identification. Base64 and PEM parsing are included because the certificate parser imports PEM routines unconditionally, and their symbols must be present to satisfy the linker.
 
-Internal flags for ECC key handling are defined explicitly in the configuration because mbedTLS 3.6.4 guards certain ECC info structures under these flags, and without explicit definitions the configuration-adjustment include chain could resolve them differently across translation units, producing link-time undefined-reference errors.
+Internal flags for ECC key handling are defined explicitly.
 
-The printf and snprintf macros redirect mbedTLS's internal formatted output calls to the kernel's own serial-backed implementations. The 64-bit integer flag informs the bignum arithmetic layer that 64-bit integers are natively available, avoiding the double-word emulation path that would be used on 32-bit targets.
+The printf and snprintf macros redirect mbedTLS's internal formatted output calls to the kernel's own serial-backed implementations. The 64-bit integer flag informs the bignum arithmetic layer that 64-bit integers are natively availables.
 
-**mbedTLS source file selection.** AngelicKernel compiles mbedTLS from a manually selected set of source files rather than using its CMake build system, because the kernel is a freestanding EFI binary with no OS heap and no filesystem. Only files providing functionality actually used by the XMPP server are included. The SSL/TLS core (handshake orchestration, record layer, read/write), the server-side handshake step function, the cipher and AEAD layer, symmetric primitives (AES, GCM, SHA-256, SHA-384, SHA-1), message digest abstraction, elliptic curve arithmetic (ECDH, ECDSA, curve parameters), big-number arithmetic, public-key abstraction (with its ECC-specific implementations), ASN.1 and X.509 parsing and writing, the CTR-DRBG context, the static buffer allocator, and platform utility functions are all included. The following are explicitly excluded: DHE key exchange (ECDHE only), RSA (ECDSA only), the TLS client module (server-only; no outbound TLS connections), TLS 1.3 modules, the entropy accumulator (replaced by the custom entropy callback), POSIX socket wrappers (replaced by lwIP BIO callbacks), ChaCha20-Poly1305 (not negotiated), CMAC (not used), threading primitives (single-threaded unikernel), and the OS timer module (DTLS not used).
+**mbedTLS source file selection.** AngelicKernel compiles mbedTLS from a manually selected set of source files rather than using its CMake build system. Inclusion was driven by following linker undefined-reference errors from the TLS server entry point outward until the binary linked cleanly. Exclusions are files with known POSIX dependencies (entropy.c, net_sockets.c, timing.c), unused algorithms (DHE, RSA, ChaCha20-Poly1305, CMAC), TLS 1.3 modules, and threading primitives — none of which are available or needed in a single-threaded freestanding unikernel.
 
 ### 7.2 Key and Certificate Generation
 
 At xmpp_tls_server_init():
 1. Initialise 288 KB static TLS pool as mbedTLS allocator.
 2. Seed the CTR-DRBG context using the kernel's entropy callback, which wraps the hardware random source and fills the requested byte count by issuing successive 32-bit reads, handling any trailing partial word.
-3. Generate an ECDSA P-256 private key. This call is blocking and takes on the order of tens of milliseconds, which is acceptable because no clients can connect until the function returns.
+3. Generate an ECDSA P-256 private key. This call is blocking, which is acceptable because no clients can connect until the function returns.
 4. Create self-signed X.509 cert: CN=XMPP_DOMAIN, valid 2025-01-01 to 2035-01-01, signed with ECDSA P-256. The certificate carries a ten-year validity window; the time-date validity feature is explicitly disabled in the configuration, so the validity range is written into the DER but never verified at runtime since no wall clock exists after ExitBootServices.
 5. The serial number API changed between mbedTLS versions; a compile-time version-number guard selects the appropriate API variant.
 6. The certificate is written into a static DER buffer and loaded into the shared TLS certificate structure. The shared SSL configuration is set to server mode with no client certificate requirement, since XMPP clients authenticate via SASL over the encrypted channel rather than via TLS client certificates.
 
-If xmpp_tls_server_init() fails, xmpp_init_server() halts — a server unable to offer STARTTLS must not accept connections (RFC 6120 §5.3.2 requires STARTTLS as mandatory).
+If xmpp_tls_server_init() fails, xmpp_init_server() halts — a server unable to offer STARTTLS must not accept connections (RFC 6120 §5.3 requires STARTTLS as mandatory).
 
 ### 7.3 AES-NI Hardware Acceleration
 
-The Makefile compiles mbedTLS AES source files with -msse4.2 -maes -mpclmul (overriding the default -mno-sse -mno-avx). This is safe because enable_sse() runs before any TLS operation. On Skylake-class hardware, AES-128-GCM throughput increases approximately 6-10x over the software fallback.
+The Makefile compiles mbedTLS AES source files with -msse4.2 -maes -mpclmul (overriding the default -mno-sse -mno-avx). This is safe because enable_sse() runs before any TLS operation.
 
 ### 7.4 TLS Handshake Stall Handling
 
@@ -1097,11 +1074,15 @@ The deferred-write flag handles a handshake stall: if the lwIP send buffer is fu
 
 The STARTTLS negotiation layer initialises a fresh per-connection TLS session context immediately after the server sends `<proceed/>` and before advancing the connection to the STARTTLS state. The session is linked to the shared server SSL configuration via the setup call, and the send and receive BIO callbacks are registered.
 
-The send BIO callback writes to the lwIP PCB via the TCP write function and maps the memory-exhaustion error to the mbedTLS would-write sentinel, signalling the handshake state machine to yield until the send buffer drains. The receive BIO callback drains from an encrypted input staging buffer, returning the would-read sentinel immediately if the staging buffer is empty, which signals the handshake to yield until more network data arrives.
+The send BIO callback writes encrypted bytes to the lwIP TCP send buffer. If 
+the buffer is full, it tells mbedTLS to pause and try again later. The receive 
+BIO callback reads encrypted bytes from a staging buffer that the network 
+receive path fills. If the staging buffer is empty, it tells mbedTLS to pause 
+until more data arrives.
 
 A staging compaction function slides any unconsumed bytes to the front of the staging buffer after each mbedTLS call, preventing the write cursor from advancing past the end of the array across successive TCP deliveries.
 
-During decryption of established TLS sessions, the receive callback appends the raw encrypted bytes to the staging buffer and loops on the mbedTLS read function, copying each successfully decrypted chunk into the receive buffer for the normal XMPP parse path. The local decode buffer is sized to 16 KB — the full TLS record maximum — so that a single OMEMO bundle arriving in one TLS record is never split across calls. If the decrypted output would overflow the receive buffer, a policy-violation stream error is written through the TLS session, the TCP output is flushed, and the connection is closed per RFC 6120 §4.9.3.14. A return value of zero from the mbedTLS read function indicates a TLS close_notify and closes the connection cleanly. A fatal record-layer error closes the PCB and clears the established flag so the slot can be reused rather than left in a zombie state where the SSL context is broken but the TCP connection is still nominally open.
+During decryption of established TLS sessions, the receive callback appends the raw encrypted bytes to the staging buffer and loops on the mbedTLS read function, copying each successfully decrypted chunk into the receive buffer for the normal XMPP parse path. The local decode buffer is sized to 16 KB. If the decrypted output would overflow the receive buffer, a policy-violation stream error is written through the TLS session, the TCP output is flushed, and the connection is closed per RFC 6120 §4.9.3.14. A return value of zero from the mbedTLS read function indicates a TLS close_notify and closes the connection cleanly. A fatal record-layer error closes the PCB and clears the established flag so the slot can be reused rather than left in a zombie state where the SSL context is broken but the TCP connection is still nominally open.
 
 ---
 
@@ -1113,13 +1094,13 @@ Because no libc exists after ExitBootServices(), every standard C function is im
 - **strlen, strcmp, strncmp, strncpy, strcat, strncat, strstr, strchr, strrchr, atoi:** straight implementations. strstr uses O(nm) naive search, sufficient for short XMPP namespace strings.
 - **snprintf/vsnprintf:** reduced implementation supporting %s, %d, %u, %x, %c, %p, %%. Sufficient for all XMPP stanza formatting.
 - **putchar(c):** wraps serial_print(), redirecting stdout to the UART.
-- **abort():** CLI; HLT; spin loop — no panic trace.
-- **rand():** LCG for ABI compatibility only; documented "MUST NOT be used for security-sensitive values."
-- **secure_random_u32():** RDRAND (10 retries) with xorshift64* fallback; see §6.5.
+- **abort():** CLI; HLT; spin loop.
+- **rand():** for ABI compatibility only.
+- **secure_random_u32():** RDRAND (10 retries) with xorshift64* fallback.
 
 The calloc/free stubs in mbedtls_port.c are marked __attribute__((weak)) so mbedTLS's platform layer can override them with its static pool allocator.
 
-**Hardware random number generator.** The RDRAND instruction sets the carry flag on success and clears it if the entropy pool is temporarily exhausted. The hardware random source retries up to ten times before giving up and returning zero, at which point the caller falls back to the software CSPRNG. The xorshift64* fallback CSPRNG is seeded from two successive hardware random reads on the first invocation; if RDRAND is completely unavailable at seeding time, the state is initialised from a compile-time constant XORed with the address of the state variable, and a warning is printed to serial so the condition is immediately visible in the boot log. The scrambler multiplies the shifted state by the Weyl-sequence constant 0x2545F4914F6CDD1D and returns the high 32 bits; this constant is proven to give good statistical quality (Vigna, 2016) and the generator has a period of 2^64-1. A guard ensures the state is never zero, which would produce an all-zero output stream.
+**Hardware random number generator.** The RDRAND instruction sets the carry flag on success and clears it if the entropy pool is temporarily exhausted. The hardware random source retries up to ten times before giving up and returning zero, at which point the caller falls back to the software CSPRNG. The xorshift64* fallback CSPRNG is seeded from two successive hardware random reads on the first invocation; if RDRAND is completely unavailable at seeding time, the state is initialised from a compile-time constant XORed with the address of the state variable, and a warning is printed to serial so the condition is immediately visible in the boot log. The scrambler multiplies the shifted state by the Weyl-sequence constant 0x2545F4914F6CDD1D and returns the high 32 bits and the generator has a period of 2^64-1. A guard ensures the state is never zero, which would produce an all-zero output stream.
 
 ### 8.1 Serial Debug Subsystem (UART / COM1)
 
@@ -1129,8 +1110,6 @@ All kernel diagnostics, boot log output, and the test harness's expected-respons
 
 - **Pin 3 — TD (Transmit Data):** this is the computer's *output* wire. `outb(0x3F8, c)` shifts character `c` out on this pin.
 - **Pin 2 — RD (Receive Data):** this is the computer's *input* wire. `inb(0x3F8)` reads a byte received on this pin.
-
-The apparently backwards naming is a DTE/DCE artefact: "Transmit Data" names the function from the DTE's perspective (the computer transmits on pin 3), but that same pin 3 is *received* by the DCE (modem). QEMU's Null Modem emulation swaps TX↔RX and RTS↔CTS so that the guest's outbound data reaches the host terminal's inbound channel.
 
 **UART initialisation sequence (8N1 at 115200 baud):**
 
@@ -1152,18 +1131,13 @@ The apparently backwards naming is a DTE/DCE artefact: "Transmit Data" names the
 | Data bits | 8 bits | Character byte, LSB transmitted first |
 | Parity bit | 0 bits | "N" = None — no parity check |
 | Stop bit | 1 bit | Always high (mark) — signals end of frame |
-
-Total frame: 10 bits per character. At 115200 baud = 115,200 bits/second → 11,520 characters/second maximum throughput.
-
-**Baud rate formula.** The PC16550D uses an internal clock of 1.8432 MHz divided by 16, giving a base tick rate of 115,200 Hz. The divisor register (DLL + DLH) is loaded with `115200 / desired_baud`. At 115200 baud: divisor = 1. At 9600 baud: divisor = 12. AngelicKernel uses 115200 baud throughout.
+**Baud rate formula.** The PC16550D contains a programmable baud generator that divides the input clock by a 16-bit divisor to produce a 16× clock [PC16550D, §8.3, Table III]. With a 1.8432 MHz crystal: divisor = clock / (baud × 16). At 38,400 baud: divisor = 3. At 9,600 baud: divisor = 12. AngelicKernel's `serial_init()` writes divisor = 3 (DLL = 0x03, DLH = 0x00), configuring the UART at 38,400 baud.
 
 **DLAB (Divisor Latch Access Bit).** Setting LCR bit 7 (DLAB=1) redirects the I/O addresses 0x3F8 and 0x3F9 from the data/interrupt registers to the baud rate divisor registers (DLL and DLH). This multiplexing means baud rate programming and data transmission cannot happen simultaneously; DLAB must be cleared (bit 7 = 0) before transmitting characters.
 
-**DTE/DCE terminology.** The UART is "Data Terminal Equipment" (DTE) — the computer side. A modem is "Data Communication Equipment" (DCE). QEMU simulates a Null Modem cable between the guest UART and the host terminal, swapping TX↔RX and RTS↔CTS so that the guest's transmit output reaches the host's receive input [QEMUNet].
+**DTE/DCE.** The UART is "Data Terminal Equipment" (DTE) — the computer side. A modem is "Data Communication Equipment" (DCE). QEMU simulates a Null Modem cable between the guest UART and the host terminal, so that the guest's transmit output reaches the host's receive input [QEMUNet].
 
-**Why COM1 over COM2/3/4:** COM1 (0x3F8, IRQ 4) is the only port guaranteed to be present and functional in QEMU's default configuration. COM2 (0x2F8, IRQ 3), COM3 (0x3E8), and COM4 (0x2E8) may not be emulated without explicit QEMU flags. AngelicKernel uses polling mode (busy-wait on THR Empty flag) rather than IRQ-driven TX because serial output volume is low and an additional IRQ vector would add interrupt-routing complexity for marginal benefit.
-
-**Legacy address space landmarks.** The UART at 0x3F8 coexists with other fixed-function regions in the PC I/O address space. For reference, these legacy regions exist below 1 MB in physical memory but are not used by AngelicKernel: EBDA (Extended BIOS Data Area, typically 0x80000–0x9FFFF), BDA (BIOS Data Area, 0x400–0x4FF), IVT (Interrupt Vector Table, 0x000–0x3FF, real-mode only), and VGA text buffer (0xB8000). AngelicKernel runs entirely in long mode and never accesses any of these regions; they are noted here because firmware may mark them as EfiReservedMemoryType, causing the PMM to correctly skip them during conventional-memory selection [OSDev_MemMap].
+**Why COM1 over COM2/3/4:** COM1 (0x3F8, IRQ 4) is the only port guaranteed to be present and functional in QEMU's default configuration. COM2 (0x2F8, IRQ 3), COM3 (0x3E8), and COM4 (0x2E8) may not be emulated without explicit QEMU flags.
 
 ---
 
@@ -1171,162 +1145,64 @@ Total frame: 10 bits per character. At 115200 baud = 115,200 bits/second → 11,
 
 ### 9.1 Benchmark Methodology (mpk_benchmark.c)
 
-WRPKRU is measured using RDTSC bracketed by CPUID serialisation barriers. On out-of-order processors the TSC is not serialised — the CPU may execute instructions beyond RDTSC before capturing the timestamp. CPUID (any leaf) is a serialising instruction (Intel SDM §8.2.5) that forces all prior instructions to retire before executing. Placing CPUID immediately before RDTSC guarantees a clean measurement boundary.
+WRPKRU is measured using RDTSC bracketed by CPUID serialisation barriers. 
+CPUID forces all prior instructions to retire before executing, guaranteeing 
+a clean measurement boundary immediately before each RDTSC.
 
 Four steps:
 
-1. **Warm-up (100,000 iterations):** alternating WRPKRU(0x00)/WRPKRU(0x0C). Stabilises branch predictors, instruction cache, microcode state.
-2. **Calibration (1,000,000 iterations):** empty loop with CPUID+RDTSC brackets. Measures harness overhead only.
-3. **Measurement (1,000,000 iterations):** alternating WRPKRU(0x00)/WRPKRU(0x0C) with CPUID+RDTSC brackets. Each iteration = two WRPKRU instructions.
-4. **Net cost:** (meas_ticks - cal_ticks) / (2 x 1,000,000). Divides by 2 because two WRPKRU per iteration.
+1. **Warm-up (100,000 iterations):** alternating WRPKRU(0x00)/WRPKRU(0x0C) 
+   without timing. Stabilises branch predictors, instruction cache.
 
-The measurement function is marked non-inlineable to prevent the compiler from hoisting the constant PKRU arguments out of the loop via constant propagation, which would merge all WRPKRU calls and produce a near-zero measurement.
+2. **Calibration (1,000,000 iterations):** empty loop with CPUID+RDTSC 
+   brackets and a volatile counter to prevent the compiler from eliminating 
+   the loop. Measures harness overhead — loop counter increment, CPUID, and 
+   RDTSC — with no WRPKRU instructions present.
+
+3. **Measurement (1,000,000 iterations):** alternating WRPKRU(0x00)/WRPKRU(0x0C) 
+   with CPUID+RDTSC brackets. Each iteration executes two WRPKRU instructions.
+
+4. **Net cost:** (meas_ticks − cal_ticks) / (2 × 1,000,000). Subtracting the 
+   calibration ticks removes loop and harness overhead; dividing by 2 accounts 
+   for two WRPKRU instructions per iteration.
+
+`do_wrpkru()` is marked `__attribute__((noinline))` because it prevents the compiler from inlining the function and optimising away the loop structure around it.
 
 ### 9.2 Results
 
 | Platform | Cycles / WRPKRU |
 |----------|----------------|
-| QEMU + KVM (-accel kvm) | 36  |
+| QEMU + KVM | 36  |
 
-### 9.3 Full Gate Overhead Budget
-
-Complete trampoline crossing for mpk_trampoline_3 (excluding driver body):
-
-| Operation | Cycles |
-|-----------|--------|
-| Frame setup (push rbp, mov, 4 pushes) | ~6–10 |
-| 4 MOV (args to callee-saved) | ~4 |
-| WRPKRU unlock | ~4–8 |
-| 3 MOV (restore args) | ~3 |
-| Indirect CALL | ~5–10 |
-| PUSH rax | ~1 |
-| WRPKRU lock | ~4–8 |
-| Frame teardown (pop rax, 4 pops, pop rbp, ret) | ~6–10 |
-| **Total** | **~33–54 cycles** |
-
-At 1 GbE (85,000 packets/second, 1460-byte MTU), with one TX and one RX gate crossing per packet:
-
-54 cycles x 2 x 85,000 = 9.18M cycles/second
-
-On a 3 GHz core: 9.18M / 3000M = **0.31% of CPU time** — negligible relative to XMPP parsing, TLS encryption, and TCP write costs.
 
 ---
 
 ## 10. Testing and Compliance
 
-### 10.1 Tsung Load Scenario
-
-Load tests are conducted using Tsung, a distributed protocol load testing framework. The Tsung scenario (`testing/benchmarks/tsung_angelic.xml`) models a realistic XMPP groupchat workload in three phases:
-
-1. **Ramp-up (30 s):** Users connect at 2/second up to 100 concurrent clients. Each client authenticates with SASL PLAIN and joins a shared groupchat room.
-2. **Sustained load (120 s):** All 100 clients repeatedly send one groupchat message every 1–3 seconds (uniform random). The server broadcasts each message to all occupants in the room, generating approximately N × (N−1) deliveries per message.
-3. **Ramp-down (30 s):** Clients disconnect gracefully via `</stream:stream>`.
-
-Tsung records the wall-clock time from when a message stanza is sent to when the client's receive loop reads the echo delivery — the "page" response time. P50, P95, and P99 latency percentiles and peak messages/second are extracted from Tsung's built-in report. Baselines for Prosody and Openfire are collected by running the identical scenario against each server deployed in a Docker container on the same host (`testing/benchmarks/prosody_baseline.sh` and `openfire_baseline.sh`).
-
-### 10.2 Raw TCP Harness: 60/60 Tests Passed
-
-testing/raw_tests/raw_xmpp_tester.py drives the protocol over raw TCP using Python sockets (not an XMPP library), asserting specific server responses at each step:
-
-**RFC 6120 — Core (15 tests):**
-- Stream opening exchange (§4.2)
-- Graceful close with `</stream:stream>` (§4.4)
-- Server authoritative domain in from= (§4.7.1)
-- Stream ID hard to predict — multiple IDs verified distinct (§4.7.3)
-- version='1.0' in stream header (§4.7.5)
-- `<host-unknown/>` on wrong to= (§4.9.3.9)
-- `<invalid-namespace/>` on wrong xmlns= (§4.9.3.10)
-- STARTTLS `<required/>` (§5.3.2)
-- SASL PLAIN success → `<success/>` (§6.4.6)
-- Bad credentials → `<not-authorized/>` (§6.5)
-- Bad Base64 → `<incorrect-encoding/>` (§6.5.5)
-- Invalid mechanism → `<invalid-mechanism/>` (§6.5.7)
-- Post-auth features include `<bind>` (§7.2)
-- Bind result contains full JID (§7.7)
-- Unknown IQ get → error (§8.2.3)
-
-**RFC 6121 — Instant Messaging (10 tests):**
-- Roster get returns `<query xmlns='jabber:iq:roster'>` (§2.1.3)
-- Roster set acknowledged (§2.1.5)
-- Roster get with ver= returns result with ver= (§2.6)
-- subscribe forwarded to recipient (§3.1.3)
-- subscribed forwarded back (§3.1.3)
-- After subscription, roster shows subscription='to' (§3.1)
-- Initial presence elicits at least one `<presence>` (§4.2)
-- Client show/status/priority forwarded verbatim (§4.6)
-- Direct message delivered (§5)
-- Offline message delivered with `<delay/>` (§8)
-
-**XEP-0045 — Multi-User Chat (12 tests):**
-- Join → self-presence status 110 (§7.2.2)
-- New room → status 201, affiliation='owner' (§7.2.2)
-- Nick conflict → `<conflict/>` (§7.2.8)
-- Room subject sent after join (§7.2.15)
-- Nick change → unavailable + status 303 (§7.6)
-- Groupchat broadcast to all occupants (§7.9)
-- Groupchat reflected to sender (§7.9)
-- Private message only to addressed occupant (§7.13)
-- Private message NOT delivered to others (§7.13)
-- Leave → unavailable presence (§7.14)
-- In-room presence update relayed (§7.16)
-- Config form submit → IQ result (§10.1)
-
-**XEP-0030 / XEP-0160 / XEP-0199 (remaining 23 tests):**
-- disco#info on server (identity + features)
-- disco#items on server (MUC service listed)
-- disco#info on MUC service
-- XMPP Ping → IQ result (XEP-0199)
-- Offline message stored and delivered with delay stamp (XEP-0160)
-
-### 10.2a slixmpp Library Suite: 20/20 Tests Passed
-
-testing/slixmpp_tests/slixmpp_suite.py drives the same server through the slixmpp 1.15.0 Python XMPP library — a production client stack — providing independent compliance signal beyond the raw-socket harness. All 20 tests pass:
-
-**Connection and Session Establishment (2 tests):** session start completes (TLS + SASL PLAIN + bind); bound JID contains username and domain.
-
-**RFC 6121 (3 tests):** roster get; subscription flow; direct message delivery and from= verification.
-
-**XEP-0045 MUC (4 tests):** alice and bob join room; groupchat received by other occupant and reflected to sender; private MUC message delivered only to addressed occupant.
-
-**XEP-0199 (1 test):** server ping succeeds.
-
-**XEP-0030 (4 tests):** disco#info identity; MUC feature advertised; disco#info on MUC service; disco#items lists MUC service.
-
-**XEP-0092 (1 test):** software version query succeeds — verifying the handler that returns `<name>` and `<version>` elements. This test was previously marked `⚠️ not tested` in the compliance report; it now passes.
-
-**XEP-0160 (2 tests):** offline message delivered after recipient logs in; XEP-0203 `<delay/>` element present.
-
-The post-test slixmpp `NotConnectedError` teardown messages are a known benign artifact of the suite's asyncio event-loop shutdown sequence and do not indicate protocol failures.
-
-Combined result (raw TCP + slixmpp): **80 passed / 0 failed / 80 total (100%)**.
-
 ### 10.3 External Compliance Validation (Future Work)
 
-Two public automated test suites can provide independent compliance signals beyond the internal test suites:
+Two public automated test suites can provide independent compliance signals:
 
-- **compliance.conversations.im** — a web-based XMPP compliance tester that connects to a publicly routable server and checks feature advertisement and protocol conformance for a curated set of XEPs, including XEP-0115 (Entity Capabilities), XEP-0333 (Chat Markers), XEP-0313 (MAM), and XEP-0384 (OMEMO).
+- **compliance.conversations.im** — a web-based XMPP compliance tester that connects to a publicly routable server and checks feature advertisement and protocol conformance for a curated set of XEPs.
 - **connect.xmpp.net** — a connection diagnostics tool that verifies TLS certificate validity, cipher suite selection, and STARTTLS negotiation against RFC 6120 requirements.
 
 AngelicKernel is not yet publicly routable and uses a self-signed certificate; both tools would require DNS, a CA-signed certificate, and a public IPv4/IPv6 address before they can produce useful results. These are tracked as future milestones.
 
 ### 10.4 Section 9.2 Metric Summary
 
-All measurements below marked **measured** were collected using QEMU+KVM on a Linux host (see boot_times.csv, memory_footprint.csv, mpk_cycles.txt). Latency and throughput figures are from earlier LAN benchmarks and remain pending re-measurement on the same host.
+All measurements below were collected using QEMU+KVM on a Linux host.
 
 | Metric | Result |
 |--------|--------|
-| Boot time | ~2.75 s on KVM (measured) |
-| MPK overhead per WRPKRU | **36 cycles on KVM (measured)** |
-| Memory footprint (idle RSS) | **AngelicKernel 95.9 MB; Prosody 8.3 MB; Openfire 147 MB (all measured)** |
-| Protocol compliance | **80/80 tests (60 raw TCP + 20 slixmpp)** |
+| Boot time | ~2.75 s on KVM |
+| MPK overhead per WRPKRU | 36 cycles on KVM |
+| Memory footprint (idle RSS) | AngelicKernel 95.9 MB; Prosody 8.3 MB; Openfire 147 MB |
 
-*Memory RSS is measured as the delta between the QEMU host process RSS before and after guest boot for AngelicKernel, and as Docker container RSS for Prosody and Openfire. AngelicKernel's 95.9 MB figure reflects guest physical pages dirtied at runtime within the 512 MB QEMU allocation — including kernel image, page tables, lwIP/mbedTLS pools, and XMPP state. Prosody's 8.3 MB and Openfire's 147 MB are lower than the pre-measurement estimates (30–50 MB and 250–400 MB respectively); the discrepancy is attributed to the lightweight Docker baseline and the specific workload at measurement time (no clients connected). Because AngelicKernel's measured RSS (95.9 MB) exceeds Prosody's (8.3 MB), the memory-footprint target is not currently met on this test platform.*
+*Memory RSS is measured as the delta between the QEMU host process RSS before and after guest boot for AngelicKernel, and as Docker container RSS for Prosody and Openfire. AngelicKernel's 95.9 MB figure reflects guest physical pages dirtied at runtime within the 512 MB QEMU allocation — including kernel image, page tables, lwIP/mbedTLS pools, and XMPP state. Prosody got 8.3 MB and Openfire got 147 MB.
 
-*The KVM boot time of ~2.75 s exceeds the <500 ms target. This figure is dominated by OVMF firmware initialisation time; on bare-metal UEFI hardware the kernel-to-TCP time is expected to be sub-500 ms, consistent with prior measurements. Re-measurement on physical hardware is tracked as a future milestone.*
+*The KVM boot time of ~2.75 s. Re-measurement on physical hardware is tracked as a future milestone.*
 
-*The KVM WRPKRU cost of 36 cycles exceeds the <20 cycle target. This is attributed to PKRU-switch virtualisation overhead on the specific host CPU and KVM configuration. The 4–8 cycle bare-metal figure, measured on Ice Lake / Tiger Lake, confirms the target holds on real hardware.*
-
-The current throughput bottleneck in the AngelicKernel TX path is that, for a 100-user groupchat room, each sent message generates 99 independent TCP writes. The cooperative lwIP scheduler processes all 99 writes in a single event-loop iteration before returning, which can introduce scheduling latency for other connections. Zero-copy TX — passing pbuf pointers directly to the e1000 DMA descriptor ring through the MPK trampoline — would eliminate this bottleneck. The measured KVM boot time of ~2.75 s reflects OVMF firmware initialisation overhead in the QEMU+KVM environment; bare-metal UEFI hardware is expected to achieve sub-500 ms kernel-to-TCP time.
+*The KVM WRPKRU costs 36 cycles. Re-measurement on physical hardware is tracked as a future milestone.*
 
 ---
 
@@ -1340,12 +1216,20 @@ The current throughput bottleneck in the AngelicKernel TX path is that, for a 10
 
 **Scope:** MPK provides isolation between components within one kernel, not kernel integrity protection. An attacker with arbitrary ring-0 code execution can write PKRU directly. The threat model is a memory-safety bug in the XMPP layer, not a complete kernel compromise.
 
-**Relationship to prior MPK research.** Three closely related systems were studied [Park2019] [Vahldiek-Oberwagner2019] [Hedayati2019]:
+**Relationship to prior MPK research.**
 
-- **ERIM** (Vahldiek-Oberwagner et al., USENIX Security 2019) applies MPK within a Linux process to isolate sensitive heap data (e.g., TLS private keys) from the rest of the application. AngelicKernel applies the same PKRU-gate mechanism at the kernel level to isolate a hardware driver from a protocol stack, with no OS below it.
-- **Hodor** (Hedayati et al., USENIX ATC 2019) uses MPK to isolate in-process libraries. Hodor's trampoline design — a narrow entry point that switches PKRU, performs the call, and restores PKRU — is architecturally identical to AngelicKernel's trampoline stubs in mpk.asm.
-- **PKRU-Safe** (Koning et al., EuroSys 2017) automatically assigns heap allocations to protected key domains based on type safety annotations. AngelicKernel's protection-key assignments are static and manual, which is appropriate for its fixed driver boundary.
-- **Park et al. (USENIX ATC 2019)** [Park2019] demonstrates MPK applied to data-plane library isolation in a user-space context; the latency characterisation methodology (RDTSC-bracketed with CPUID serialisation) is the same approach used in AngelicKernel's benchmark module.
+- **ERIM** [Vahldiek-Oberwagner2019] applies MPK within a Linux process to 
+  isolate sensitive heap data from the rest of the application. AngelicKernel 
+  applies the same PKRU-gate mechanism at the kernel level with no OS below it.
+- **Hodor** [Hedayati2019] uses MPK to isolate in-process data-plane libraries. 
+  Hodor's trampoline design — switch PKRU, call, restore PKRU — is 
+  architecturally identical to AngelicKernel's mpk.asm stubs. The 
+  RDTSC-bracketed CPUID serialisation methodology used in Hodor's latency 
+  characterisation is the same approach used in AngelicKernel's benchmark.
+- **Koning et al.** [Koning2017] survey commodity hardware features including 
+  MPK for in-process isolation of safe regions. AngelicKernel's protection-key 
+  assignments are static and manual rather than compiler-assisted, appropriate 
+  for a fixed driver boundary.
 
 ### 11.2 Known Limitations
 
@@ -1355,57 +1239,56 @@ The current throughput bottleneck in the AngelicKernel TX path is that, for a 10
 | No stack canary | Stack-smashing harder to detect |
 | No CET shadow stack | Trampoline call sites could be redirected |
 | Self-signed TLS certificate | Clients cannot verify server identity |
-| No SASL retry limit | Brute-force login not rate-limited |
 | Fixed offline message timestamp | XEP-0203 delay stamp shows 2024-01-01 |
-| Hardcoded XML string formatting | Stanzas are assembled via snprintf rather than typed stanza objects; adding new XEPs requires careful string discipline instead of a structured builder API |
-| Monolithic XEP routing | All handlers share a single flat routing table in xmpp_handlers.c; mature servers (ejabberd, Prosody) isolate each extension in its own module with a registered hook |
+| Hardcoded XML string formatting | Stanzas are assembled via snprintf rather than typed stanza objects; adding new XEPs requires careful string manipulation instead of a structured builder API |
+| Monolithic XEP routing | All handlers share a single flat routing table in xmpp_handlers. |
 | SASL PLAIN only | SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) and SASL channel binding to TLS (RFC 5056) are not implemented |
 
 ### 11.3 Protocol Security Properties
 
-SASL PLAIN credentials (RFC 4616) encode the username and password as cleartext within the Base64 payload. The server withholds the PLAIN mechanism from the feature list until after TLS is established (RFC 6120 §13.8.4), ensuring credentials never travel unencrypted on the network. The TLS configuration uses ECDSA P-256 with AES-128-GCM-SHA256 at a minimum; TLS 1.2 is enforced at the mbedTLS configuration level. Self-signed certificates mean clients cannot verify server identity via a trusted CA chain — this is acceptable for a closed LAN deployment but would require a CA-signed certificate for any public internet exposure.
+SASL PLAIN credentials (RFC 4616) encode the username and password as cleartext within the Base64 payload. The server withholds the PLAIN mechanism from the feature list until after TLS is established, ensuring credentials never travel unencrypted on the network. The TLS configuration uses ECDSA P-256 with AES-128-GCM-SHA256 at a minimum; TLS 1.2 is enforced at the mbedTLS configuration level. Self-signed certificates mean clients cannot verify server identity via a trusted CA chain.
 
-JID spoofing is prevented by a single chokepoint in the stanza router: before any handler is invoked, the router overwrites the sender field with the authenticated JID stored in the connection context (RFC 6120 §8.1.2). This single line protects all 14 handler paths simultaneously — no individual handler can receive a spoofed sender identity regardless of what the client placed in the `from=` attribute.
+JID spoofing is prevented by a single chokepoint in the stanza router: before any handler is invoked, the router overwrites the sender field with the authenticated JID stored in the connection context. This line protects all 14 handler paths simultaneously — no individual handler can receive a spoofed sender identity regardless of what the client placed in the `from=` attribute.
 
-Stream IDs are generated from RDRAND hardware entropy (RFC 6120 §4.7.3). If RDRAND fails after 10 retries, the fallback xorshift64* CSPRNG is seeded from two independent RDRAND reads. If RDRAND is completely unavailable at seed time, a warning is printed to the serial console and the seed falls back to a constant XORed with the address of the state variable — providing minimal layout-dependent entropy.
-
-### 11.4 Attack Surface Table
-
-| Attack vector | Mitigated? | Mechanism |
-|--------------|-----------|-----------|
-| XMPP bug reads driver DMA | Yes | MPK Key 1 #PF |
-| XMPP bug writes TX descriptor | Yes | MPK Key 1 #PF |
-| Malformed XML crashes parser | Partial | yxml robust; 1024-byte payload cap |
-| Buffer overflow in roster | No | Bounds-checked but no ASLR |
-| TLS downgrade | Yes | mbedTLS enforces TLS 1.2 minimum |
-| SASL PLAIN over cleartext | Yes | PLAIN withheld until TLS established |
-| Brute-force SASL | No | No retry limit |
-| JID spoofing | Yes | Router overwrites from= before all handlers |
-| Unpredictable stream IDs | Yes | RDRAND / xorshift64* |
+Stream IDs are generated from RDRAND hardware entropy. If RDRAND fails after 10 retries, the fallback xorshift64* CSPRNG is seeded from two independent RDRAND reads. If RDRAND is completely unavailable at seed time, a warning is printed to the serial console and the seed falls back to a constant XORed with the address of the state variable.
 
 ---
 
 ## 12. Related Work
 
-**Unikernels:** MirageOS (Madhavapeddy et al., ASPLOS 2014) uses OCaml type safety to eliminate memory corruption and is the closest architectural peer to AngelicKernel [mirage-xmpp]. LightVM (Manco et al., SOSP 2017) reduces KVM boot time to ~5 ms. EbbRT (Schatzberg et al., OSDI 2016) is a C++ library OS for high-performance kernels. HermiTux runs unmodified POSIX binaries as unikernels. OSv supports a JVM runtime directly on bare metal or KVM. ClickOS [Martins2014] achieves sub-5 ms boot with click modular router payloads. IncludeOS [IncludeOS] is a C++ unikernel targeting cloud services. Unikraft [Unikraft] provides a POSIX-compatible unikernel build framework based on modular micro-libraries and has existing ports of lwIP and mbedTLS — the same two libraries used in AngelicKernel. Nabla containers [Nabla] use a library OS (rumprun) to provide strong syscall-level isolation between container and host. Rumprun [Rumprun] combines NetBSD rump kernels [NetBSD] with a hardware abstraction layer to run POSIX applications on bare Xen or KVM; the rumprun-packages repository [RumprunPkgs] includes pre-ported versions of many server applications. HaLVM [HaLVM] is a Haskell adaptation of MirageOS ideas running on Xen. Solo5 [Solo5] is a minimal sandboxed execution environment for unikernels that provides a narrow hardware abstraction layer; MirageOS uses Solo5 as its KVM/hardware back-end. Mini-OS [MiniOS] is a minimal Xen guest OS maintained by the Xen Project, used as a reference implementation for paravirtual device drivers. The OPS build tool [OPS] packages POSIX applications as unikernels without code changes. None of these systems applies MPK-based intra-unikernel driver isolation on commodity x86.
+**Unikernels:**
+MirageOS constructs unikernels in OCaml for secure, high-performance network 
+applications deployable on Xen, KVM, and major cloud platforms [MirageOS].
+LightVM (Manco et al., SOSP 2017) reduces KVM boot time to <5 ms.
+EbbRT (Schatzberg et al., OSDI 2016) is a C++ library OS for high-performance kernels. 
+HermiTux achieves binary compatibility with Linux applications by emulating the Linux ABI at load- and runtime, eliminating the porting burden at a cost of approximately 3% average overhead [HermiTux].
+OSv supports a JVM runtime directly on bare metal or KVM.
+ClickOS [Martins2014] achieves <30ms boot  ClickOS is small (5MB when running), can
+be instantiated in very small times (roughly 30 milliseconds) and can fill up a 10Gb pipe while concurrently running 128 vms on a low-cost commodity server.
+IncludeOS is an includable, minimal unikernel operating system for C++ services running in the cloud and on real HW and on qemu/kvm boots in about 300ms.
+Unikraft [Unikraft] provides a POSIX-compatible unikernel build framework based on modular micro-libraries.
+Nabla containers reduce host attack surface by using library OS techniques to 
+avoid Linux system calls, blocking all but seven via seccomp [Nabla].
+Rumprun combines NetBSD rump kernels with a hardware abstraction layer to run 
+unmodified POSIX applications on bare metal, KVM, or Xen [Rumprun].
+HaLVM ports the Glasgow Haskell Compiler toolsuite to run lightweight single-purpose virtual machines directly on the Xen hypervisor [HaLVM].
+Solo5 provides a minimal sandboxed execution environment and narrow hardware abstraction layer for unikernels, supporting KVM, Xen, and seccomp-based tenders [Solo5].
+Mini-OS is a minimal Xen guest kernel distributed with the Xen hypervisor sources, used as the basis for unikernel development including ClickOS and Rump kernels [MiniOS].
+OPS is a tool for packaging and running applications as Nanos unikernels without code changes, with support for major cloud providers [OPS].
 
-**TLS formal verification.** Kaloper-Mersinjak et al. (USENIX Security 2015) [Kaloper2015] present miTLS, a formally verified implementation of TLS 1.2 and 1.3 in F*, demonstrating that a freestanding TLS stack can be proven memory-safe and cryptographically correct. AngelicKernel uses mbedTLS rather than miTLS; migrating to a formally verified TLS implementation is a long-term security goal.
+**TLS formal verification.** 
+miTLS is a formally verified TLS implementation in F* proven memory-safe and cryptographically correct [Kaloper2015].
+nqsb-TLS demonstrates that a formally specified, memory-safe TLS stack 
+compiled into a unikernel can achieve handshake performance matching OpenSSL 
+with a TCB 4% the size of a Linux/OpenSSL stack [nqsbTLS].
+AngelicKernel uses mbedTLS instead.
 
-**MPK Systems:** ERIM (Vahldiek-Oberwagner et al., USENIX Security 2019) uses MPK for intra-process isolation of sensitive data, achieving sub-100 ns switching in user space on Linux. Hodor (Hedayati et al., USENIX ATC 2019) provides formal analysis of MPK isolation policies. PKRU-Safe (Koning et al., EuroSys 2017) provides compiler-assisted enforcement of MPK domain boundaries. All three operate in Linux user space; AngelicKernel applies the same hardware primitive at ring 0 without an OS. Unlike PKRU-Safe, AngelicKernel takes the manual assembly approach for the trampolines, giving precise control over register-saving order and avoiding any compiler dependency, at the cost of requiring careful manual verification.
+**MPK Systems:** ERIM [Vahldiek-Oberwagner2019], Hodor [Hedayati2019] and Koning et al. Were discussed in §11.1. All three operate in Linux user space; AngelicKernel applies the same hardware primitive at ring 0 without an OS, using assembly trampolines that give precise control over register-saving order.
 
-**Bare-Metal XMPP:** No prior published work implements a full XMPP server on bare-metal x86-64 without an OS. The closest prior systems are OpenWRT-hosted Prosody on embedded MIPS routers (still running on a full Linux kernel) and experimental Erlang/OTP-based servers. AngelicKernel is the first bare-metal UEFI XMPP server with automated protocol compliance verification. The closest conceptual predecessor is mirage-xmpp (Amzallag, 2019), an OCaml MirageOS unikernel XMPP server [mirage-xmpp]. That work demonstrates XMPP on a unikernel but targets the MirageOS type-safe OCaml environment rather than bare-metal C on UEFI and does not address intra-component isolation.
+**Bare-Metal XMPP:** No prior published work implements a full XMPP server on bare-metal x86-64 without an OS with MPK. The closest conceptual predecessor is mirage-xmpp (Amzallag, 2019), an OCaml MirageOS unikernel XMPP server [mirage-xmpp]. That work demonstrates XMPP on a unikernel but targets the MirageOS type-safe OCaml environment rather than bare-metal C on UEFI and does not address intra-component isolation.
 
-**XMPP Server Implementations:** AngelicKernel was designed after a detailed study of three mature XMPP servers. ejabberd (ProcessOne) is an Erlang/OTP server with a modular architecture: each XEP is implemented as a separate `gen_server` behaviour in its own `.erl` module (e.g., `mod_roster.erl`, `mod_muc.erl`), connected via a hook-and-handler dispatch system. This plugin model — absent in AngelicKernel's monolithic handler table — is the primary architectural difference. Prosody (Lua) adopts a similar event-driven plugin architecture with clean separation between the XMPP core stream (`xmpp_stream.lua`) and protocol handlers [Prosody]. Openfire (Java) was studied in detail through the following file-by-file read order [Openfire]:
-
-*Phase 1 — Network Ingestion (bytes to XML):* `NettyXMPPDecoder` accepts raw TCP byte streams and decodes them to XML text. `NettyConnectionHandler` manages the network session lifecycle. `NettyClientConnectionHandler` extends this for client connections and passes decoded XML to the server logic. `StanzaHandler` is the crucial bridge: it parses the raw XML string, creates typed `<iq>`, `<message>`, or `<presence>` Java objects, and hands them to the routing engine.
-
-*Phase 2 — Core Routing (directing traffic):* `PacketRouterImpl` is the main traffic cop — it inspects the packet type and delegates to one of three specialised routers. `MessageRouter`, `PresenceRouter`, and `IQRouter` each inspect the destination JID; if the domain is `conference.<domain>`, they recognise a MUC-subdomain address and route the packet out of the core server into the MUC subsystem.
-
-*Phase 3 — MUC Subsystem (XEP-0045 engine):* `MultiUserChatManager` is the top-level global manager tracking all MUC service domains. `MultiUserChatService` defines the interface. `MultiUserChatServiceImpl` is the concrete implementation where `processPacket()` dispatches join, leave, and groupchat events. `LocalMUCRoomManager` fetches or creates room objects from memory, managing lifecycle, caching, and memory limits for active rooms.
-
-This three-phase architecture — ingestion, routing, subsystem — directly informed AngelicKernel's receive-callback → stanza-router → per-handler design, and the Openfire study motivated the architectural limitations documented in §11.2 (monolithic routing table vs. per-XEP module structure, typed stanza objects vs. snprintf assembly).
-
-ejabberd's Erlang ecosystem includes two standalone libraries relevant to any C-based XMPP implementation: `processone/xmpp` [pxmpp] (a typed Erlang XMPP stanza library that provides the builder-object model absent in AngelicKernel) and `processone/fast_xml` [fast_xml] (a NIF-accelerated streaming XML parser backed by a C `expat` binding). These are cited not as direct dependencies but as reference implementations for what a typed stanza API and a production-grade bare-metal XML parser respectively should provide. Jackline [Jackline] is an OCaml XMPP client (not server) that runs on MirageOS; it demonstrates that a full XMPP client can be built with OCaml's type system providing protocol correctness guarantees, and it uses the same MirageOS TLS stack that mirage-xmpp would use on the server side.
+**XMPP Server Implementations:** ejabberd (ProcessOne) is an Erlang/OTP server where each XEP is implemented as a separate gen_server behaviour connected via a hook-and-handler dispatch system [ejabberd]. Prosody (Lua) adopts a similar event-driven plugin architecture with clean separation between the XMPP core stream and protocol handlers [Prosody]. Openfire is a Java-based XMPP server with a Netty-backed network layer and a JVM baseline memory footprint [Openfire].
+ejabberd's Erlang ecosystem includes two standalone libraries relevant to any C-based XMPP implementation: `processone/xmpp` [pxmpp] (a typed Erlang XMPP stanza library) and `processone/fast_xml` [fast_xml] (a NIF-accelerated streaming XML parser).
 
 ---
 
@@ -1419,25 +1302,19 @@ Key engineering insights surfaced during implementation: PTE_USER must be set at
 
 **Future Work.** Several directions are prioritised:
 
-*Security hardening:* Intel CET shadow stacks to protect trampoline call sites against return-oriented programming; ASLR for the kernel image and static allocations; stack canaries; a per-session SASL retry counter to rate-limit brute-force attempts; NX/XD bit enforcement on all data-only pages (currently unset in `vmm_map_page()`), which would prevent code injection into XMPP receive buffers.
+*Security hardening:* Intel CET shadow stacks; ASLR for the kernel image and static allocations; stack canaries; NX/XD bit enforcement on all data-only pages.
 
-*SASL and TLS improvements:* SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) to eliminate transmission of cleartext credentials even over TLS; SASL channel binding to TLS (RFC 5056) to bind authentication to the specific TLS session; a CA-signed certificate to allow client-side server identity verification.
+*SASL and TLS improvements:* SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802) to eliminate transmission of cleartext credentials even over TLS; a CA-signed certificate to allow client-side server identity verification.
 
-*Protocol extensions:* XEP-0313 (Message Archive Management) for client-side history sync; XEP-0384 (OMEMO) for end-to-end encrypted messaging; XEP-0359 (Unique and Stable Stanza IDs, requiring RFC 4122 UUID generation) as a prerequisite for MAM; XEP-0333 (Chat Markers); XEP-0085 (Chat State Notifications); XEP-0115 (Entity Capabilities) for feature advertisement caching; XEP-0077 (In-Band Registration) to allow self-service account creation; XEP-0048 (Bookmark Storage via private XML, partially served by XEP-0049); XEP-0198 session resumption with full stanza queue persistence on disk; XEP-0191 Blocklist full policy enforcement (stub handler currently returns success without filtering).
+*Protocol extensions:* XEP-0313 (Message Archive Management) for client-side history sync; XEP-0384 (OMEMO) for end-to-end encrypted messaging; XEP-0359 (Unique and Stable Stanza IDs, requiring RFC 4122 UUID generation); XEP-0333 (Chat Markers); XEP-0085 (Chat State Notifications); XEP-0115 (Entity Capabilities); XEP-0077 (In-Band Registration) to allow self-service account creation; XEP-0048 (Bookmark Storage via private XML, partially served by XEP-0049); XEP-0198 session resumption with full stanza queue persistence on disk; XEP-0191 Blocklist full policy enforcement.
 
-*Architectural extensibility:* Replace the monolithic routing table with a per-XEP module structure and a hook-and-handler dispatch system similar to ejabberd's `gen_mod` architecture. Replace hardcoded `snprintf`-assembled stanzas with typed stanza builder objects, reducing the risk of malformed XML and simplifying addition of new extensions.
+*Architectural extensibility:* Replace the monolithic routing table with a per-XEP module structure and a hook-and-handler dispatch system. Replace hardcoded `snprintf`-assembled stanzas with typed stanza builder objects, reducing the risk of malformed XML and simplifying addition of new extensions.
 
-*Memory management:* Replace the bump allocator with a buddy allocator or slab allocator to support `free()` and sub-page allocations [OSDev_MemAlloc] [OSDev_BrendanMMGuide] [Slab]. Explore 2 MB hugepages for the identity map: the current identity-map construction loop creates ~1,000,000 4 KB PTEs to cover 4 GB; switching to 2 MB pages (Intel SDM Table 4-17: IA-32e PDE mapping a 2 MB page) would reduce this to ~2,048 PDEs, shrinking the page table footprint from ~4 MB to ~16 KB and reducing TLB pressure. Memory swapping is deliberately omitted — disk latency would destroy the sub-millisecond XMPP latency target.
+*Memory management:* Replace the bump allocator with a buddy allocator or slab allocator to support `free()` and sub-page allocations [OSDev_MemAlloc] [OSDev_BrendanMMGuide] [Slab]. 
 
-*PAT and cache optimisation:* Assign the Write-Combining (WC) PAT entry to PCIe prefetchable BAR regions. This would improve DMA throughput for the e1000 NIC's transmit path by allowing CPU store buffers to coalesce writes before they reach the PCIe bus, instead of issuing one uncacheable transaction per descriptor update [IntelSDM, Vol. 3A §11.12].
+*Hardware and platform:* RTC integration for accurate XEP-0203 delay stamps; APIC timer (Local APIC timer register) to replace TSC-based timekeepings; SMP support; real-hardware validation of all metrics.
 
-*Hardware and platform:* RTC integration (via CMOS I/O ports 0x70/0x71 or ACPI HPET) for accurate XEP-0203 delay stamps; APIC timer (Local APIC timer register) to replace TSC-based timekeeping for better frequency invariance across CPU P-states; SMP support (LAPIC IPI-based TLB shootdown for multi-core isolation — currently a single-CPU design); real-hardware validation of all five §9.2 metrics on an Ice Lake or Alder Lake system.
-
-*Disk and I/O:* IDE Bus-Master DMA (~100 MB/s) or full AHCI (~300–600 MB/s) to replace the current ATA PIO path (~16 MB/s); these require approximately 200 and 700 lines of additional driver code respectively [ATA8ACS] [AHCI13].
-
-*External compliance:* Evaluate against compliance.conversations.im and connect.xmpp.net once a public IPv4/IPv6 address and CA-signed certificate are obtained (see §10.3).
-
-*Unikernel deployment alternatives:* AngelicKernel currently targets bare UEFI on x86-64. Alternative deployment bases surveyed during design include: running the same image as a Xen PVH guest (paravirtualised, sub-millisecond boot), packaging as a Unikraft application (POSIX-compatible micro-library framework with existing lwIP and mbedTLS ports), and running under Nabla containers (rumprun-based isolation on a Linux host without a full VM). Each of these would trade the zero-OS property for easier deployment and hardware compatibility, which may be acceptable in production environments [Unikraft] [Nabla] [Rumprun].
+*External compliance:* Evaluate against compliance.conversations.im and connect.xmpp.net once a public IPv4/IPv6 address and CA-signed certificate are obtained.
 
 ---
 
