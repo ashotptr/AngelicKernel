@@ -56,7 +56,7 @@ if [ ! -f OVMF_VARS.fd ]; then
 fi
 
 if [ ! -f data.img ]; then
-    echo "creating data.img (1 mb for persistent XMPP store)"
+    echo "creating data.img (1 mb for persistent xmpp store)"
     qemu-img create -f raw data.img 1M
 fi
 
