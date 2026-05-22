@@ -46,7 +46,6 @@ typedef enum {
 typedef enum {
     STATE_CONNECTED,
     STATE_STARTTLS,
-
     STATE_SASL,
     STATE_AUTHENTICATED,
     STATE_BIND,
