@@ -194,17 +194,12 @@ class MPKSetOffsetCommand(gdb.Command):
                 print(f"current load offset: 0x{_load_offset:016X}")
             else:
                 print("load offset: 0 (not set — section symbols are pre-relocation)")
-
-            print("usage: mpk_set_offset <hex_offset>")
-            print("compute: p/x 0x<runtime_init_network_stack> - (long)&init_network_stack")
-            
+                
             return
         try:
             _load_offset = int(arg, 16)
 
             print(f"✓ load offset set to 0x{_load_offset:016X}")
-            print(f"all section symbols will be shifted by this amount.")
-            print(f"run: mpk_check ptes")
         except ValueError:
             print(f"✗ invalid hex value: '{arg}'")
 
@@ -237,7 +232,7 @@ class MPKCheckCommand(gdb.Command):
             if pkru is not None:
                 decode_pkru(pkru)
             else:
-                print("cannot read pkru via $pkru, 'info registers all', or p/x $pkru")
+                print("cannot read pkru via $pkru")
             if arg == "pkru":
                 return
 
@@ -305,5 +300,3 @@ class MPKCheckCommand(gdb.Command):
 
 MPKCheckCommand()
 print("mpk inspector loaded.")
-print("commands: mpk_check, mpk_check pkru, mpk_check ptes, mpk_check cr4")
-print("mpk_set_offset <hex> — fix efi aslr for pte section walk")
