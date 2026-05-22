@@ -33,7 +33,7 @@ VirtualHost "angelic.local"
     authentication = "internal_plain"
 
 Component "conference.angelic.local" "muc"
-    name = "Benchmark Chat Service"
+    name = "benchmark chat service"
     restrict_room_creation = false
     max_history_messages = 0
 EOF
