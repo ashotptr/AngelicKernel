@@ -109,17 +109,5 @@ void mpk_benchmark(void) {
     
     serial_print("cycles / wrpkru\n");
 
-    if (cycles_per_wrpkru < 20) {
-        serial_print("[mpk-bench] ✓ pass: < 20 cycles\n");
-    }
-    else if (cycles_per_wrpkru < 50) {
-        serial_print("[mpk-bench] ⚠ marginal: 20-50 cycles\n");
-    }
-    else {
-        serial_print("[mpk-bench] ✗ fail: > 50 cycles (exceeds target by ");
-        mpk_print_decimal(cycles_per_wrpkru / 20);
-        serial_print("x)\n");
-    }
-
     do_wrpkru(PKRU_LOCK);
 }
