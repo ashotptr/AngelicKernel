@@ -16,7 +16,7 @@ typedef enum {
 #define MAX_USERS_PER_ROOM 8
 #define MAX_NICK_LEN 32
 #define MAX_ROOM_NAME_LEN 32
-#define MAX_USERS   20
+#define MAX_USERS 20
 
 #define MAX_BANNED_PER_ROOM 8
 
@@ -46,7 +46,6 @@ typedef enum {
 typedef enum {
     STATE_CONNECTED,
     STATE_STARTTLS,
-
     STATE_SASL,
     STATE_AUTHENTICATED,
     STATE_BIND,
