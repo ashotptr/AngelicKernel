@@ -162,15 +162,12 @@ echo "admin port: 127.0.0.1:${ADMIN_PORT} (admin/admin)"
 echo "domain: ${DOMAIN}"
 echo "memory (rss): ${OF_RSS_MB} mb (${OF_RSS_KB} kb)"
 echo
-echo "comparison summary (fill in from actual tsung results):"
-echo "server │ rss idle │ p50 lat │ peak msg/s"
-echo "───────────────────┼──────────┼──────────┼──────────"
-echo "AngelicKernel │ ? mb │ ? ms │ ? "
-echo "prosody 0.12 (lua) │ ? mb│ ? ms │ ? "
-echo "openfire 4.8 (jvm) │ ${OF_RSS_MB} mb│ ? ms │ ? "
+echo "summary"
+echo "server │ rss idle │ "
+echo "openfire │ ${OF_RSS_MB} │ ? "
 
 if [[ ${NO_DOCKER} -eq 0 ]]; then
     info "leaving openfire running for manual testing"
-    info "admin UI: http://localhost:${ADMIN_PORT} (admin/admin)"
+    info "admin ui: http://localhost:${ADMIN_PORT} (admin/admin)"
     info "stop: docker stop ${CONTAINER_NAME} && docker rm ${CONTAINER_NAME}"
 fi
