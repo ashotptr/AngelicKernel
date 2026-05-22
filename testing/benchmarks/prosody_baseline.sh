@@ -79,7 +79,7 @@ for user_pass in "user1:pass1" "user2:pass2" "admin:admin"; do
     pass="${user_pass##*:}"
     docker exec "${CONTAINER_NAME}" \
         sh -c "echo '${pass}' | prosodyctl adduser '${user}@angelic.local'" \
-        2>/dev/null || warn "User ${user} may already exist"
+        2>/dev/null || warn "user ${user} may already exist"
 done
 
 ok "test users created"
@@ -102,7 +102,6 @@ fi
 if [[ ${SKIP_BENCH} -eq 0 ]]; then
     if ! command -v tsung &>/dev/null; then
         warn "tsung not found, skipping benchmark"
-        warn "install with: sudo apt install tsung"
     else
         info "generating tsung scenario for prosody (port ${PROSODY_PORT})"
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,21 +121,11 @@ if [[ ${SKIP_BENCH} -eq 0 ]]; then
 fi
 
 echo
-echo "prosody baseline summary"
+echo "prosody summary"
 echo "container: ${CONTAINER_NAME}"
 echo "port: 127.0.0.1:${PROSODY_PORT}"
 echo "domain: ${DOMAIN}"
 echo "memory (RSS): ${PROSODY_RSS_MB} mb (${PROSODY_RSS_KB} kb)"
-echo
-echo "AngelicKernel comparison:"
-echo "boot footprint: ~512 mb allocated qemu ram"
-echo "xmpp server: embedded in kernel image"
-echo "no os/libc overhead: bare-metal unikernel"
-echo
-echo "to measure AngelicKernel memory during runtime:"
-echo "(from host while qemu is running)"
-echo "ps aux | grep qemu # see resident set size"
-echo "cat /proc/\$(pgrep qemu)/status | grep VmRSS"
 
 info "leaving prosody running for manual testing"
 info "stop with: docker stop ${CONTAINER_NAME} && docker rm ${CONTAINER_NAME}"
