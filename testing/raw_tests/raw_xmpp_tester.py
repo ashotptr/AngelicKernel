@@ -1164,7 +1164,7 @@ def test_disco_info_server(host, port):
 
         resp = c.recv_until("</iq>", timeout=RECV_TIMEOUT)
 
-        record("disco#info → IQ result (XEP-0030 §3)", "type='result'" in resp or 'type="result"' in resp, f"got: {resp[:400]}")
+        record("disco#info → iq result (xep-0030 §3)", "type='result'" in resp or 'type="result"' in resp, f"got: {resp[:400]}")
         record("disco#info → <identity> present", "<identity" in resp, f"got: {resp[:400]}")
         record("disco#info → muc feature advertised", "jabber.org/protocol/muc" in resp, f"got: {resp[:400]}")
 
