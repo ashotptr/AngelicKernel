@@ -113,7 +113,7 @@ typedef struct {
     int members_only;
 
     char banned_jids[MAX_BANNED_PER_ROOM][64];
-    int  banned_count;
+    int banned_count;
 
     char subject[256];
 } room_t;
@@ -192,7 +192,7 @@ typedef struct {
 extern const xmpp_credential_t xmpp_credentials[];
 extern const int xmpp_credential_count;
 
-#define MAX_OFFLINE_MSGS  32
+#define MAX_OFFLINE_MSGS 32
 
 typedef struct {
     char from[64];
@@ -205,7 +205,7 @@ typedef struct {
 
 extern offline_msg_t offline_store[MAX_OFFLINE_MSGS];
 
-#define MAX_PENDING_SUBS  32
+#define MAX_PENDING_SUBS 32
 
 typedef struct {
     char type[16];
@@ -255,7 +255,7 @@ void xmpp_sm_send_ack(xmpp_client_ctx_t *ctx);
 void xmpp_sm_request_ack(xmpp_client_ctx_t *ctx);
 void xmpp_sm_on_stanza_received(xmpp_client_ctx_t *ctx);
 void xmpp_sm_on_stanza_sent(xmpp_client_ctx_t *ctx);
-int  xmpp_sm_handle_element(xmpp_client_ctx_t *ctx);
+int xmpp_sm_handle_element(xmpp_client_ctx_t *ctx);
 
 void mpk_benchmark(void); 
 
