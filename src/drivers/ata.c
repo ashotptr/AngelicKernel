@@ -167,7 +167,7 @@ int ata_init(void) {
     }
 
     if (!found) {
-        serial_print("[ata] No ATA drives detected on primary channel\n");
+        serial_print("[ata] No ata drives detected on primary channel\n");
     }
 
     return found;
