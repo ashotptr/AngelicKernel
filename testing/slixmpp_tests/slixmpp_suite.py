@@ -159,14 +159,7 @@ class TestClient(ClientXMPP):
             return False
 
         return True
-
-    # async def stop(self):
-    #     try:
-    #         self.disconnect()
-
-    #         await asyncio.sleep(2.0)
-    #     except Exception:
-    #         pass
+    
     async def stop(self):
         try:
             disc_event = asyncio.Event()
@@ -203,7 +196,7 @@ async def test_connect_and_session(host, port):
     try:
         ok_flag = await c.start()
         
-        record("session start completes (tls + sasl PLAIN + bind)", ok_flag, "timed out" if not ok_flag else "")
+        record("session start completes (tls + sasl plain + bind)", ok_flag, "timed out" if not ok_flag else "")
         
         if ok_flag:
             record("bound jid contains username and domain", DOMAIN in str(c.boundjid), str(c.boundjid))
@@ -288,7 +281,7 @@ async def test_direct_message(host, port):
         record("direct message delivered (rfc 6121 §5)", msg is not None, f"body: {body}")
 
         if msg:
-            record("message from= is sender (RFC 6120 §8.1.2)", "user1" in str(msg["from"]), str(msg["from"]))
+            record("message from= is sender (rfc 6120 §8.1.2)", "user1" in str(msg["from"]), str(msg["from"]))
     finally:
         await sender.stop()
         await recvr.stop()
