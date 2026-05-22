@@ -884,9 +884,9 @@ void handle_version(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     snprintf(response, sizeof(response),
         "<iq type='result' id='%s' from='angelic.local' to='%s'>"
           "<query xmlns='jabber:iq:version'>"
-            "<name>AngelicKernel XMPP</name>"
+            "<name>AngelicKernel xmpp</name>"
             "<version>1.0</version>"
-            "<os>Bare Metal UEFI</os>"
+            "<os>bare metal uefi</os>"
           "</query>"
         "</iq>",
         stanza->id, ctx->full_jid);
@@ -1260,47 +1260,47 @@ void handle_muc_owner(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
                   "</field>"
                   "<field type='text-single'"
                          " var='muc#roomconfig_roomname'"
-                         " label='Room Name'>"
+                         " label='room name'>"
                     "<value>%s</value>"
                   "</field>"
                   "<field type='text-single'"
                          " var='muc#roomconfig_roomdesc'"
-                         " label='Short Description of Room'>"
+                         " label='short description of room'>"
                     "<value></value>"
                   "</field>"
                   "<field type='boolean'"
                          " var='muc#roomconfig_persistentroom'"
-                         " label='Make Room Persistent'>"
+                         " label='make room persistent'>"
                     "<value>%d</value>"
                   "</field>"
                   "<field type='boolean'"
                          " var='muc#roomconfig_publicroom'"
-                         " label='Make Room Publicly Listed'>"
+                         " label='make room publicly listed'>"
                     "<value>%d</value>"
                   "</field>"
                   "<field type='boolean'"
                          " var='muc#roomconfig_moderatedroom'"
-                         " label='Enable Moderation'>"
+                         " label='enable moderation'>"
                     "<value>%d</value>"
                   "</field>"
                   "<field type='boolean'"
                          " var='muc#roomconfig_membersonly'"
-                         " label='Make Room Members-Only'>"
+                         " label='make room members-only'>"
                     "<value>%d</value>"
                   "</field>"
                   "<field type='boolean'"
                          " var='muc#roomconfig_allowinvites'"
-                         " label='Allow Occupants to Invite Others'>"
+                         " label='allow occupants to invite others'>"
                     "<value>%d</value>"
                   "</field>"
                   "<field type='list-single'"
                          " var='muc#roomconfig_whois'"
-                         " label='Who Can See Occupant Real JIDs'>"
+                         " label='who can see occupant real jids'>"
                     "<value>%s</value>"
-                    "<option label='Moderators Only'>"
+                    "<option label='moderators only'>"
                       "<value>moderators</value>"
                     "</option>"
-                    "<option label='Anyone'>"
+                    "<option label='anyone'>"
                       "<value>anyone</value>"
                     "</option>"
                   "</field>"
@@ -1415,7 +1415,7 @@ void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         snprintf(response, sizeof(response),
             "<iq type='result' from='%s' to='%s' id='%s'>"
               "<query xmlns='http://jabber.org/protocol/disco#info'>"
-                "<identity category='conference' type='text' name='Chat Service'/>"
+                "<identity category='conference' type='text' name='chat service'/>"
                 "<feature var='http://jabber.org/protocol/muc'/>"
               "</query>"
             "</iq>",
@@ -1501,7 +1501,7 @@ void handle_disco_info(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         snprintf(response, sizeof(response),
             "<iq type='result' from='%s' to='%s' id='%s'>"
               "<query xmlns='http://jabber.org/protocol/disco#info'>"
-                "<identity category='server' type='im' name='Unikernel XMPP'/>"
+                "<identity category='server' type='im' name='unikernel xmpp'/>"
                 "<feature var='http://jabber.org/protocol/muc'/>"
                 "<feature var='jabber:iq:register'/>"
                 "<feature var='msgoffline'/>"
@@ -1608,7 +1608,7 @@ void handle_disco_items(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
         snprintf(response, sizeof(response),
             "<iq type='result' from='%s' to='%s' id='%s'>"
               "<query xmlns='http://jabber.org/protocol/disco#items'>"
-                "<item jid='conference.angelic.local' name='Chatroom Service'/>"
+                "<item jid='conference.angelic.local' name='chatroom service'/>"
               "</query>"
             "</iq>",
             (strlen(stanza->to) > 0) ? stanza->to : "angelic.local",
@@ -2378,7 +2378,7 @@ void handle_muc_presence(xmpp_client_ctx_t *ctx, xmpp_stanza_t *stanza) {
     send_raw(ctx, response);
     
     {
-        const char *room_subject = (r->subject[0] != '\0') ? r->subject : "Welcome to the Unikernel Lobby";
+        const char *room_subject = (r->subject[0] != '\0') ? r->subject : "unikernel lobby";
         snprintf(response, sizeof(response),
             "<message from='%s' to='%s' type='groupchat'>"
               "<subject>%s</subject>"
